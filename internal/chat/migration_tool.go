@@ -251,14 +251,14 @@ func migrationToolMissingToken(result migration.Result) string {
 	}{
 		Status:  "configuration_required",
 		Code:    "missing_hcloud_token",
-		Message: "HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first. No provider create request was sent.",
+		Message: "HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first.",
 	}
 	response.MigrationStatus = result.Status
 	response.MonitorID = result.MonitorID
 	response.ManualReview = result.ManualReview
 	data, err := json.Marshal(response)
 	if err != nil {
-		return `{"status":"configuration_required","code":"missing_hcloud_token","message":"HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first. No provider create request was sent."}`
+		return `{"status":"configuration_required","code":"missing_hcloud_token","message":"HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first."}`
 	}
 	return string(data)
 }

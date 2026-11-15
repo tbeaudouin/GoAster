@@ -64,7 +64,8 @@ func NewStoreAt(path string) *Store {
 
 // ReadSavedFile returns the default saved environment file as bounded bytes.
 // It validates the private file and its settings without returning values in
-// an error. Callers must keep the returned bytes out of model and log paths.
+// an error. A missing file returns empty bytes. Callers must keep the returned
+// bytes out of model and log paths.
 func ReadSavedFile() ([]byte, error) {
 	store, err := NewStore()
 	if err != nil {
@@ -227,6 +228,9 @@ func (s Store) readSavedFile() ([]byte, error) {
 		return nil, err
 	}
 	info, err := os.Lstat(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return []byte{}, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("inspect environment settings: %w", err)
 	}

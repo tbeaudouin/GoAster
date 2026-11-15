@@ -67,6 +67,11 @@ func TestLoadHetznerTokenDistinguishesMissingMalformedAndUnreadableSettings(t *t
 		t.Fatalf("malformed settings error = %v", err)
 	}
 
+	t.Setenv("HCLOUD_TOKEN", "synthetic-process-token")
+	if _, err := loadHetznerToken(); err == nil || errors.Is(err, ErrHetznerTokenMissing) {
+		t.Fatalf("malformed settings with process token error = %v", err)
+	}
+	t.Setenv("HCLOUD_TOKEN", "")
 	if err := os.WriteFile(settingsPath, []byte("HCLOUD_TOKEN=synthetic token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}

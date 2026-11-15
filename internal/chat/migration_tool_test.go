@@ -160,7 +160,7 @@ func TestMigrationToolReportsMissingHetznerTokenConfiguration(t *testing.T) {
 	}
 	if response.Status != "configuration_required" || response.Code != "missing_hcloud_token" ||
 		!strings.Contains(response.Message, "Add HCLOUD_TOKEN using /env first") ||
-		!strings.Contains(response.Message, "No provider create request was sent") ||
+		strings.Contains(response.Message, "No provider create request") ||
 		response.MigrationStatus != "manual_review" || response.MonitorID != "migration-synthetic" || !response.ManualReview {
 		t.Fatalf("missing-token result = %#v (%s)", response, result)
 	}

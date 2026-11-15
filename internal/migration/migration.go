@@ -766,12 +766,13 @@ func loadHetznerToken() (string, error) {
 	if err == nil {
 		err = store.Load()
 	}
-	if err == nil {
-		if token, ok := store.Values()["HCLOUD_TOKEN"]; ok {
-			savedTokenFound = true
-			if validHetznerToken(token) {
-				return token, nil
-			}
+	if err != nil {
+		return "", fmt.Errorf("load Hetzner settings: %w", err)
+	}
+	if token, ok := store.Values()["HCLOUD_TOKEN"]; ok {
+		savedTokenFound = true
+		if validHetznerToken(token) {
+			return token, nil
 		}
 	}
 	environmentTokenInvalid := false
@@ -780,9 +781,6 @@ func loadHetznerToken() (string, error) {
 			return token, nil
 		}
 		environmentTokenInvalid = true
-	}
-	if err != nil {
-		return "", fmt.Errorf("load Hetzner settings: %w", err)
 	}
 	if savedTokenFound || environmentTokenInvalid {
 		return "", errors.New("Hetzner token is invalid")
