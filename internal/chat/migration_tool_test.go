@@ -138,3 +138,53 @@ func TestMigrationToolReportsUnconfirmedStop(t *testing.T) {
 	}
 
 }
+
+func TestMigrationToolReportsMissingHetznerTokenConfiguration(t *testing.T) {
+	operations := MigrationToolOperations{Start: func(context.Context, migration.Request) (migration.Result, error) {
+		return migration.Result{Status: "manual_review", MonitorID: "migration-synthetic", ManualReview: true}, errors.Join(errors.New("synthetic-secret-value"), migration.ErrHetznerTokenMissing)
+	}}
+	result, err := executeMigrationTool(WithConversationType(context.Background(), "private"), `{"action":"start","server_type":"cx22"}`, operations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Status          string `json:"status"`
+		Code            string `json:"code"`
+		Message         string `json:"message"`
+		MigrationStatus string `json:"migration_status"`
+		MonitorID       string `json:"monitor_id"`
+		ManualReview    bool   `json:"manual_review"`
+	}
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("missing-token result is not JSON: %q: %v", result, err)
+	}
+	if response.Status != "configuration_required" || response.Code != "missing_hcloud_token" ||
+		!strings.Contains(response.Message, "Add HCLOUD_TOKEN using /env first") ||
+		!strings.Contains(response.Message, "No provider create request was sent") ||
+		response.MigrationStatus != "manual_review" || response.MonitorID != "migration-synthetic" || !response.ManualReview {
+		t.Fatalf("missing-token result = %#v (%s)", response, result)
+	}
+	if strings.Contains(result, "synthetic-secret-value") || strings.Contains(result, "manual review; no action was repeated") {
+		t.Fatalf("missing-token result leaked a cause or used the generic response: %s", result)
+	}
+
+	estimateOperations := MigrationToolOperations{Estimate: func(context.Context, migration.PriceRequest) (migration.PriceEstimate, error) {
+		return migration.PriceEstimate{}, migration.ErrHetznerTokenMissing
+	}}
+	estimateResult, err := executeMigrationTool(context.Background(), `{"action":"estimate","server_type":"cx22"}`, estimateOperations)
+	if err != nil || !strings.Contains(estimateResult, `"code":"missing_hcloud_token"`) || !strings.Contains(estimateResult, "Add HCLOUD_TOKEN using /env first") {
+		t.Fatalf("missing-token estimate result = %q, %v", estimateResult, err)
+	}
+}
+
+func TestMigrationToolKeepsMalformedCredentialFailureUnavailable(t *testing.T) {
+	operations := MigrationToolOperations{Start: func(context.Context, migration.Request) (migration.Result, error) {
+		return migration.Result{Status: "manual_review", ManualReview: true}, errors.New("malformed settings contain synthetic-secret-value")
+	}}
+	result, err := executeMigrationTool(WithConversationType(context.Background(), "private"), `{"action":"start","server_type":"cx22"}`, operations)
+	if err != nil || !strings.Contains(result, `"status":"unavailable"`) ||
+		strings.Contains(result, "missing_hcloud_token") || strings.Contains(result, "synthetic-secret-value") ||
+		strings.Contains(result, "Add HCLOUD_TOKEN using /env first") {
+		t.Fatalf("malformed-credential result = %q, %v", result, err)
+	}
+}

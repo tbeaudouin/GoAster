@@ -46,6 +46,76 @@ func newMachineFixture(t *testing.T) *machineFixture {
 	return fixture
 }
 
+func TestLoadHetznerTokenDistinguishesMissingMalformedAndUnreadableSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HCLOUD_TOKEN", "synthetic-process-token")
+	if err := os.Unsetenv("HCLOUD_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadHetznerToken(); !errors.Is(err, ErrHetznerTokenMissing) {
+		t.Fatalf("missing token error = %v, want ErrHetznerTokenMissing", err)
+	}
+
+	settingsPath := filepath.Join(home, ".goaster", "env")
+	if err := os.WriteFile(settingsPath, []byte("HCLOUD_TOKEN=synthetic-secret-value\nnot-a-setting\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHetznerToken(); err == nil || errors.Is(err, ErrHetznerTokenMissing) || strings.Contains(err.Error(), "synthetic-secret-value") {
+		t.Fatalf("malformed settings error = %v", err)
+	}
+
+	if err := os.WriteFile(settingsPath, []byte("HCLOUD_TOKEN=synthetic token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHetznerToken(); err == nil || errors.Is(err, ErrHetznerTokenMissing) || strings.Contains(err.Error(), "synthetic token") {
+		t.Fatalf("invalid saved token error = %v", err)
+	}
+
+	if err := os.Remove(settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(settingsPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHetznerToken(); err == nil || errors.Is(err, ErrHetznerTokenMissing) {
+		t.Fatalf("unreadable settings path error = %v", err)
+	}
+}
+
+func TestEstimatePriceOptionalPropagatesMissingToken(t *testing.T) {
+	_, err := EstimatePriceOptional(t.Context(), PriceRequest{ServerType: "cx22"}, Options{
+		LoadHetznerToken: func() (string, error) { return "", ErrHetznerTokenMissing },
+	})
+	if !errors.Is(err, ErrHetznerTokenMissing) {
+		t.Fatalf("missing-token estimate error = %v", err)
+	}
+}
+
+func TestStartMonitorReturnsMissingTokenCauseAfterStoppingMonitor(t *testing.T) {
+	fixture := newMachineFixture(t)
+	jobs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := fixture.options(t.TempDir())
+	options.LoadHetznerToken = func() (string, error) { return "", ErrHetznerTokenMissing }
+	options.DeliverHandoff = func(context.Context, []byte) error { return nil }
+	result, err := StartMonitor(t.Context(), Request{ServerType: "cx22", JobID: "migration-missing-token"}, options, jobs)
+	if !errors.Is(err, ErrHetznerTokenMissing) || result.Status != "manual_review" || !result.ManualReview {
+		t.Fatalf("missing-token start = %#v, %v", result, err)
+	}
+	job, ok := jobs.Get(result.MonitorID)
+	if !ok || job.Enabled {
+		t.Fatalf("missing-token monitor = %#v, exists=%v", job, ok)
+	}
+	if fixture.availability.Load() != 0 || fixture.creates.Load() != 0 {
+		t.Fatalf("missing-token start reached provider: availability=%d creates=%d", fixture.availability.Load(), fixture.creates.Load())
+	}
+}
+
 func (fixture *machineFixture) handle(writer http.ResponseWriter, request *http.Request) {
 	if request.Header.Get("Origin") != "" {
 		writeJSONStatus(writer, http.StatusBadRequest, map[string]string{"error": "origin"})

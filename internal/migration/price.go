@@ -109,7 +109,8 @@ func EstimatePrice(ctx context.Context, request PriceRequest, options Options) (
 
 // EstimatePriceOptional performs the same bounded read-only lookup as
 // EstimatePrice, but treats provider-side pricing failure as an unavailable
-// informational estimate. Invalid caller input and cancellation remain errors.
+// informational estimate. Missing credentials, invalid caller input, and
+// cancellation remain errors so callers can provide configuration guidance.
 // The provider cause is recorded through the safe diagnostics boundary; an
 // unavailable estimate never authorizes a billable operation.
 func EstimatePriceOptional(ctx context.Context, request PriceRequest, options Options) (PriceEstimate, error) {
@@ -121,6 +122,9 @@ func EstimatePriceOptional(ctx context.Context, request PriceRequest, options Op
 		return result, nil
 	}
 	if errors.Is(err, context.Canceled) {
+		return PriceEstimate{}, err
+	}
+	if errors.Is(err, ErrHetznerTokenMissing) {
 		return PriceEstimate{}, err
 	}
 	diagnostics.Error("migration.price_estimate", err)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"path"
@@ -689,9 +690,13 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		}
 		data, err := localenv.ReadSavedFile()
 		if err != nil {
-			diagnostics.Error("telegram.environment.read", err)
-			a.send(ctx, m.Chat.ID, "The environment file is unavailable.")
-			return
+			if errors.Is(err, fs.ErrNotExist) {
+				data = []byte{}
+			} else {
+				diagnostics.Error("telegram.environment.read", err)
+				a.send(ctx, m.Chat.ID, "The environment file is unavailable.")
+				return
+			}
 		}
 		if err := sendDocument(ctx, a.client, a.apiBase, a.token, m.Chat.ID, telegramEnvironmentFilename, data); err != nil {
 			a.send(ctx, m.Chat.ID, "The environment file could not be sent.")

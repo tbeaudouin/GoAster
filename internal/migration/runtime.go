@@ -154,9 +154,12 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 		result.ManualReview = false
 		return result, errors.Join(runErr, fmt.Errorf("monitor stop could not be confirmed: %w", disableErr))
 	}
-	diagnostics.Error("migration.monitor.start", runErr, diagnostics.Field{Key: "reason", Value: "manual review required"})
 	result.Status = "manual_review"
 	result.ManualReview = true
+	if errors.Is(runErr, ErrHetznerTokenMissing) {
+		return result, runErr
+	}
+	diagnostics.Error("migration.monitor.start", runErr, diagnostics.Field{Key: "reason", Value: "manual review required"})
 	return result, nil
 }
 

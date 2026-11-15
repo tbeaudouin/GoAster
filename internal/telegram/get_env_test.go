@@ -26,7 +26,7 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var documentBody []byte
+	var documentBodies [][]byte
 	messageCount := 0
 	a := adapter{
 		token:   testToken,
@@ -36,13 +36,14 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/sendDocument"):
 				var err error
-				documentBody, err = io.ReadAll(r.Body)
+				documentBody, err := io.ReadAll(r.Body)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data; boundary=") {
 					t.Fatalf("sendDocument content type = %q", r.Header.Get("Content-Type"))
 				}
+				documentBodies = append(documentBodies, documentBody)
 				return response(http.StatusOK, `{"ok":true,"result":true}`), nil
 			case strings.HasSuffix(r.URL.Path, "/sendMessage"):
 				messageCount++
@@ -70,14 +71,39 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 	if messageCount != 0 {
 		t.Fatalf("/get-env sent %d text messages, want only the document", messageCount)
 	}
-	if len(documentBody) == 0 || !bytes.Contains(documentBody, []byte(`name="chat_id"`)) || !bytes.Contains(documentBody, []byte("\r\n\r\n42\r\n")) {
-		t.Fatalf("sendDocument did not target the authorized private chat; body length = %d", len(documentBody))
+	if len(documentBodies) != 1 || len(documentBodies[0]) == 0 || !bytes.Contains(documentBodies[0], []byte(`name="chat_id"`)) || !bytes.Contains(documentBodies[0], []byte("\r\n\r\n42\r\n")) {
+		t.Fatalf("sendDocument did not target the authorized private chat; bodies = %d", len(documentBodies))
 	}
-	if !bytes.Contains(documentBody, []byte(`filename="goaster.env"`)) {
+	if !bytes.Contains(documentBodies[0], []byte(`filename="goaster.env"`)) {
 		t.Fatal("sendDocument did not use the goaster.env filename")
 	}
-	if !bytes.Contains(documentBody, []byte("API_TOKEN=synthetic-secret\nSERVICE_REGION=test-region\n")) {
+	if !bytes.Contains(documentBodies[0], []byte("API_TOKEN=synthetic-secret\nSERVICE_REGION=test-region\n")) {
 		t.Fatal("sendDocument did not contain the saved file bytes")
+	}
+
+	if err := os.RemoveAll(filepath.Join(home, ".goaster")); err != nil {
+		t.Fatal(err)
+	}
+	a.handle(context.Background(), privateMessage(42, telegramGetEnvironmentCommand))
+	if len(documentBodies) != 2 {
+		t.Fatalf("sendDocument calls after missing file = %d, want 2", len(documentBodies))
+	}
+	missingDocument := documentBodies[1]
+	filenameAt := bytes.Index(missingDocument, []byte(`filename="goaster.env"`))
+	if filenameAt < 0 {
+		t.Fatal("empty sendDocument did not use the goaster.env filename")
+	}
+	contentAt := bytes.Index(missingDocument[filenameAt:], []byte("\r\n\r\n"))
+	if contentAt < 0 {
+		t.Fatal("empty sendDocument document part had no content header")
+	}
+	contentAt += filenameAt + len("\r\n\r\n")
+	contentEnd := bytes.Index(missingDocument[contentAt:], []byte("\r\n--"))
+	if contentEnd < 0 || contentEnd != 0 {
+		t.Fatalf("missing environment export was not empty: %q", missingDocument[contentAt:])
+	}
+	if messageCount != 0 {
+		t.Fatalf("missing environment file sent %d text messages, want only the empty document", messageCount)
 	}
 }
 

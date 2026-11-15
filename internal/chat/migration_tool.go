@@ -136,7 +136,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		result, err := estimate(ctx, request)
 		if err != nil {
-			return migrationToolUnavailable(err), nil
+			return migrationToolOperationFailure(err, migration.Result{}), nil
 		}
 		return encodeMigrationToolResult(result)
 	case "availability":
@@ -145,7 +145,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		result, err := operations.Availability(ctx, request)
 		if err != nil {
-			return migrationToolUnavailable(err), nil
+			return migrationToolOperationFailure(err, migration.Result{}), nil
 		}
 		return encodeMigrationToolResult(result)
 	case "start":
@@ -166,11 +166,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 			Locations:  parsed.Locations,
 		})
 		if err != nil {
-			if result.Status == "stop_unconfirmed" || result.Status == "in_progress" {
-				diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "migration monitor state requires attention"})
-				return encodeMigrationToolResult(result)
-			}
-			return migrationToolUnavailable(err), nil
+			return migrationToolOperationFailure(err, result), nil
 		}
 		return encodeMigrationToolResult(result)
 	case "status":
@@ -179,7 +175,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		result, err := operations.Status(ctx, parsed.JobID)
 		if err != nil {
-			return migrationToolUnavailable(err), nil
+			return migrationToolOperationFailure(err, migration.Result{}), nil
 		}
 		return encodeMigrationToolResult(result)
 	case "stop":
@@ -188,7 +184,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		result, err := operations.Stop(ctx, parsed.JobID)
 		if err != nil {
-			return migrationToolUnavailable(err), nil
+			return migrationToolOperationFailure(err, result), nil
 		}
 		return encodeMigrationToolResult(result)
 	default:
@@ -226,4 +222,43 @@ func migrationToolRejected(err error) string {
 func migrationToolUnavailable(err error) string {
 	diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "migration capability or operation unavailable"})
 	return `{"status":"unavailable","message":"Migration is unavailable or needs manual review; no action was repeated."}`
+}
+
+func migrationToolOperationFailure(err error, result migration.Result) string {
+	if errors.Is(err, migration.ErrHetznerTokenMissing) {
+		diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "HCLOUD_TOKEN is not configured"})
+		return migrationToolMissingToken(result)
+	}
+	if result.Status == "stop_unconfirmed" || result.Status == "in_progress" {
+		encoded, encodeErr := encodeMigrationToolResult(result)
+		if encodeErr != nil {
+			return migrationToolUnavailable(errors.Join(err, encodeErr))
+		}
+		diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "migration monitor state requires attention"})
+		return encoded
+	}
+	return migrationToolUnavailable(err)
+}
+
+func migrationToolMissingToken(result migration.Result) string {
+	response := struct {
+		Status          string `json:"status"`
+		Code            string `json:"code"`
+		Message         string `json:"message"`
+		MigrationStatus string `json:"migration_status,omitempty"`
+		MonitorID       string `json:"monitor_id,omitempty"`
+		ManualReview    bool   `json:"manual_review,omitempty"`
+	}{
+		Status:  "configuration_required",
+		Code:    "missing_hcloud_token",
+		Message: "HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first. No provider create request was sent.",
+	}
+	response.MigrationStatus = result.Status
+	response.MonitorID = result.MonitorID
+	response.ManualReview = result.ManualReview
+	data, err := json.Marshal(response)
+	if err != nil {
+		return `{"status":"configuration_required","code":"missing_hcloud_token","message":"HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first. No provider create request was sent."}`
+	}
+	return string(data)
 }

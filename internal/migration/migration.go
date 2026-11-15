@@ -51,6 +51,8 @@ var (
 	errInvalidRequest      = errors.New("invalid migration request")
 	errManualReview        = errors.New("migration requires manual inspection")
 	errLegacyPriceApproval = errors.New("legacy migration price approval fields are unsupported")
+	// ErrHetznerTokenMissing identifies an absent HCLOUD_TOKEN setting.
+	ErrHetznerTokenMissing = errors.New("HCLOUD_TOKEN is missing")
 )
 
 // Request is the non-secret migration request. The legacy approved price
@@ -760,21 +762,32 @@ func currentTime(now func() time.Time) time.Time {
 
 func loadHetznerToken() (string, error) {
 	store, err := localenv.NewStore()
+	savedTokenFound := false
 	if err == nil {
 		err = store.Load()
 	}
 	if err == nil {
-		if token := store.Values()["HCLOUD_TOKEN"]; validHetznerToken(token) {
-			return token, nil
+		if token, ok := store.Values()["HCLOUD_TOKEN"]; ok {
+			savedTokenFound = true
+			if validHetznerToken(token) {
+				return token, nil
+			}
 		}
 	}
-	if token, ok := os.LookupEnv("HCLOUD_TOKEN"); ok && validHetznerToken(token) {
-		return token, nil
+	environmentTokenInvalid := false
+	if token, ok := os.LookupEnv("HCLOUD_TOKEN"); ok && token != "" {
+		if validHetznerToken(token) {
+			return token, nil
+		}
+		environmentTokenInvalid = true
 	}
 	if err != nil {
 		return "", fmt.Errorf("load Hetzner settings: %w", err)
 	}
-	return "", errors.New("Hetzner token is unavailable")
+	if savedTokenFound || environmentTokenInvalid {
+		return "", errors.New("Hetzner token is invalid")
+	}
+	return "", ErrHetznerTokenMissing
 }
 
 func validHetznerToken(value string) bool {
