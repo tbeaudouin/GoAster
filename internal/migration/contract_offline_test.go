@@ -94,6 +94,10 @@ func TestContractUnavailableRestartCreateOnce(t *testing.T) {
 	if err = ScheduledExecutor(t.Context(), job.Message, jobs, options); err == nil || creates != 1 {
 		t.Fatal("create retried")
 	}
+	again, err := StartMonitor(t.Context(), Request{ServerType: "cx32"}, options, jobs)
+	if err != nil || again.ServerType != "cx22" || again.Diagnostic.Code != codeCreated || again.Diagnostic.CreationState != creationCreated || creates != 1 {
+		t.Fatalf("terminal restart: %+v %v creates=%d", again, err, creates)
+	}
 	encoded, _ := json.Marshal(result)
 	if bytes.Contains(encoded, []byte(first.OperationCapability)) || bytes.Contains(encoded, []byte("PRIVATE KEY")) {
 		t.Fatal("secret in result")

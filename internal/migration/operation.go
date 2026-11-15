@@ -157,7 +157,7 @@ func loadOperation(dir, job string, request Request, recipient int64) (operation
 func markDispatch(dir, job string) error {
 	_, err := protectedfile.WriteExclusive(filepath.Join(dir, job+".create_dispatching"), []byte("create_dispatching\n"))
 	if err != nil {
-		return errors.Join(errManualReview, err)
+		return errors.Join(ErrProtectedStorage, errManualReview, err)
 	}
 	return nil
 }

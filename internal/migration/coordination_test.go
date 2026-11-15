@@ -62,8 +62,8 @@ func TestOfflineClaimCoordinatesImmediateCheck(t *testing.T) {
 		t.Fatalf("stop running job: %v", err)
 	}
 	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if err := <-done; err == nil {
+		t.Fatal("immediate availability failure was swallowed")
 	}
 	job, ok := jobs.Get(request.JobID)
 	if !ok || job.Enabled || !job.ReviewRequired {
@@ -92,7 +92,7 @@ func TestOfflineVerificationFailureStopsMonitor(t *testing.T) {
 				if err == nil || !job.Enabled || result.ManualReview {
 					t.Fatalf("unconfirmed stop: %+v %v %+v", result, err, job)
 				}
-			} else if err != nil || job.Enabled || !result.ManualReview {
+			} else if err == nil || job.Enabled || !result.ManualReview || !result.Diagnostic.MonitoringStopped {
 				t.Fatalf("confirmed stop: %+v %v %+v", result, err, job)
 			}
 		})
@@ -196,7 +196,7 @@ func TestClaimRejectsChangedMessageAndSchedule(t *testing.T) {
 						t.Fatal("job did not run")
 					}
 				} else {
-					if result, err := StartMonitor(t.Context(), req, opts, wrapped); err != nil || !result.ManualReview {
+					if result, err := StartMonitor(t.Context(), req, opts, wrapped); err == nil || !result.ManualReview {
 						t.Fatalf("result=%+v err=%v", result, err)
 					}
 				}
@@ -210,12 +210,18 @@ func TestClaimRejectsChangedMessageAndSchedule(t *testing.T) {
 }
 
 func TestRunDueAvailableCreateLostResponseAndStop(t *testing.T) {
-	for _, scenario := range []string{"created", "lost_response", "stop_during_availability"} {
+	for _, scenario := range []string{"created", "lost_response", "delivery_failed", "stop_during_availability"} {
 		t.Run(scenario, func(t *testing.T) {
 			now := time.Unix(1800000000, 0).UTC()
 			started, release := make(chan struct{}), make(chan struct{})
 			availability, creates, deliveries := 0, 0, 0
-			options := Options{TempDirectory: t.TempDir(), MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, WebOrigin: "https://example.invalid", Now: func() time.Time { return now }, LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { deliveries++; return nil }, HTTPClient: offlineDoer(func(r *http.Request) (*http.Response, error) {
+			options := Options{TempDirectory: t.TempDir(), MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, WebOrigin: "https://example.invalid", Now: func() time.Time { return now }, LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error {
+				deliveries++
+				if scenario == "delivery_failed" {
+					return errors.New("synthetic delivery failure")
+				}
+				return nil
+			}, HTTPClient: offlineDoer(func(r *http.Request) (*http.Response, error) {
 				switch r.URL.Path {
 				case "/migration/v1/machines/availability":
 					availability++
@@ -284,6 +290,11 @@ func TestRunDueAvailableCreateLostResponseAndStop(t *testing.T) {
 			if scenario == "lost_response" {
 				if !job.ReviewRequired || deliveries != 0 {
 					t.Fatalf("lost response job=%+v deliveries=%d", job, deliveries)
+				}
+			} else if scenario == "delivery_failed" {
+				status, statusErr := MigrationStatusWithOptions(req.JobID, jobs, options)
+				if statusErr != nil || !job.ReviewRequired || deliveries != 1 || status.Diagnostic.CreationState != creationCreated {
+					t.Fatalf("delivery failure job=%+v status=%+v err=%v", job, status.Diagnostic, statusErr)
 				}
 			} else if job.ReviewRequired || deliveries != 1 {
 				t.Fatalf("job=%+v deliveries=%d", job, deliveries)

@@ -261,12 +261,6 @@ func newMigrationScheduler(options migration.Options) (migrationSchedulerRuntime
 
 func migrationOperations(options migration.Options, jobs migrationSchedulerRuntime, ready bool) chat.MigrationToolOperations {
 	return chat.MigrationToolOperations{
-		Estimate: func(ctx context.Context, request migration.PriceRequest) (migration.PriceEstimate, error) {
-			return migration.EstimatePriceOptional(ctx, request, options)
-		},
-		Availability: func(ctx context.Context, request migration.PriceRequest) (migration.AvailabilityResult, error) {
-			return migration.Availability(ctx, request, options)
-		},
 		Start: func(ctx context.Context, request migration.Request) (migration.Result, error) {
 			if !ready || jobs == nil {
 				return migration.Result{Status: "unavailable", ServerType: request.ServerType}, errors.New("migration scheduler capability is unavailable")
@@ -277,13 +271,13 @@ func migrationOperations(options migration.Options, jobs migrationSchedulerRunti
 			if !ready || jobs == nil {
 				return migration.StatusResult{}, errors.New("migration scheduler capability is unavailable")
 			}
-			return migration.MigrationStatus(jobID, jobs)
+			return migration.MigrationStatusWithOptions(jobID, jobs, options)
 		},
 		Stop: func(_ context.Context, jobID string) (migration.Result, error) {
 			if !ready || jobs == nil {
 				return migration.Result{}, errors.New("migration scheduler capability is unavailable")
 			}
-			return migration.StopMonitor(jobID, jobs)
+			return migration.StopMonitorWithOptions(jobID, jobs, options)
 		},
 	}
 }

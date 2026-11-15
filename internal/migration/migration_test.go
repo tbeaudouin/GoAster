@@ -316,8 +316,8 @@ func TestCreateLostResponseIsOneRequestAndSchedulerDisablesMonitor(t *testing.T)
 	options.DeliverHandoff = func(context.Context, []byte) error { return nil }
 	request := Request{ServerType: "cx22", Locations: []string{"fsn1"}, JobID: "migration-lost-response"}
 	result, err := StartMonitor(t.Context(), request, options, jobs)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("lost create response was swallowed")
 	}
 	if !result.ManualReview || result.Status != "manual_review" || fixture.creates.Load() != 1 {
 		t.Fatalf("lost response result = %#v; creates = %d", result, fixture.creates.Load())
@@ -336,7 +336,7 @@ func TestCreateLostResponseIsOneRequestAndSchedulerDisablesMonitor(t *testing.T)
 	}
 	options.TempDirectory = t.TempDir()
 	first, err := StartMonitor(t.Context(), Request{ServerType: "cx22"}, options, singletonJobs)
-	if err != nil || !first.ManualReview {
+	if err == nil || !first.ManualReview {
 		t.Fatalf("first singleton start: %#v %v", first, err)
 	}
 	second, err := StartMonitor(t.Context(), Request{ServerType: "other-type"}, options, singletonJobs)

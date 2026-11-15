@@ -17,13 +17,14 @@ The source workflow is deliberately small:
 
 1. The owner asks in a private conversation for an exact Hetzner server type
    and optional strict location preference.
-2. GoAster performs a current, read-only public price estimate and presents
-   the per-location gross hourly terms.
+2. The bundled migration skill uses a current, read-only public price estimate
+   and ordinary public type/location discovery to present indicative terms.
 3. Before any billable operation, the owner gives ordinary explicit approval
    for the exact terms in that private conversation. This is a conversational
    workflow requirement, not a trusted cryptographic binding.
-4. GoAster checks central availability immediately and schedules the same check
-   every 30 minutes while no eligible location exists.
+4. The approved `goaster_migration` `start` action checks authoritative central
+   availability immediately and schedules the same check every 30 minutes while
+   no eligible location exists.
 5. GoAster generates the login key and owner-link secret before its first check.
    When availability is returned, it disables and verifies the exact monitor and sends
    exactly one creation request.
@@ -81,11 +82,13 @@ allow-list and is never widened by the source. The v1 response contains only
 `version`, `server_type`, and eligible `locations`; it never contains a price.
 GoAsterWeb does not call Hetzner pricing for this endpoint.
 
-The model-facing read-only `availability` result adds the source-side
-`location_policy` (`any_eligible` when the request omits locations, otherwise
-`allowlist`) and the exact `requested_locations` when present. These fields
-are presentation metadata; they are not accepted from or sent to GoAsterWeb,
-and the result contains no price, cap, approval, or credential fields.
+The final availability check is internal to the approved `start`/monitor
+workflow. Its source-side result adds `location_policy` (`any_eligible` when
+the request omits locations, otherwise `allowlist`) and the exact
+`requested_locations` when present. These fields are presentation metadata;
+they are not accepted from or sent to GoAsterWeb, and the result contains no
+price, cap, approval, or credential fields. The model-facing tool exposes only
+`start`, `status`, and `stop`.
 
 Creation sends those same immutable terms and token.
 
@@ -96,22 +99,23 @@ secret, and Redis handoff. Its successful response has `version`, `state`,
 attempt fragment, and `expires`. GoAster appends `&owner=<owner-secret>` to
 that fragment only for the protected Telegram handoff.
 
-## Price, monitor, and uncertainty
+## Public discovery, monitor, and uncertainty
 
-The source’s `estimate`/`quote` operation uses read-only provider pricing data
-to show a current public gross estimate, including public IPv4, for the exact
-type and requested locations. The result repeats whether the request allows
-any eligible location or uses a strict allow-list. It may omit locations not
-currently available; those locations remain eligible if allowed by the
-request. This is a source-side estimate and is not sent to or returned by
-GoAsterWeb. Public pricing is best-effort and informational: a provider,
-credential, or pricing-response failure is reported as unavailable and does
-not authorize or block the request. Present the exact server type, strict
-locations, currency, per-location gross prices (when available), and
-one-create statement to the owner in a private conversation. Before any
-billable operation, obtain ordinary explicit approval for those terms (or the
-fact that pricing is unavailable) and exactly one create. Do not treat a group
-conversation as sufficient.
+The bundled migration skill handles indicative public Hetzner pricing,
+ordinary server-type discovery, ordinary location discovery, and the
+private-conversation guidance. Public pricing is best-effort and informational:
+include current public gross estimates and currency when available, or state
+that pricing is unavailable. An omitted or empty location list means any
+compatible location; a non-empty list is strict. Public discovery may omit a
+location and never widens a non-empty allow-list. It does not authorize or
+block the request and is not sent to or returned by GoAsterWeb. There is no
+model-facing `estimate`, `quote`, or `availability` action.
+
+Present the exact server type, strict locations, indicative currency,
+per-location estimate when available, and one-create statement to the owner
+in a private conversation. Before any billable operation, obtain ordinary
+explicit approval for those terms (or the fact that pricing is unavailable)
+and exactly one create. Do not treat a group conversation as sufficient.
 
 Do not invent or require a special command, exact reply, button, code,
 callback, or dedicated approval record. Ordinary conversational approval

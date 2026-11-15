@@ -4,7 +4,13 @@
 
 The generic cron tool runs durable scheduled chat turns with transport-captured chat and topic identity. Management is scoped to the origin, and replies are persisted in a private outbox for authenticated Telegram delivery and acknowledgement. Conversation sessions retain the existing per-chat persistence identity; deliveries retain the originating topic. Delivery is at least once: a crash or failure after sending and before acknowledgement can repeat a reply, including earlier chunks of a partially sent reply.
 
-Migration monitoring retains its separate scheduler and store. The `goaster_migration` actions are `estimate`, `quote`, `availability`, `start`, `status`, and `stop`. Scheduled turns cannot invoke `start`, which requires an interactive private conversation and the existing approval workflow. Both scheduler executor forms receive the execution claim context.
+Migration monitoring retains its separate scheduler and store. The
+`goaster_migration` actions are only `start`, `status`, and `stop`; indicative
+public pricing and ordinary type/location discovery belong to the bundled
+migration skill, while final availability remains inside the approved
+workflow. Scheduled turns cannot invoke `start`, which requires an
+interactive private conversation and the existing approval workflow. Both
+scheduler executor forms receive the execution claim context.
 
 ## Offline validation
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -61,12 +62,9 @@ func ConversationType(ctx context.Context) string {
 // the privileged migration executor. No operation accepts a token, key,
 // owner URL, chat ID, or callback secret.
 type MigrationToolOperations struct {
-	Estimate     func(context.Context, migration.PriceRequest) (migration.PriceEstimate, error)
-	Quote        func(context.Context, migration.QuoteRequest) (migration.QuoteResult, error)
-	Availability func(context.Context, migration.PriceRequest) (migration.AvailabilityResult, error)
-	Start        func(context.Context, migration.Request) (migration.Result, error)
-	Status       func(context.Context, string) (migration.StatusResult, error)
-	Stop         func(context.Context, string) (migration.Result, error)
+	Start  func(context.Context, migration.Request) (migration.Result, error)
+	Status func(context.Context, string) (migration.StatusResult, error)
+	Stop   func(context.Context, string) (migration.Result, error)
 }
 
 // RegisterMigrationTool exposes the source-side migration control plane. The
@@ -78,13 +76,13 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 	}
 	return registrar.RegisterTool(Tool{
 		Name:        migrationToolName,
-		Description: "Estimate the current public gross price, when available, or inspect current eligible locations for an exact Hetzner server type and optional strict location allow-list. Availability is read-only and repeats the requested location policy. Pricing is informational only; an unavailable estimate does not authorize or block a billable operation. Estimates may omit locations not currently available, which remain eligible if allowed. Before any billable operation, obtain ordinary explicit user approval for the exact terms in a private conversation. Conversational approval is not a trusted cryptographic binding and is not recorded by a separate approval mechanism. No provider token, private key, or owner link is accepted or returned here.",
+		Description: "Start, inspect status, or stop the exact central migration monitor. Use the bundled goaster-migration skill for indicative public Hetzner pricing, ordinary server-type and location discovery, and the private-conversation approval guidance. Pricing and discovery are informational only; final authoritative availability is checked inside the approved start/monitor workflow. An omitted location list allows any compatible location; a non-empty list remains strict. No provider token, private key, owner link, chat ID, or approval field is accepted or returned here.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"action": map[string]any{
 					"type": "string",
-					"enum": []string{"estimate", "quote", "availability", "start", "status", "stop"},
+					"enum": []string{"start", "status", "stop"},
 				},
 				"server_type": map[string]any{
 					"type":        "string",
@@ -119,47 +117,24 @@ type migrationToolArguments struct {
 func executeMigrationTool(ctx context.Context, arguments string, operations MigrationToolOperations) (string, error) {
 	parsed, err := parseMigrationToolArguments(arguments)
 	if err != nil {
-		return migrationToolRejected(err), nil
+		return migrationToolRejected("invalid_arguments"), nil
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return migrationToolOperationFailure(err, migration.Result{}), nil
 	}
-	request := migration.PriceRequest{ServerType: parsed.ServerType, Locations: parsed.Locations}
 	switch strings.ToLower(strings.TrimSpace(parsed.Action)) {
-	case "estimate", "quote":
-		estimate := operations.Estimate
-		if estimate == nil {
-			estimate = operations.Quote
-		}
-		if estimate == nil {
-			return migrationToolUnavailable(errors.New("migration price estimate capability is unavailable")), nil
-		}
-		result, err := estimate(ctx, request)
-		if err != nil {
-			return migrationToolOperationFailure(err, migration.Result{}), nil
-		}
-		return encodeMigrationToolResult(result)
-	case "availability":
-		if operations.Availability == nil {
-			return migrationToolUnavailable(errors.New("migration availability capability is unavailable")), nil
-		}
-		result, err := operations.Availability(ctx, request)
-		if err != nil {
-			return migrationToolOperationFailure(err, migration.Result{}), nil
-		}
-		return encodeMigrationToolResult(result)
 	case "start":
 		if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled {
-			return migrationToolRejected(errors.New("migration start requires an interactive conversation")), nil
+			return migrationToolRejected("start_requires_interactive_private_conversation"), nil
 		}
 		if kind, _ := ctx.Value(conversationTypeKey{}).(string); kind != "private" {
-			return migrationToolRejected(errors.New("migration start requires a private conversation")), nil
+			return migrationToolRejected("start_requires_interactive_private_conversation"), nil
 		}
 		if operations.Start == nil {
-			return migrationToolUnavailable(errors.New("migration start capability is unavailable")), nil
+			return migrationToolCapabilityFailure(errors.New("migration start capability is unavailable")), nil
 		}
 		if parsed.JobID != "" {
-			return migrationToolRejected(errors.New("start does not accept a model-selected monitor ID")), nil
+			return migrationToolRejected("start_does_not_accept_monitor_id"), nil
 		}
 		result, err := operations.Start(ctx, migration.Request{
 			ServerType: parsed.ServerType,
@@ -168,27 +143,33 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		if err != nil {
 			return migrationToolOperationFailure(err, result), nil
 		}
-		return encodeMigrationToolResult(result)
+		return encodeMigrationToolResult(migration.NormalizeResult(result))
 	case "status":
+		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 {
+			return migrationToolRejected("status_requires_only_monitor_id"), nil
+		}
 		if operations.Status == nil {
-			return migrationToolUnavailable(errors.New("migration status capability is unavailable")), nil
+			return migrationToolCapabilityFailure(errors.New("migration status capability is unavailable")), nil
 		}
 		result, err := operations.Status(ctx, parsed.JobID)
 		if err != nil {
-			return migrationToolOperationFailure(err, migration.Result{}), nil
+			return migrationToolOperationFailure(err, result.Migration), nil
 		}
-		return encodeMigrationToolResult(result)
+		return encodeMigrationToolResult(migration.NormalizeStatusResult(result))
 	case "stop":
+		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 {
+			return migrationToolRejected("stop_requires_only_monitor_id"), nil
+		}
 		if operations.Stop == nil {
-			return migrationToolUnavailable(errors.New("migration stop capability is unavailable")), nil
+			return migrationToolCapabilityFailure(errors.New("migration stop capability is unavailable")), nil
 		}
 		result, err := operations.Stop(ctx, parsed.JobID)
 		if err != nil {
 			return migrationToolOperationFailure(err, result), nil
 		}
-		return encodeMigrationToolResult(result)
+		return encodeMigrationToolResult(migration.NormalizeResult(result))
 	default:
-		return migrationToolRejected(errors.New("unsupported migration action")), nil
+		return migrationToolRejected("unsupported_action"), nil
 	}
 }
 
@@ -214,51 +195,75 @@ func encodeMigrationToolResult(value any) (string, error) {
 	return string(data), nil
 }
 
-func migrationToolRejected(err error) string {
-	diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "invalid migration arguments"})
-	return `{"status":"rejected","message":"Migration arguments were rejected; no action was taken."}`
+type migrationToolErrorResponse struct {
+	Status            string `json:"status"`
+	Stage             string `json:"stage"`
+	Code              string `json:"code"`
+	Cause             string `json:"cause"`
+	HTTPStatus        int    `json:"http_status,omitempty"`
+	ProviderCode      string `json:"provider_code,omitempty"`
+	MonitorID         string `json:"monitor_id,omitempty"`
+	ResultState       string `json:"result_state"`
+	CreationState     string `json:"creation_state"`
+	MonitoringState   string `json:"monitoring_state"`
+	MonitoringStopped bool   `json:"monitoring_stopped"`
+	NextAction        string `json:"next_action"`
 }
 
-func migrationToolUnavailable(err error) string {
-	diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "migration capability or operation unavailable"})
-	return `{"status":"unavailable","message":"Migration is unavailable or needs manual review; no action was repeated."}`
+func migrationToolRejected(code string) string {
+	return encodeMigrationToolError("rejected", migration.InvalidArgumentsDiagnostic())
 }
 
 func migrationToolOperationFailure(err error, result migration.Result) string {
-	if errors.Is(err, migration.ErrHetznerTokenMissing) {
-		diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "HCLOUD_TOKEN is not configured"})
-		return migrationToolMissingToken(result)
-	}
-	if result.Status == "stop_unconfirmed" || result.Status == "in_progress" {
-		encoded, encodeErr := encodeMigrationToolResult(result)
-		if encodeErr != nil {
-			return migrationToolUnavailable(errors.Join(err, encodeErr))
+	diagnostic := migration.DiagnosticFor(err, result)
+	if !migration.IsMigrationFailure(err) {
+		fields := make([]diagnostics.Field, 0, 2)
+		if diagnostic.HTTPStatus != 0 {
+			fields = append(fields, diagnostics.Field{Key: "status", Value: fmt.Sprintf("%d", diagnostic.HTTPStatus)})
 		}
-		diagnostics.Error("migration.tool", err, diagnostics.Field{Key: "reason", Value: "migration monitor state requires attention"})
-		return encoded
+		if diagnostic.ProviderCode != "" {
+			fields = append(fields, diagnostics.Field{Key: "backend_code", Value: diagnostic.ProviderCode})
+		}
+		diagnostics.Error("migration.tool", err, fields...)
 	}
-	return migrationToolUnavailable(err)
+	return encodeMigrationToolError("error", diagnostic)
 }
 
-func migrationToolMissingToken(result migration.Result) string {
-	response := struct {
-		Status          string `json:"status"`
-		Code            string `json:"code"`
-		Message         string `json:"message"`
-		MigrationStatus string `json:"migration_status,omitempty"`
-		MonitorID       string `json:"monitor_id,omitempty"`
-		ManualReview    bool   `json:"manual_review,omitempty"`
-	}{
-		Status:  "configuration_required",
-		Code:    "missing_hcloud_token",
-		Message: "HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first.",
+func migrationToolCapabilityFailure(err error) string {
+	diagnostics.Error("migration.tool", err)
+	return encodeMigrationToolError("error", migration.CapabilityUnavailableDiagnostic())
+}
+
+func safeMigrationMonitorID(value string) bool {
+	if len(value) < len("migration-")+1 || len(value) > 96 || !strings.HasPrefix(value, "migration-") {
+		return false
 	}
-	response.MigrationStatus = result.Status
-	response.MonitorID = result.MonitorID
-	response.ManualReview = result.ManualReview
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func encodeMigrationToolError(status string, diagnostic migration.Diagnostic) string {
+	response := migrationToolErrorResponse{
+		Status:            status,
+		Stage:             diagnostic.Stage,
+		Code:              diagnostic.Code,
+		Cause:             diagnostic.Cause,
+		HTTPStatus:        diagnostic.HTTPStatus,
+		ProviderCode:      diagnostic.ProviderCode,
+		MonitorID:         diagnostic.MonitorID,
+		ResultState:       diagnostic.ResultState,
+		CreationState:     diagnostic.CreationState,
+		MonitoringState:   diagnostic.MonitoringState,
+		MonitoringStopped: diagnostic.MonitoringStopped,
+		NextAction:        diagnostic.NextAction,
+	}
 	data, err := json.Marshal(response)
 	if err != nil {
-		return `{"status":"configuration_required","code":"missing_hcloud_token","message":"HCLOUD_TOKEN is missing. Add HCLOUD_TOKEN using /env first."}`
+		return `{"status":"error","stage":"tool","code":"unknown_failure","cause":"the migration failed for an unclassified reason","result_state":"error","creation_state":"unknown","monitoring_state":"unknown","monitoring_stopped":false,"next_action":"inspect status and reconcile external state before any new attempt"}`
 	}
 	return string(data)
 }

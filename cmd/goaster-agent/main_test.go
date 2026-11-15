@@ -1551,13 +1551,7 @@ func (err postToolAgentError) Is(target error) bool { return target.Error() == e
 func (err postToolAgentError) Unwrap() error        { return err.cause }
 
 func TestMigrationOperationsRequireScheduler(t *testing.T) {
-	operations := migrationOperations(migration.Options{
-		LoadHetznerToken: func() (string, error) { return "", errors.New("synthetic pricing credential failure") },
-	}, nil, true)
-	testEstimate, err := operations.Estimate(context.Background(), migration.PriceRequest{ServerType: "cx22", Locations: []string{"fsn1"}})
-	if err != nil || testEstimate.Status != "unavailable" || testEstimate.LocationPolicy != "allowlist" || len(testEstimate.RequestedLocations) != 1 || testEstimate.RequestedLocations[0] != "fsn1" {
-		t.Fatalf("optional migration estimate = %#v, %v", testEstimate, err)
-	}
+	operations := migrationOperations(migration.Options{}, nil, true)
 	result, err := operations.Start(context.Background(), migration.Request{ServerType: "cx22"})
 	if err == nil || !strings.Contains(err.Error(), "migration scheduler capability is unavailable") || result.Status != "unavailable" {
 		t.Fatalf("migration start = %#v, %v", result, err)

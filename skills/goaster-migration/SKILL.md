@@ -15,13 +15,14 @@ the bounded HTTPS requests, local login-key and owner-secret generation,
 owns the provider create sequence, callback secret, Redis handoff, destination
 installation, host-key pinning, setup, and fresh OpenAI/Telegram authorization.
 
-Use the migration tool's exact action names: `estimate` (or `quote`) for
-informational pricing, `availability` for the read-only location check,
-`start` to begin the approved monitor/create workflow, `status` to
-inspect that monitor, and `stop` to stop it. Do not use the generic
-`cron` tool for migration availability, monitor resumption, or provisioning;
-the migration flow must use `goaster_migration` and its separate migration
-scheduler/store.
+Use the migration tool's exact action names: `start` to begin the approved
+monitor/create workflow, `status` to inspect that monitor, and `stop` to stop
+it. The tool exposes no `estimate`, `quote`, or `availability` action. Use
+this bundled skill and ordinary public sources for indicative pricing and
+server-type/location discovery; those conversations are informational only.
+Do not use the generic `cron` tool for migration availability, monitor
+resumption, or provisioning; the migration flow must use
+`goaster_migration` and its separate migration scheduler/store.
 
 Do not add a migration daemon, provider-create script, Telegram command,
 destination SSH step, or background-command workaround. There is no new
@@ -51,10 +52,11 @@ type. A non-empty list is never widened. GoAsterWeb returns only `version`,
 `server_type`, and eligible `locations`; this endpoint does not return prices
 and does not call the Hetzner pricing API.
 
-Use the read-only `availability` action when a current eligibility check is
-needed. Its source-side result repeats the exact location policy and requested
-locations for presentation, while keeping those fields out of the Web wire
-contract. It contains no price cap, approval, credential, or private material.
+The final authoritative availability check is internal to the approved
+`start`/monitor workflow. It is not a model-facing discovery action. Its
+source-side result repeats the exact location policy and requested locations
+for presentation, while keeping those fields out of the Web wire contract.
+It contains no price cap, approval, credential, or private material.
 
 Creation sends the same immutable operation terms and the request-scoped token. It does not send the
 private key or owner secret. The successful response contains the v1 state,
@@ -62,27 +64,30 @@ attempt, server label, server ID, public IP, owner URL without the owner
 secret, and absolute expiry. The source appends the local owner secret to the
 fragment only and never puts it in a query string.
 
-## Estimate and ordinary private-conversation approval
+## Indicative public discovery and ordinary private-conversation approval
 
-Before asking for approval, use `goaster_migration` with `estimate` (or its
-`quote` alias) for the exact server type and optional locations. The source
-performs bounded read-only provider lookups for the current public gross
-hourly estimate, including the public IPv4 component used by the handoff. Do
-explain that the estimate may omit locations not currently available and that
-those locations remain eligible if allowed by the request. Do
-not substitute a cheaper type, silently choose a different location, or claim
-that the GoAsterWeb availability response contains a price.
+Before asking for approval, use ordinary public information for the exact
+Hetzner server type and optional locations. Public Hetzner pricing, ordinary
+server-type discovery, and ordinary location discovery may be gathered with
+read-only provider lookups or public documentation, but they are indicative
+and best-effort. Include the public gross hourly estimate and currency when
+available; if public pricing is unavailable, say so plainly. Do not put a
+provider credential into model context or a public request. Do not substitute
+a cheaper type, silently choose a different location, or claim that the
+GoAsterWeb availability response contains a price.
 
-The estimate repeats whether the request allows any eligible location or uses a
-strict allow-list. Public pricing is informational and best-effort; if the
-read-only provider lookup is unavailable, the tool reports unavailable pricing
-and does not authorize or block a future request.
+An omitted or empty location list means any compatible location. A non-empty
+list is a strict allow-list and must not be widened. Public discovery does not
+authorize or block the future request, and a public estimate may omit locations
+that are not currently listed as available. The final authoritative
+availability decision happens only inside the approved `start`/monitor
+workflow.
 
-Present the returned type, strict location preference, currency, per-location
-estimate, and the fact that one provider creation sequence would occur. The
-model-facing `start` call accepts only the exact type and location request; it
-does not accept an approval flag, quoted price, currency, monitor ID, chat ID,
-or any secret.
+Present the exact type, strict location preference, indicative currency and
+per-location estimate when available, and the fact that one provider creation
+sequence would occur. The model-facing `start` call accepts only the exact
+type and location request; it does not accept an approval flag, quoted price,
+currency, monitor ID, chat ID, or any secret.
 
 Before any billable operation, obtain ordinary explicit user approval for the
 exact server type, strict location preference, current estimate and currency

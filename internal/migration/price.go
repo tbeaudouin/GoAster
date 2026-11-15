@@ -202,7 +202,7 @@ func findServerType(ctx context.Context, options Options, token, name string) (p
 		var response providerServerTypesResponse
 		if err := json.Unmarshal(body, &response); err != nil {
 			clear(body)
-			return providerServerType{}, fmt.Errorf("decode provider server types: %w", err)
+			return providerServerType{}, providerResponseError{cause: err}
 		}
 		clear(body)
 		for _, value := range response.ServerTypes {
@@ -228,7 +228,7 @@ func fetchPricing(ctx context.Context, options Options, token string) (providerP
 	var response providerPricingResponse
 	if err := json.Unmarshal(body, &response); err != nil {
 		clear(body)
-		return providerPricing{}, fmt.Errorf("decode provider pricing: %w", err)
+		return providerPricing{}, providerResponseError{cause: err}
 	}
 	clear(body)
 	if len(response.Pricing.Currency) != 3 || strings.ToUpper(response.Pricing.Currency) != response.Pricing.Currency {
@@ -268,30 +268,32 @@ func providerGET(ctx context.Context, options Options, token, path string) ([]by
 	request.Header.Del("Origin")
 	response, err := options.HTTPClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("provider transport: %w", err)
+		return nil, providerTransportError{cause: err}
 	}
 	if response == nil || response.Body == nil {
-		return nil, errors.New("provider response body is unavailable")
+		return nil, providerResponseError{cause: errors.New("provider response body is unavailable")}
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, providerResponseMaxBytes+1))
 	closeErr := response.Body.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
 		clear(body)
-		return nil, fmt.Errorf("read provider response: %w", err)
+		return nil, providerTransportError{cause: err}
 	}
 	if len(body) > providerResponseMaxBytes {
 		clear(body)
-		return nil, errors.New("provider response exceeds the limit")
+		return nil, providerResponseError{cause: errors.New("provider response exceeds the limit")}
 	}
 	if response.StatusCode != http.StatusOK {
+		code := providerErrorCode(body)
 		clear(body)
-		return nil, providerHTTPError{Status: response.StatusCode}
+		return nil, providerHTTPError{Status: response.StatusCode, Code: code}
 	}
 	return body, nil
 }
 
 type providerHTTPError struct {
 	Status int
+	Code   string
 }
 
 func (err providerHTTPError) Error() string {
@@ -299,7 +301,23 @@ func (err providerHTTPError) Error() string {
 }
 
 func (err providerHTTPError) DiagnosticFields() []diagnostics.Field {
-	return []diagnostics.Field{{Key: "status", Value: strconv.Itoa(err.Status)}}
+	fields := []diagnostics.Field{{Key: "status", Value: strconv.Itoa(err.Status)}}
+	if code := safeProviderCode(err.Code); code != "" {
+		fields = append(fields, diagnostics.Field{Key: "backend_code", Value: code})
+	}
+	return fields
+}
+
+func providerErrorCode(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return safeProviderCode(envelope.Error.Code)
 }
 
 func providerEndpoint(origin, path string, allowInsecure bool) (string, error) {

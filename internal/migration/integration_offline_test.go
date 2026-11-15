@@ -65,10 +65,10 @@ func TestOfflineRecipientChangeAndRestart(t *testing.T) {
 			}
 			req := Request{ServerType: "cx22"}
 			result, err := StartMonitor(t.Context(), req, opts, jobs)
-			if err != nil {
-				t.Fatal(err)
-			}
 			if change == "restart" {
+				if err != nil {
+					t.Fatal(err)
+				}
 				if result.Status != "monitoring" {
 					t.Fatalf("start: %+v", result)
 				}
@@ -84,7 +84,7 @@ func TestOfflineRecipientChangeAndRestart(t *testing.T) {
 				if err := ScheduledExecutor(t.Context(), job.Message, jobs, opts); err == nil {
 					t.Fatal("changed recipient accepted")
 				}
-			} else if !result.ManualReview {
+			} else if err == nil || !result.ManualReview {
 				t.Fatalf("changed recipient: %+v", result)
 			}
 			job, ok := jobs.Get(result.MonitorID)

@@ -1,0 +1,36 @@
+# Final independent migration diagnostics review — 2026-11-15
+
+Verdict: **BLOCKED**.
+
+Reviewed the entire current uncommitted migration diagnostics change: all 15 tracked modified files, plus `internal/migration/diagnostic.go`, `internal/migration/diagnostic_acceptance_test.go`, and `docs/migration-diagnostics-validation-20261115.md`. Read root `agents.md` first; no other agents/CLAUDE Markdown variants were found in the repository. Source was not changed. This report is the only review-created file.
+
+## Concrete blockers
+
+1. **P1 — Valid errors without optional provider_code lose their typed classification.** `internal/migration/migration.go:853` requires exactly four error fields. The specified counterpart contract permits three required fields and optional `provider_code`. Reproduction: return HTTP 504 with `{"version":"v1","error":{"code":"provider_timeout","stage":"provider","http_status":504}}`. `decodeWebError` immediately returns its fallback; the diagnostic becomes `web_http_error` instead of `provider_timeout`, with the provider stage lost. The same happens for valid DNS/TLS errors and for provider authentication errors without a provider code. Existing fixtures always supply the optional field, even as an empty string. Accept the required fields with the optional field absent while retaining exact-field, type, duplicate-key, and allowlist validation.
+
+2. **P1 — Stop can append stale creation certainty after a concurrent create has completed.** `internal/migration/runtime.go:430` reads history before `stopAndVerifyMonitor` at line 441; lines 454–456 then publish that old value. Deterministic reproduction schedule: start a no-capacity monitor; begin stop and pause after loading the initial diagnostic; let a scheduled run claim the job, obtain capacity, create successfully, deliver, publish its `creation_state=created` diagnostic, and finish scheduler completion; resume stop. The atomic stop now succeeds because the run finished, but its newly appended record carries the old initial `creation_state=unknown`. Subsequent status chooses this newer sequence and loses established creation certainty. No file corruption or scheduler misbehavior is needed. The scheduler running-claim guard protects creation dispatch, but does not protect this read/modify/publish operation. Preserve the latest terminal creation evidence when publishing stop; account for the direct-start path also publishing its terminal diagnostic after scheduler completion.
+
+3. **P2 — Repeated start on a terminal monitor ignores its retained diagnostic.** `internal/migration/runtime.go:86–87` and `:106–107` call `statusDiagnosticForJob` with `Diagnostic{}, false` rather than loading retained state. Reproduction: complete a successful migration, or a confirmed create followed by delivery failure, then call start again for the singleton. It returns a synthetic stopped diagnostic with `creation_state=unknown` and loses the created/delivery-failure code, even though status can read the retained `created` certainty. A monitor disabled after a missing-token or typed provider failure similarly loses its exact error on repeated start. Creation remains blocked, but the returned diagnostic violates the required retained error and creation certainty. Return the validated retained result for the existing monitor, preserving its original request terms.
+
+4. **P1 — Invalid diagnostic history prevents an otherwise valid stop and leaves the billable monitor armed.** `internal/migration/runtime.go:430–432` returns on a diagnostic read/validation failure before reaching the scheduler stop at line 441. Reproduction in an offline fixture: start with no capacity; make the initial diagnostic JSON malformed while leaving scheduler and operation state valid; invoke stop. Stop returns a storage/state error without disabling the enabled job. The next scheduled run does not validate diagnostic history before availability/create (`executeMonitor`, lines 293–317), so later capacity can still cause creation after the stop request. A diagnostic-state failure must not prevent disabling a verified non-running monitor; return the history error with truthful stop certainty after attempting coordinated disable. This requires no permission to trust malformed history.
+
+These are control-flow reproductions established by source inspection, not newly executed regression tests; no source or test files were added for this review.
+
+## Other reviewed requirements
+
+- The action schema and operation wiring expose only start/status/stop. Unknown fields, model-selected start IDs, scheduled start, and non-private start remain rejected. Skill/documentation changes agree with this surface.
+- Valid four-field v1 errors preserve allowlisted provider auth/timeout/DNS/TLS classifications. Unknown codes and invalid bodies use safe HTTP fallback. With the stated counterpart guarantee that body status equals actual status, accepted envelopes report the actual status. The decoder itself does not check equality; existing auth/timeout fixtures even pass mismatched outer statuses. This is a validation gap, not an additional blocker under the supplied guarantee.
+- Post-dispatch failures conservatively retain unknown creation; confirmed creation followed by handoff failure retains created certainty in the normal terminal path. Fixed diagnostic text and provider-code allowlists keep arbitrary error bodies, private paths, credentials, keys and owner links out of model-facing diagnostics. Existing protected handoff and paired-recipient checks remain in place.
+- Scheduler claims disable before create; dispatch markers prevent duplicate dispatch. Only successful no-capacity checks return the scheduler retry signal. No new automatic agent retry or creation invitation was introduced. Fixed next actions generally require status/manual reconciliation.
+- Diagnostic records use protected exclusive writes, bounded 4 KiB reads, fixed text validation and sequence ordering. Records remain append-only. No-capacity loops and status reads do not append, so ordinary monitoring has small history. Repeated stop calls append identical logical states indefinitely, and each load/append scans history; the sequence ceiling is not a practical storage bound. This is a small simplicity/idempotence improvement to make, not an independent capacity blocker for expected transitions. Exclusive-write collisions fail closed, though publication is not a transaction with scheduler completion, as finding 2 demonstrates. A wholesale storage refactor is unnecessary to establish these findings.
+
+## Validation and limits
+
+Independently ran `git diff --check` successfully and the existing strictly offline diagnostics tests successfully:
+
+```text
+GOPROXY=off GOSUMDB=off /usr/local/go/bin/go test ./internal/migration -run '^(TestDiagnosticWebEnvelopeOffline|TestDiagnosticTransportOffline|TestPersistedDiagnosticRejectsInjectedText)$' -count=1
+ok goaster/internal/migration
+```
+
+The parent-reported full suite, vet, migration/chat/scheduler race and packaging passes are acknowledged, not claimed as rerun here. Existing focused tests do not exercise the optional-field omission or the stale-stop publication schedule. Review used no external network, GitHub, cloud, live credentials or deployment, and made no commit.

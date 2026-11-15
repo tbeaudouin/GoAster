@@ -120,17 +120,19 @@ type QuoteResult = PriceEstimate
 // CreateResult deliberately excludes the owner URL and private key. It is
 // suitable for returning through a model-facing tool after direct delivery.
 type CreateResult struct {
-	Status        string `json:"status"`
-	ServerType    string `json:"server_type"`
-	Attempt       string `json:"attempt,omitempty"`
-	ServerID      int64  `json:"server_id,omitempty"`
-	IP            string `json:"ip,omitempty"`
-	Expires       int64  `json:"expires,omitempty"`
-	Delivered     bool   `json:"delivered,omitempty"`
-	ManualReview  bool   `json:"manual_review,omitempty"`
-	MonitorID     string `json:"monitor_id,omitempty"`
-	TaskDirectory string `json:"-"`
-	HandoffPath   string `json:"-"`
+	Status        string     `json:"status"`
+	ServerType    string     `json:"server_type"`
+	Locations     []string   `json:"locations,omitempty"`
+	Attempt       string     `json:"attempt,omitempty"`
+	ServerID      int64      `json:"server_id,omitempty"`
+	IP            string     `json:"ip,omitempty"`
+	Expires       int64      `json:"expires,omitempty"`
+	Delivered     bool       `json:"delivered,omitempty"`
+	ManualReview  bool       `json:"manual_review,omitempty"`
+	MonitorID     string     `json:"monitor_id,omitempty"`
+	Diagnostic    Diagnostic `json:"diagnostic"`
+	TaskDirectory string     `json:"-"`
+	HandoffPath   string     `json:"-"`
 }
 
 // Result is the safe result of one monitor turn.
@@ -138,11 +140,12 @@ type Result = CreateResult
 
 // StatusResult reports only local scheduler state and the non-secret request.
 type StatusResult struct {
-	MonitorID      string  `json:"monitor_id"`
-	MonitorOn      bool    `json:"monitor_on"`
-	SchedulerState string  `json:"scheduler_state,omitempty"`
-	Migration      Result  `json:"migration"`
-	Request        Request `json:"request"`
+	MonitorID      string     `json:"monitor_id"`
+	MonitorOn      bool       `json:"monitor_on"`
+	SchedulerState string     `json:"scheduler_state,omitempty"`
+	Migration      Result     `json:"migration"`
+	Diagnostic     Diagnostic `json:"diagnostic"`
+	Request        Request    `json:"request"`
 }
 
 type httpDoer interface {
@@ -194,28 +197,34 @@ func DefaultOptions() Options {
 }
 
 // Availability performs exactly one bounded read-only v1 availability request.
-func Availability(ctx context.Context, request PriceRequest, options Options) (AvailabilityResult, error) {
+func Availability(ctx context.Context, request PriceRequest, options Options) (result AvailabilityResult, returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			diagnostic := diagnosticForFailure(stageAvailability, returnErr, Result{Status: resultError, Diagnostic: Diagnostic{Stage: stageAvailability}})
+			logMigrationFailure("migration.availability", returnErr, diagnostic)
+		}
+	}()
 	if err := validateMachineRequest(request.ServerType, request.Locations); err != nil {
-		return AvailabilityResult{}, err
+		return result, failureError(stageInput, err, Result{Status: resultRejected})
 	}
 	options = completeOptions(options)
 	token, err := options.LoadHetznerToken()
 	if err != nil {
-		return AvailabilityResult{}, fmt.Errorf("load migration provider token: %w", err)
+		return result, failureError(stageConfiguration, fmt.Errorf("load migration provider token: %w", err), Result{Status: resultManualReview})
 	}
 	if !validHetznerToken(token) {
-		return AvailabilityResult{}, errors.Join(errManualReview, errors.New("migration provider token is invalid"))
+		return result, failureError(stageConfiguration, errors.Join(errManualReview, ErrHetznerTokenInvalid), Result{Status: resultManualReview})
 	}
 	state, err := newOperation(Request{ServerType: request.ServerType, Locations: request.Locations}, 0)
 	if err != nil {
-		return AvailabilityResult{}, err
+		return result, failureError(stageStorage, err, Result{Status: resultManualReview})
 	}
 	dir, err := migrationTaskDirectory(options.TempDirectory)
 	if err != nil {
-		return AvailabilityResult{}, err
+		return result, failureError(stageStorage, errors.Join(ErrProtectedStorage, err), Result{Status: resultManualReview})
 	}
 	if err = storeOperation(dir, state.Terms.OperationID, state); err != nil {
-		return AvailabilityResult{}, err
+		return result, failureError(stageStorage, errors.Join(ErrProtectedStorage, err), Result{Status: resultManualReview})
 	}
 	return availabilityWithToken(ctx, state.Terms, token, options)
 }
@@ -256,124 +265,130 @@ func availabilityWithToken(ctx context.Context, terms machineTerms, token string
 // central creation request, writes the private handoff in the protected
 // GoAster temporary task directory, and delivers that handoff directly to the
 // configured paired Telegram user. It never retries.
-func Create(ctx context.Context, request Request, options Options) (CreateResult, error) {
+func Create(ctx context.Context, request Request, options Options) (result CreateResult, returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			diagnostic := diagnosticForFailure(stageCreate, returnErr, result)
+			logMigrationFailure("migration.create", returnErr, diagnostic)
+		}
+	}()
 	if err := validateBillableRequest(request); err != nil {
-		return CreateResult{}, err
+		return failureResult(stageInput, err, Result{Status: resultRejected, ServerType: request.ServerType})
 	}
 	options = completeOptions(options)
 	if options.DeliverHandoff == nil && options.PrepareHandoff == nil {
-		return CreateResult{}, errors.New("migration handoff delivery is unavailable")
+		return failureResult(stageHandoff, errors.Join(ErrHandoffFailure, errors.New("migration handoff delivery is unavailable")), Result{Status: resultManualReview, ServerType: request.ServerType})
 	}
 	if err := checkHandoffDelivery(options); err != nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, errors.Join(errManualReview, err)
+		return failureResult(stageHandoff, errors.Join(errManualReview, err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	token, err := options.LoadHetznerToken()
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("load migration provider token: %w", err)
+		return failureResult(stageConfiguration, fmt.Errorf("load migration provider token: %w", err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	if !validHetznerToken(token) {
-		return CreateResult{}, errors.Join(errManualReview, errors.New("migration provider token is invalid"))
+		return failureResult(stageConfiguration, errors.Join(errManualReview, ErrHetznerTokenInvalid), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	state, err := newOperation(request, 0)
 	if err != nil {
-		return CreateResult{}, err
+		return failureResult(stageStorage, err, Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	dir, err := migrationTaskDirectory(options.TempDirectory)
 	if err != nil {
-		return CreateResult{}, err
+		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	if err = storeOperation(dir, state.Terms.OperationID, state); err != nil {
-		return CreateResult{}, err
+		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	available, err := availabilityWithToken(ctx, state.Terms, token, options)
 	if err != nil {
-		return CreateResult{}, err
+		return failureResult(stageAvailability, err, Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	if len(available.Locations) == 0 {
-		return CreateResult{Status: "monitoring", ServerType: request.ServerType}, nil
+		return NormalizeResult(Result{Status: resultMonitoring, ServerType: request.ServerType, Diagnostic: Diagnostic{Stage: stageAvailability, Code: codeMonitorStarted, Cause: causeForCode(codeMonitorStarted), ResultState: resultMonitoring, CreationState: creationNotCreated, MonitoringState: monitoringNotStarted, NextAction: nextActionForCode(codeMonitorStarted)}}), nil
 	}
 	if err = markDispatch(dir, state.Terms.OperationID); err != nil {
-		return CreateResult{}, err
+		return failureResult(stageStorage, err, Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	return createWithToken(ctx, request, state, token, options)
 }
 
 func checkHandoffDelivery(options Options) error {
 	if options.DeliverHandoff == nil && options.PrepareHandoff == nil {
-		return errors.New("migration handoff delivery is unavailable")
+		return errors.Join(ErrHandoffFailure, errors.New("migration handoff delivery is unavailable"))
 	}
 	if options.CheckHandoffDelivery == nil {
 		return nil
 	}
 	if err := options.CheckHandoffDelivery(); err != nil {
-		return fmt.Errorf("check migration handoff delivery: %w", err)
+		return errors.Join(ErrHandoffFailure, fmt.Errorf("check migration handoff delivery: %w", err))
 	}
 	return nil
 }
 
 func createWithToken(ctx context.Context, request Request, state operationState, token string, options Options) (CreateResult, error) {
 	if err := validateBillableRequest(request); err != nil {
-		return CreateResult{}, err
+		return failureResult(stageInput, err, Result{Status: resultRejected, ServerType: request.ServerType})
 	}
 	if err := checkHandoffDelivery(options); err != nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, errors.Join(errManualReview, err)
+		return failureResult(stageHandoff, errors.Join(errManualReview, err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	deliver := options.DeliverHandoff
 	if options.PrepareHandoff != nil {
 		var err error
 		deliver, err = options.PrepareHandoff()
 		if err != nil || deliver == nil {
-			return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, errors.Join(errManualReview, errors.New("prepare migration handoff delivery"), err)
+			return failureResult(stageHandoff, errors.Join(ErrHandoffFailure, errManualReview, errors.New("prepare migration handoff delivery"), err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 		}
 	}
 	privateKey, ownerSecret := state.PrivateKey, state.OwnerSecret
 	taskDirectory, err := migrationTaskDirectory(options.TempDirectory)
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("prepare migration temporary directory: %w", err)
+		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, fmt.Errorf("prepare migration temporary directory: %w", err)), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	privateKeyPath := filepath.Join(taskDirectory, handoffPrivateKeyName)
 	if _, err := protectedfile.WriteExclusive(privateKeyPath, privateKey); err != nil {
-		return CreateResult{}, fmt.Errorf("store migration private key: %w", err)
+		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, fmt.Errorf("store migration private key: %w", err)), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory})
 	}
 	body, err := machinePayload(state.Terms, token)
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("encode migration create request: %w", err)
+		return failureResult(stageCreate, err, Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory})
 	}
 	defer clear(body)
 	var response createResponse
 	if err := checkHandoffDelivery(options); err != nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, err)
+		return failureResult(stageHandoff, errors.Join(errManualReview, err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory})
 	}
 	if err := webJSON(ctx, options, "/migration/v1/machines/create", body, http.StatusCreated, &response); err != nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, fmt.Errorf("migration creation request: %w", err))
+		return failureResult(stageCreate, errors.Join(errManualReview, fmt.Errorf("migration creation request: %w", err)), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory, Diagnostic: Diagnostic{Stage: stageCreate}})
 	}
 	if err := validateCreateResponse(response, options); err != nil || response.Attempt != state.Terms.OperationID {
 		if err == nil {
 			err = errInvalidRequest
 		}
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, fmt.Errorf("migration creation response: %w", err))
+		return failureResult(stageCreate, errors.Join(errManualReview, ErrInvalidResponse, fmt.Errorf("migration creation response: %w", err)), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory, Diagnostic: Diagnostic{Stage: stageCreate}})
 	}
 
 	setupURL, err := appendOwnerSecret(response.OwnerURL, ownerSecret, options)
 	if err != nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, err)
+		return failureResult(stageHandoff, errors.Join(errManualReview, ErrInvalidResponse, err), Result{Status: resultCreated, ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory, Diagnostic: Diagnostic{Stage: stageHandoff, CreationState: creationCreated}})
 	}
 	handoff := buildHandoff(setupURL, response.ServerID, response.IP, privateKey)
 	if len(handoff) == 0 || len(handoff) > handoffMaxBytes {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, errors.New("migration handoff exceeds its bound"))
+		return failureResult(stageHandoff, errors.Join(ErrHandoffFailure, errManualReview, errors.New("migration handoff exceeds its bound")), Result{Status: resultCreated, ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory, Diagnostic: Diagnostic{Stage: stageHandoff, CreationState: creationCreated}})
 	}
 	handoffPath := filepath.Join(taskDirectory, handoffDocumentName)
 	if _, err := protectedfile.WriteExclusive(handoffPath, handoff); err != nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, fmt.Errorf("store migration handoff: %w", err))
+		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, errManualReview, fmt.Errorf("store migration handoff: %w", err)), Result{Status: resultCreated, ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory, Diagnostic: Diagnostic{Stage: stageStorage, CreationState: creationCreated}})
 	}
 	defer clear(handoff)
 	if deliver == nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory, HandoffPath: handoffPath}, errors.Join(errManualReview, errors.New("migration handoff delivery is unavailable"))
+		return failureResult(stageHandoff, errors.Join(ErrHandoffFailure, errManualReview, errors.New("migration handoff delivery is unavailable")), Result{Status: resultCreated, ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory, HandoffPath: handoffPath, Diagnostic: Diagnostic{Stage: stageHandoff, CreationState: creationCreated}})
 	}
 	if err := deliver(ctx, handoff); err != nil {
-		return CreateResult{Status: "manual_review", ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory, HandoffPath: handoffPath}, errors.Join(errManualReview, fmt.Errorf("deliver migration handoff: %w", err))
+		return failureResult(stageHandoff, errors.Join(ErrHandoffFailure, errManualReview, fmt.Errorf("deliver migration handoff: %w", err)), Result{Status: resultCreated, ServerType: request.ServerType, Attempt: response.Attempt, ServerID: response.ServerID, IP: response.IP, Expires: response.Expires, ManualReview: true, TaskDirectory: taskDirectory, HandoffPath: handoffPath, Diagnostic: Diagnostic{Stage: stageHandoff, CreationState: creationCreated}})
 	}
-	return CreateResult{
+	return NormalizeResult(Result{
 		Status:        "created",
 		ServerType:    request.ServerType,
 		Attempt:       response.Attempt,
@@ -383,7 +398,8 @@ func createWithToken(ctx context.Context, request Request, state operationState,
 		Delivered:     true,
 		TaskDirectory: taskDirectory,
 		HandoffPath:   handoffPath,
-	}, nil
+		Diagnostic:    diagnosticTemplate(stageCreate, codeCreated),
+	}), nil
 }
 
 type createResponse struct {
@@ -659,28 +675,31 @@ func webJSON(ctx context.Context, options Options, path string, body []byte, exp
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("migration web transport: %w", err)
+		return webTransportError{cause: err}
 	}
 	if response == nil || response.Body == nil {
-		return errors.New("migration web response body is unavailable")
+		return webResponseError{cause: errors.New("migration web response body is unavailable")}
 	}
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, webResponseMaxBytes+1))
 	closeErr := response.Body.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
 		clear(data)
-		return fmt.Errorf("read migration web response: %w", err)
+		return webTransportError{cause: err}
 	}
 	defer clear(data)
 	if len(data) > webResponseMaxBytes {
-		return errors.New("migration web response exceeds the limit")
+		return webResponseError{cause: errors.New("migration web response exceeds the limit")}
 	}
 	if response.StatusCode != expectedStatus && !(expectedStatus == http.StatusCreated && response.StatusCode == http.StatusOK) {
-		return fmt.Errorf("migration web returned HTTP %d", response.StatusCode)
+		return decodeWebError(data, response.StatusCode)
 	}
 	if output == nil {
 		return nil
 	}
-	return decodeExactJSON(data, output)
+	if err := decodeExactJSON(data, output); err != nil {
+		return webResponseError{cause: err}
+	}
+	return nil
 }
 
 func webEndpoint(origin, path string, allowInsecure bool) (string, error) {
@@ -767,7 +786,7 @@ func loadHetznerToken() (string, error) {
 		err = store.Load()
 	}
 	if err != nil {
-		return "", fmt.Errorf("load Hetzner settings: %w", err)
+		return "", errors.Join(ErrCredentialStorageUnreadable, fmt.Errorf("load Hetzner settings: %w", err))
 	}
 	if token, ok := store.Values()["HCLOUD_TOKEN"]; ok {
 		savedTokenFound = true
@@ -783,7 +802,7 @@ func loadHetznerToken() (string, error) {
 		environmentTokenInvalid = true
 	}
 	if savedTokenFound || environmentTokenInvalid {
-		return "", errors.New("Hetzner token is invalid")
+		return "", ErrHetznerTokenInvalid
 	}
 	return "", ErrHetznerTokenMissing
 }
@@ -819,3 +838,54 @@ func publicIP(value string) bool {
 }
 
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// decodeWebError accepts only the fixed machine envelope. Invalid and legacy
+// bodies carry no trusted classification and are never exposed or logged.
+func decodeWebError(data []byte, status int) webHTTPError {
+	fallback := webHTTPError{Status: status}
+	var outer struct {
+		Version string          `json:"version"`
+		Error   json.RawMessage `json:"error"`
+	}
+	if decodeExactJSON(data, &outer) != nil || outer.Version != "v1" {
+		return fallback
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(outer.Error, &fields) != nil || (len(fields) != 3 && len(fields) != 4) {
+		return fallback
+	}
+	for _, name := range []string{"code", "stage", "http_status"} {
+		if value, ok := fields[name]; !ok || string(value) == "null" {
+			return fallback
+		}
+	}
+	if value, ok := fields["provider_code"]; ok && string(value) == "null" {
+		return fallback
+	}
+	var detail struct {
+		Code         string `json:"code"`
+		Stage        string `json:"stage"`
+		HTTPStatus   int    `json:"http_status"`
+		ProviderCode string `json:"provider_code"`
+	}
+	if decodeExactJSON(outer.Error, &detail) != nil || detail.HTTPStatus < 100 || detail.HTTPStatus > 599 || detail.HTTPStatus != status {
+		return fallback
+	}
+	switch detail.Code {
+	case "provider_auth_rejected", "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", "unknown_failure":
+	default:
+		return fallback
+	}
+	switch detail.Stage {
+	case "provider", "request", "storage", "create", "service":
+	default:
+		return fallback
+	}
+	// Provider codes are a separate, fixed set, never arbitrary upstream text.
+	switch detail.ProviderCode {
+	case "", "unauthorized", "forbidden", "rate_limit_exceeded", "resource_unavailable", "invalid_input":
+	default:
+		return fallback
+	}
+	return webHTTPError{Status: detail.HTTPStatus, Code: detail.Code, Stage: detail.Stage, ProviderCode: detail.ProviderCode}
+}

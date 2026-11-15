@@ -10,8 +10,10 @@ guaranteed or proven.
 
 This skill does not grant access to Hetzner, GoAsterWeb, Telegram, a server,
 SSH, or any secret. Load `goaster-env` and `hetzner-auth` for the configured
-Hetzner credential source and token-scoped project checks. A read-only price
-estimate and availability check do not authorize a billable creation.
+Hetzner credential source and token-scoped project checks. Public indicative
+pricing and discovery are informational; the final authoritative availability
+check is internal to the approved migration workflow and neither authorizes a
+billable creation by itself.
 
 The user must explicitly approve the exact server type, optional strict
 location list, current public gross estimate/currency (or unavailable
