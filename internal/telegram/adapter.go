@@ -188,6 +188,7 @@ const (
 	telegramGetEnvironmentCommand      = telegramcommands.GetEnvironmentCommand
 	telegramEnvironmentAcceptKeyword   = "ACCEPT"
 	telegramEnvironmentFilename        = "goaster.env"
+	telegramEnvironmentStarter         = "# Add your environment variables below.\n"
 )
 
 const telegramEnvironmentInstructions = "To update settings, attach a document named goaster.env to /env in the same message. Never paste secret values into chat."
@@ -692,6 +693,9 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 			diagnostics.Error("telegram.environment.read", err)
 			a.send(ctx, m.Chat.ID, "The environment file is unavailable.")
 			return
+		}
+		if len(data) == 0 {
+			data = []byte(telegramEnvironmentStarter)
 		}
 		if err := sendDocument(ctx, a.client, a.apiBase, a.token, m.Chat.ID, telegramEnvironmentFilename, data); err != nil {
 			a.send(ctx, m.Chat.ID, "The environment file could not be sent.")

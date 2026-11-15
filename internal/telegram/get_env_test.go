@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,36 @@ import (
 
 	"goaster/internal/localenv"
 )
+
+func telegramDocumentContent(t *testing.T, contentType string, body []byte) []byte {
+	t.Helper()
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
+		t.Fatal("sendDocument used an invalid multipart content type")
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal("could not read sendDocument multipart body")
+		}
+		content, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatal("could not read sendDocument document")
+		}
+		if part.FormName() == "document" {
+			if part.FileName() != telegramEnvironmentFilename {
+				t.Fatal("sendDocument used an unexpected filename")
+			}
+			return content
+		}
+	}
+	t.Fatal("sendDocument did not include a document")
+	return nil
+}
 
 func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 	home := t.TempDir()
@@ -27,6 +59,7 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 	}
 
 	var documentBodies [][]byte
+	var documentContentTypes []string
 	messageCount := 0
 	a := adapter{
 		token:   testToken,
@@ -44,6 +77,7 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 					t.Fatalf("sendDocument content type = %q", r.Header.Get("Content-Type"))
 				}
 				documentBodies = append(documentBodies, documentBody)
+				documentContentTypes = append(documentContentTypes, r.Header.Get("Content-Type"))
 				return response(http.StatusOK, `{"ok":true,"result":true}`), nil
 			case strings.HasSuffix(r.URL.Path, "/sendMessage"):
 				messageCount++
@@ -77,8 +111,12 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 	if !bytes.Contains(documentBodies[0], []byte(`filename="goaster.env"`)) {
 		t.Fatal("sendDocument did not use the goaster.env filename")
 	}
-	if !bytes.Contains(documentBodies[0], []byte("API_TOKEN=synthetic-secret\nSERVICE_REGION=test-region\n")) {
-		t.Fatal("sendDocument did not contain the saved file bytes")
+	savedFileBytes, err := os.ReadFile(filepath.Join(home, ".goaster", "env"))
+	if err != nil {
+		t.Fatal("could not read saved environment file for comparison")
+	}
+	if !bytes.Equal(telegramDocumentContent(t, documentContentTypes[0], documentBodies[0]), savedFileBytes) {
+		t.Fatal("sendDocument did not preserve the saved file bytes")
 	}
 
 	if err := os.RemoveAll(filepath.Join(home, ".goaster")); err != nil {
@@ -89,21 +127,36 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 		t.Fatalf("sendDocument calls after missing file = %d, want 2", len(documentBodies))
 	}
 	missingDocument := documentBodies[1]
-	filenameAt := bytes.Index(missingDocument, []byte(`filename="goaster.env"`))
-	if filenameAt < 0 {
-		t.Fatal("empty sendDocument did not use the goaster.env filename")
+	if !bytes.Contains(missingDocument, []byte("\r\n\r\n42\r\n")) {
+		t.Fatal("missing environment export did not target the authorized private chat")
 	}
-	contentAt := bytes.Index(missingDocument[filenameAt:], []byte("\r\n\r\n"))
-	if contentAt < 0 {
-		t.Fatal("empty sendDocument document part had no content header")
+	if !bytes.Equal(telegramDocumentContent(t, documentContentTypes[1], missingDocument), []byte("# Add your environment variables below.\n")) {
+		t.Fatal("missing environment export did not contain the starter comment")
 	}
-	contentAt += filenameAt + len("\r\n\r\n")
-	contentEnd := bytes.Index(missingDocument[contentAt:], []byte("\r\n--"))
-	if contentEnd < 0 || contentEnd != 0 {
-		t.Fatalf("missing environment export was not empty: %q", missingDocument[contentAt:])
+	if _, err := os.Stat(filepath.Join(home, ".goaster", "env")); !os.IsNotExist(err) {
+		t.Fatal("missing environment export wrote a starter file to disk")
+	}
+
+	if err := os.MkdirAll(filepath.Join(home, ".goaster"), 0700); err != nil {
+		t.Fatal("could not create environment directory for empty-file case")
+	}
+	emptyFilePath := filepath.Join(home, ".goaster", "env")
+	if err := os.WriteFile(emptyFilePath, nil, 0600); err != nil {
+		t.Fatal("could not create empty environment file")
+	}
+	a.handle(context.Background(), privateMessage(42, telegramGetEnvironmentCommand))
+	if len(documentBodies) != 3 {
+		t.Fatalf("sendDocument calls after zero-byte file = %d, want 3", len(documentBodies))
+	}
+	if !bytes.Equal(telegramDocumentContent(t, documentContentTypes[2], documentBodies[2]), []byte("# Add your environment variables below.\n")) {
+		t.Fatal("zero-byte environment export did not contain the starter comment")
+	}
+	info, err := os.Stat(emptyFilePath)
+	if err != nil || info.Size() != 0 {
+		t.Fatal("zero-byte environment export changed the saved file")
 	}
 	if messageCount != 0 {
-		t.Fatalf("missing environment file sent %d text messages, want only the empty document", messageCount)
+		t.Fatalf("environment export sent %d text messages, want only documents", messageCount)
 	}
 }
 
