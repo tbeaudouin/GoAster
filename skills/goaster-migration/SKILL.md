@@ -15,6 +15,14 @@ the bounded HTTPS requests, local login-key and owner-secret generation,
 owns the provider create sequence, callback secret, Redis handoff, destination
 installation, host-key pinning, setup, and fresh OpenAI/Telegram authorization.
 
+Use the migration tool's exact action names: `estimate` (or `quote`) for
+informational pricing, `availability` for the read-only location check,
+`start` to begin the approved monitor/create workflow, `status` to
+inspect that monitor, and `stop` to stop it. Do not use the generic
+`cron` tool for migration availability, monitor resumption, or provisioning;
+the migration flow must use `goaster_migration` and its separate migration
+scheduler/store.
+
 Do not add a migration daemon, provider-create script, Telegram command,
 destination SSH step, or background-command workaround. There is no new
 database or second attempt ledger. The existing scheduler file is only the non-secret monitor

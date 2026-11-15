@@ -515,9 +515,11 @@ func (s *Session) Reply(ctx context.Context, message string) (string, error) {
 	return s.replyWithAttachments(ctx, message, nil, false)
 }
 
+type scheduledTurnKey struct{}
+
 // ReplyScheduled refreshes a stale on-disk conversation before running a job.
 func (s *Session) ReplyScheduled(ctx context.Context, message string) (string, error) {
-	return s.replyWithAttachments(ctx, message, nil, true)
+	return s.replyWithAttachments(context.WithValue(ctx, scheduledTurnKey{}, true), message, nil, true)
 }
 
 // ReplyWithAttachments sends one current-turn message with temporary local

@@ -68,6 +68,12 @@ func (ReviewRequiredError) Is(target error) bool { return target == ErrReviewReq
 // scheduler never interprets the message as a shell command.
 type Executor func(context.Context, string) error
 
+// JobExecutor is the job-aware form of Executor. It is useful when the
+// executor must retain non-model metadata such as the originating chat. The
+// legacy Executor remains supported for migration and other message-only
+// callers.
+type JobExecutor func(context.Context, Job) error
+
 // Schedule describes one supported schedule kind. AtSeconds is a positive
 // delay from now; EverySeconds is a recurring interval; CronExpr is a
 // five-field cron expression (or a six-field expression that includes
@@ -97,6 +103,12 @@ type Job struct {
 	RunCount       int        `json:"run_count"`
 	MaxRuns        int        `json:"max_runs,omitempty"`
 	DeleteAfterRun bool       `json:"delete_after_run,omitempty"`
+	// Origin fields are captured from transport context by the generic cron
+	// tool. They are never accepted from model arguments. Migration monitor
+	// jobs leave them empty and continue using their separate store path.
+	OriginChatID   int64  `json:"origin_chat_id,omitempty"`
+	OriginChatType string `json:"origin_chat_type,omitempty"`
+	OriginThreadID int64  `json:"origin_thread_id,omitempty"`
 }
 
 func (job Job) schedule() Schedule {
@@ -126,9 +138,10 @@ type Patch struct {
 // Options configures a scheduler. An empty Path selects
 // ~/.goaster/artefacts/state/cron/jobs.json.
 type Options struct {
-	Path     string
-	Executor Executor
-	Now      func() time.Time
+	Path        string
+	Executor    Executor
+	JobExecutor JobExecutor
+	Now         func() time.Time
 }
 
 // Store persists jobs in one private JSON file.
@@ -460,16 +473,17 @@ func initialNextRun(schedule Schedule, now time.Time) (*time.Time, error) {
 }
 
 type Scheduler struct {
-	mu       sync.Mutex
-	store    *Store
-	executor Executor
-	now      func() time.Time
-	jobs     map[string]Job
-	saveJobs func([]Job) error // Optional seam for persistence failures.
-	wake     chan struct{}
-	started  bool
-	cancel   context.CancelFunc
-	done     chan struct{}
+	mu          sync.Mutex
+	store       *Store
+	executor    Executor
+	jobExecutor JobExecutor
+	now         func() time.Time
+	jobs        map[string]Job
+	saveJobs    func([]Job) error // Optional seam for persistence failures.
+	wake        chan struct{}
+	started     bool
+	cancel      context.CancelFunc
+	done        chan struct{}
 }
 
 // New loads the persisted scheduler state.
@@ -501,11 +515,12 @@ func New(options Options) (*Scheduler, error) {
 		now = time.Now
 	}
 	scheduler := &Scheduler{
-		store:    store,
-		executor: options.Executor,
-		now:      now,
-		jobs:     make(map[string]Job, len(jobs)),
-		wake:     make(chan struct{}, 1),
+		store:       store,
+		executor:    options.Executor,
+		jobExecutor: options.JobExecutor,
+		now:         now,
+		jobs:        make(map[string]Job, len(jobs)),
+		wake:        make(chan struct{}, 1),
 	}
 	changed := false
 	for _, job := range jobs {
@@ -1230,12 +1245,17 @@ func (s *Scheduler) executeClaim(ctx context.Context, claimed Job) {
 	started := s.now()
 	var executionErr error
 	owned := false
-	if s.executor == nil {
+	if s.jobExecutor == nil && s.executor == nil {
 		executionErr = errors.New("cron scheduler executor is nil")
 	} else {
 		owner := executionOwner{scheduler: s.wake, id: claimed.ID, state: make(chan bool, 1)}
 		owner.state <- false
-		executionErr = s.executor(context.WithValue(ctx, executionOwnerKey{}, owner), claimed.Message)
+		executionContext := context.WithValue(ctx, executionOwnerKey{}, owner)
+		if s.jobExecutor != nil {
+			executionErr = s.jobExecutor(executionContext, claimed)
+		} else {
+			executionErr = s.executor(executionContext, claimed.Message)
+		}
 		owned = <-owner.state
 		owner.state <- true
 	}

@@ -1766,3 +1766,62 @@ func TestPollingUnknownUsernameDoesNotStopAddressedToOtherBot(t *testing.T) {
 		t.Fatal("polling did not exit")
 	}
 }
+
+func TestScheduledDeliveryUsesPersistedChatAndThreadOrigin(t *testing.T) {
+	var sent []struct {
+		ChatID   int64  `json:"chat_id"`
+		ThreadID int64  `json:"message_thread_id"`
+		Text     string `json:"text"`
+	}
+	var acknowledged []string
+	a := adapter{
+		token:         "bot-token",
+		apiBase:       "https://example.invalid",
+		controlSecret: "control-secret",
+		agent: doerFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get(telegramControlAuthorizationHeader) != "control-secret" {
+				t.Fatal("scheduled delivery request was not authenticated")
+			}
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == controltransport.ScheduledDeliveriesPath:
+				return response(http.StatusOK, `{"deliveries":[{"id":"delivery-1-2","chat_id":42,"thread_id":9,"text":"scheduled reply"}]}`), nil
+			case r.Method == http.MethodPost && r.URL.Path == controltransport.ScheduledDeliveriesAckPath:
+				var request struct {
+					IDs []string `json:"ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					return nil, err
+				}
+				acknowledged = append(acknowledged, request.IDs...)
+				return response(http.StatusOK, `{"acknowledged":true}`), nil
+			default:
+				t.Fatalf("unexpected agent request %s %s", r.Method, r.URL.Path)
+				return nil, errors.New("unexpected agent request")
+			}
+		}),
+		client: doerFunc(func(r *http.Request) (*http.Response, error) {
+			if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
+				t.Fatalf("unexpected Telegram request %s", r.URL.Path)
+			}
+			var payload struct {
+				ChatID   int64  `json:"chat_id"`
+				ThreadID int64  `json:"message_thread_id"`
+				Text     string `json:"text"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				return nil, err
+			}
+			sent = append(sent, payload)
+			return response(http.StatusOK, `{"ok":true,"result":{"message_id":1}}`), nil
+		}),
+	}
+	deliverScheduled(context.Background(), func(ctx context.Context, chatID int64, text string) error {
+		return a.send(ctx, chatID, text)
+	}, a.agent, a.controlSecret)
+	if len(sent) != 1 || sent[0].ChatID != 42 || sent[0].ThreadID != 9 || sent[0].Text != "scheduled reply" {
+		t.Fatalf("scheduled Telegram message = %+v", sent)
+	}
+	if len(acknowledged) != 1 || acknowledged[0] != "delivery-1-2" {
+		t.Fatalf("scheduled delivery acknowledgement = %v", acknowledged)
+	}
+}

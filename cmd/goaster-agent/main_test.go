@@ -1600,7 +1600,7 @@ func TestStartMigrationRuntimeOrderingAndFailure(t *testing.T) {
 		if !started || stopped || tool.Name != "goaster_migration" {
 			t.Fatal("registration preceded scheduler readiness")
 		}
-		result, err := tool.Handler(chat.WithConversationType(t.Context(), "private"), `{"action":"start","server_type":""}`)
+		result, err := tool.Handler(chat.WithConversationType(t.Context(), "private"), `{"action":"start_monitor","server_type":""}`)
 		if err != nil || strings.Contains(result, "scheduler capability is unavailable") {
 			t.Fatalf("runtime not wired: %s %v", result, err)
 		}

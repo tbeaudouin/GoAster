@@ -93,6 +93,11 @@ func TestMigrationToolKeepsSecretsAndModelApprovalOutOfSchema(t *testing.T) {
 	if err != nil || !strings.Contains(result, `"rejected"`) || starts.Load() != 0 {
 		t.Fatalf("model-selected monitor ID = %q, %v; starts=%d", result, err, starts.Load())
 	}
+	scheduled := context.WithValue(WithConversationType(context.Background(), "private"), scheduledTurnKey{}, true)
+	result, err = registrar.tool.Handler(scheduled, `{"action":"start","server_type":"cx22"}`)
+	if err != nil || !strings.Contains(result, `"rejected"`) || starts.Load() != 0 {
+		t.Fatalf("scheduled start = %q, %v; starts=%d", result, err, starts.Load())
+	}
 	result, err = registrar.tool.Handler(WithConversationType(context.Background(), "private"), `{"action":"start","server_type":"cx22"}`)
 	if err != nil || !strings.Contains(result, `"created"`) || starts.Load() != 1 {
 		t.Fatalf("trusted start delegation = %q, %v; starts=%d", result, err, starts.Load())

@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -145,6 +146,73 @@ func TestCronToolSupportsAtAndCronSchedulesAndRejectsAmbiguousAdd(t *testing.T) 
 		t.Fatal("at_seconds tool description is missing")
 	} else if description != "Positive number of seconds from now for a one-time chat turn" {
 		t.Fatalf("at_seconds tool description = %q", description)
+	}
+}
+
+func TestCronToolScopesManagementAndExecutionOriginToConversation(t *testing.T) {
+	jobs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json"), Now: func() time.Time { return time.Unix(1000, 0) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrar := &cronToolTestRegistrar{}
+	if err := RegisterCronTool(registrar, jobs); err != nil {
+		t.Fatal(err)
+	}
+	conversation := func(chatID, threadID int64) context.Context {
+		ctx := WithConversationType(context.Background(), "group")
+		ctx = WithConversationID(ctx, chatID)
+		return WithConversationThreadID(ctx, threadID)
+	}
+	add := func(ctx context.Context, message string) scheduler.Job {
+		result, err := registrar.tool.Handler(ctx, `{"action":"add","every_seconds":60,"message":"`+message+`"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(result, "origin_chat") {
+			t.Fatalf("cron result exposed transport origin: %s", result)
+		}
+		var job scheduler.Job
+		if err := json.Unmarshal([]byte(result), &job); err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+
+	first := add(conversation(101, 7), "first")
+	second := add(conversation(202, 8), "second")
+	if _, err := registrar.tool.Handler(conversation(101, 7), `{"action":"add","every_seconds":60,"message":"spoof","chat_id":202}`); err == nil {
+		t.Fatal("model-supplied cron recipient unexpectedly succeeded")
+	}
+	for _, test := range []struct {
+		name     string
+		ctx      context.Context
+		wantID   string
+		wantSize int
+	}{{"first", conversation(101, 7), first.ID, 1}, {"second", conversation(202, 8), second.ID, 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := registrar.tool.Handler(test.ctx, `{"action":"list"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var listed struct {
+				Jobs []scheduler.Job `json:"jobs"`
+			}
+			if err := json.Unmarshal([]byte(result), &listed); err != nil {
+				t.Fatal(err)
+			}
+			if len(listed.Jobs) != test.wantSize || listed.Jobs[0].ID != test.wantID {
+				t.Fatalf("conversation jobs = %+v", listed.Jobs)
+			}
+		})
+	}
+	if _, err := registrar.tool.Handler(conversation(101, 7), fmt.Sprintf(`{"action":"get","id":%q}`, second.ID)); !errors.Is(err, scheduler.ErrJobNotFound) {
+		t.Fatalf("cross-conversation get error = %v", err)
+	}
+	if _, err := registrar.tool.Handler(conversation(101, 7), fmt.Sprintf(`{"action":"update","id":%q,"message":"hijacked"}`, second.ID)); !errors.Is(err, scheduler.ErrJobNotFound) {
+		t.Fatalf("cross-conversation update error = %v", err)
+	}
+	if saved, ok := jobs.Get(second.ID); !ok || saved.Message != "second" || saved.OriginChatID != 202 || saved.OriginThreadID != 8 {
+		t.Fatalf("cross-conversation mutation changed job = %+v", saved)
 	}
 }
 

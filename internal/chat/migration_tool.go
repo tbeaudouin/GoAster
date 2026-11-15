@@ -14,6 +14,8 @@ import (
 const migrationToolName = "goaster_migration"
 
 type conversationTypeKey struct{}
+type conversationIDKey struct{}
+type conversationThreadIDKey struct{}
 
 // WithConversationType carries transport-provided conversation context.
 func WithConversationType(ctx context.Context, kind string) context.Context {
@@ -23,6 +25,36 @@ func WithConversationType(ctx context.Context, kind string) context.Context {
 		kind = "unknown"
 	}
 	return context.WithValue(ctx, conversationTypeKey{}, kind)
+}
+
+// WithConversationID carries the transport-validated chat identity. Model
+// arguments never populate this value; the agent sets it from the inbound
+// control request before invoking a session.
+func WithConversationID(ctx context.Context, chatID int64) context.Context {
+	return context.WithValue(ctx, conversationIDKey{}, chatID)
+}
+
+// ConversationID returns the transport-provided chat identity when present.
+func ConversationID(ctx context.Context) (int64, bool) {
+	chatID, ok := ctx.Value(conversationIDKey{}).(int64)
+	return chatID, ok
+}
+
+// WithConversationThreadID carries an optional Telegram forum-topic identity.
+func WithConversationThreadID(ctx context.Context, threadID int64) context.Context {
+	return context.WithValue(ctx, conversationThreadIDKey{}, threadID)
+}
+
+// ConversationThreadID returns the transport-provided forum-topic identity.
+func ConversationThreadID(ctx context.Context) (int64, bool) {
+	threadID, ok := ctx.Value(conversationThreadIDKey{}).(int64)
+	return threadID, ok
+}
+
+// ConversationType returns the normalized transport conversation type.
+func ConversationType(ctx context.Context) string {
+	kind, _ := ctx.Value(conversationTypeKey{}).(string)
+	return kind
 }
 
 // MigrationToolOperations keeps the model-facing control plane separate from
@@ -117,6 +149,9 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		return encodeMigrationToolResult(result)
 	case "start":
+		if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled {
+			return migrationToolRejected(errors.New("migration start requires an interactive conversation")), nil
+		}
 		if kind, _ := ctx.Value(conversationTypeKey{}).(string); kind != "private" {
 			return migrationToolRejected(errors.New("migration start requires a private conversation")), nil
 		}

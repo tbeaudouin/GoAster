@@ -552,3 +552,28 @@ func TestRunningSchedulerRecoversInterruptedExecutionClaim(t *testing.T) {
 		t.Fatalf("explicit re-enable: %v", err)
 	}
 }
+
+func TestJobExecutorReceivesScheduledClaimOwnership(t *testing.T) {
+	now := time.Unix(1000, 0)
+	var claim func(context.Context, string) (Job, func(error) (Job, error), error)
+	var claimErr error
+	jobs, err := New(Options{Path: filepath.Join(t.TempDir(), "jobs.json"), Now: func() time.Time { return now }, JobExecutor: func(ctx context.Context, job Job) error {
+		_, finish, err := claim(ctx, job.ID)
+		if err == nil && finish != nil {
+			err = errors.New("scheduled claim returned direct completion")
+		}
+		claimErr = err
+		return err
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim = jobs.ClaimExecution
+	if _, err := jobs.Add(Job{ID: "job-owner", Kind: ScheduleEvery, EverySeconds: 1, Message: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	if runs := jobs.RunDue(context.Background()); runs != 1 || claimErr != nil {
+		t.Fatalf("runs = %d, claim = %v", runs, claimErr)
+	}
+}

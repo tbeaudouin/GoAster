@@ -31,19 +31,20 @@ type httpDoer interface {
 }
 
 type adapter struct {
-	token              string
-	pairing            *pairing
-	pairingMu          sync.Mutex
-	turnMu             sync.Mutex
-	activeTurns        map[telegramTurnKey][]telegramActiveTurn
-	nextTurnID         uint64
-	environmentMu      sync.Mutex
-	environmentBlocked map[environmentProposalKey]bool
-	client             httpDoer
-	agent              httpDoer
-	controlSecret      string
-	apiBase            string
-	attachmentMaxBytes int64 // test seam; zero uses attachment.MaxBytes.
+	token                    string
+	pairing                  *pairing
+	pairingMu                sync.Mutex
+	turnMu                   sync.Mutex
+	activeTurns              map[telegramTurnKey][]telegramActiveTurn
+	nextTurnID               uint64
+	environmentMu            sync.Mutex
+	environmentBlocked       map[environmentProposalKey]bool
+	client                   httpDoer
+	agent                    httpDoer
+	controlSecret            string
+	apiBase                  string
+	attachmentMaxBytes       int64 // test seam; zero uses attachment.MaxBytes.
+	scheduledDeliveryEnabled bool
 }
 
 type update struct {
@@ -230,10 +231,11 @@ func Run(ctx context.Context, paths Paths, ready func() error) error {
 	}
 	a := &adapter{
 		token: string(token), pairing: pairing,
-		controlSecret: controlSecret,
-		client:        &http.Client{Timeout: 40 * time.Second, CheckRedirect: noRedirect},
-		agent:         agent,
-		apiBase:       "https://api.telegram.org",
+		controlSecret:            controlSecret,
+		client:                   &http.Client{Timeout: 40 * time.Second, CheckRedirect: noRedirect},
+		agent:                    agent,
+		apiBase:                  "https://api.telegram.org",
+		scheduledDeliveryEnabled: true,
 	}
 	return a.run(ctx, ready)
 }
@@ -355,6 +357,11 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 			if item.ID < int64(^uint64(0)>>1) {
 				offset = item.ID + 1
 			}
+		}
+		if a.scheduledDeliveryEnabled || a.controlSecret != "" {
+			deliverScheduled(ctx, func(sendContext context.Context, chatID int64, text string) error {
+				return a.send(sendContext, chatID, text)
+			}, a.agent, a.controlSecret)
 		}
 		if ctx.Err() != nil {
 			return nil
@@ -963,6 +970,119 @@ func (a *adapter) startTyping(ctx context.Context, chatID int64) func() {
 	}
 }
 
+func deliverScheduled(ctx context.Context, send func(context.Context, int64, string) error, agent httpDoer, controlSecret string) {
+	if send == nil {
+		diagnostics.Error("telegram.cron.delivery", errors.New("scheduled delivery sender is unavailable"), diagnostics.Field{Key: "reason", Value: "sender is unavailable"})
+		return
+	}
+	deliveries, err := scheduledDeliveries(ctx, agent, controlSecret)
+	if err != nil {
+		return
+	}
+	acknowledged := make([]string, 0, len(deliveries))
+	for _, delivery := range deliveries {
+		if ctx.Err() != nil {
+			return
+		}
+		if delivery.ID == "" || delivery.ChatID == 0 || delivery.ThreadID < 0 || strings.TrimSpace(delivery.Text) == "" {
+			diagnostics.Error("telegram.cron.delivery", errors.New("scheduled delivery is invalid"), diagnostics.Field{Key: "reason", Value: "invalid delivery"})
+			continue
+		}
+		deliveryContext := context.WithValue(ctx, telegramThreadKey{}, delivery.ThreadID)
+		delivered := true
+		for _, chunk := range splitTelegramMarkdown(delivery.Text, 2000) {
+			if err := send(deliveryContext, delivery.ChatID, chunk); err != nil {
+				delivered = false
+				break
+			}
+		}
+		if delivered {
+			acknowledged = append(acknowledged, delivery.ID)
+		}
+	}
+	if len(acknowledged) > 0 {
+		_ = ackScheduled(ctx, agent, controlSecret, acknowledged)
+	}
+}
+
+func scheduledDeliveries(ctx context.Context, agent httpDoer, controlSecret string) ([]chat.ScheduledDelivery, error) {
+	if agent == nil {
+		return nil, telegramAgentFailure(errors.New("remote agent client is unavailable"), "", 0, "")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:8765"+controltransport.ScheduledDeliveriesPath, nil)
+	if err != nil {
+		return nil, telegramAgentFailure(fmt.Errorf("build scheduled delivery request: %w", err), "", 0, "")
+	}
+	request.Header.Set(telegramControlAuthorizationHeader, controlSecret)
+	response, err := agent.Do(request)
+	if err != nil {
+		return nil, telegramAgentFailure(fmt.Errorf("scheduled delivery transport: %w", err), "", 0, "")
+	}
+	if response == nil || response.Body == nil {
+		return nil, telegramAgentFailure(errors.New("scheduled delivery response body is missing"), "", 0, "")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, telegramAgentFailure(fmt.Errorf("scheduled delivery returned status %s", response.Status), response.Status, 0, response.Header.Get("x-request-id"))
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024+1))
+	if err != nil {
+		return nil, telegramAgentFailure(fmt.Errorf("read scheduled delivery response: %w", err), response.Status, 0, response.Header.Get("x-request-id"))
+	}
+	if len(data) > 4*1024*1024 {
+		return nil, telegramAgentFailure(errors.New("scheduled delivery response exceeds the limit"), response.Status, 0, response.Header.Get("x-request-id"))
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var result struct {
+		Deliveries []chat.ScheduledDelivery `json:"deliveries"`
+	}
+	if err := decoder.Decode(&result); err != nil {
+		return nil, telegramAgentFailure(fmt.Errorf("decode scheduled delivery response: %w", err), response.Status, 0, response.Header.Get("x-request-id"))
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = errors.New("scheduled delivery response contains trailing data")
+		}
+		return nil, telegramAgentFailure(err, response.Status, 0, response.Header.Get("x-request-id"))
+	}
+	return result.Deliveries, nil
+}
+
+func ackScheduled(ctx context.Context, agent httpDoer, controlSecret string, ids []string) error {
+	if agent == nil {
+		return telegramAgentFailure(errors.New("remote agent client is unavailable"), "", 0, "")
+	}
+	data, err := json.Marshal(struct {
+		IDs []string `json:"ids"`
+	}{IDs: ids})
+	if err != nil {
+		return telegramAgentFailure(fmt.Errorf("encode scheduled delivery acknowledgement: %w", err), "", 0, "")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:8765"+controltransport.ScheduledDeliveriesAckPath, bytes.NewReader(data))
+	if err != nil {
+		return telegramAgentFailure(fmt.Errorf("build scheduled delivery acknowledgement: %w", err), "", 0, "")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(telegramControlAuthorizationHeader, controlSecret)
+	response, err := agent.Do(request)
+	if err != nil {
+		return telegramAgentFailure(fmt.Errorf("scheduled delivery acknowledgement transport: %w", err), "", 0, "")
+	}
+	if response == nil || response.Body == nil {
+		return telegramAgentFailure(errors.New("scheduled delivery acknowledgement response body is missing"), "", 0, "")
+	}
+	defer response.Body.Close()
+	if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 16*1024)); err != nil {
+		return telegramAgentFailure(fmt.Errorf("read scheduled delivery acknowledgement: %w", err), response.Status, 0, response.Header.Get("x-request-id"))
+	}
+	if response.StatusCode != http.StatusOK {
+		return telegramAgentFailure(fmt.Errorf("scheduled delivery acknowledgement returned status %s", response.Status), response.Status, 0, response.Header.Get("x-request-id"))
+	}
+	return nil
+}
+
 func telegramThreadID(ctx context.Context) int64 {
 	id, _ := ctx.Value(telegramThreadKey{}).(int64)
 	return id
@@ -1131,9 +1251,10 @@ func askAgentWithUser(ctx context.Context, text string, chatID, userID int64, at
 		Message     string                `json:"message"`
 		ChatID      int64                 `json:"chat_id"`
 		ChatType    string                `json:"chat_type,omitempty"`
+		ThreadID    int64                 `json:"thread_id,omitempty"`
 		UserID      int64                 `json:"user_id,omitempty"`
 		Attachments []attachment.Incoming `json:"attachments,omitempty"`
-	}{Message: text, ChatID: chatID, ChatType: agentChatType(ctx), UserID: userID, Attachments: attachments})
+	}{Message: text, ChatID: chatID, ChatType: agentChatType(ctx), ThreadID: telegramThreadID(ctx), UserID: userID, Attachments: attachments})
 	if err != nil {
 		return "", telegramAgentFailure(fmt.Errorf("encode agent request: %w", err), "", 0, "")
 	}

@@ -326,6 +326,30 @@ func serve(store chat.CredentialStore) (serveErr error) {
 		return err
 	}
 	defer func() { serveErr = errors.Join(serveErr, backgroundManager.Close()) }()
+	sessionFor := newAgentSessionFactory(func(chatID int64) agentSession {
+		return newAgentSession(provider, setup.memory, setup.registry, chatID)
+	})
+	var deliveryQueue cronDeliveryQueue
+	cronJobs, err := newCronScheduler(sessionFor, func(job scheduler.Job, reply string) error {
+		if deliveryQueue.Enqueue == nil {
+			return errors.New("generic cron delivery queue is unavailable")
+		}
+		return deliveryQueue.Enqueue(job, reply)
+	})
+	if err != nil {
+		return err
+	}
+	deliveryQueue, err = newCronDeliveryQueue(filepath.Join(filepath.Dir(cronJobs.Path()), "deliveries.json"))
+	if err != nil {
+		return fmt.Errorf("initialize generic cron delivery queue: %w", err)
+	}
+	if err := chat.RegisterCronTool(provider, cronJobs); err != nil {
+		return fmt.Errorf("register cron tool: %w", err)
+	}
+	if err := cronJobs.Start(ctx); err != nil {
+		return fmt.Errorf("start generic cron scheduler: %w", err)
+	}
+	defer cronJobs.Stop()
 	migrationOptions := pairedMigrationOptions()
 	migrationJobs, err := newMigrationScheduler(migrationOptions)
 	if err != nil {
@@ -344,7 +368,7 @@ func serve(store chat.CredentialStore) (serveErr error) {
 			serveErr = errors.Join(serveErr, err)
 		}
 	}()
-	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecret(provider, setup.memory, provider.CheckAuth, setup.registry, controlSecret), ReadHeaderTimeout: 10 * time.Second}
+	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntime(provider.CheckAuth, setup.registry, controlSecret, sessionFor, deliveryQueue), ReadHeaderTimeout: 10 * time.Second}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -385,20 +409,17 @@ func normalServerStop(err error) bool {
 }
 
 func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat.MemoryStore, checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string) http.Handler {
-	var sessionsMu sync.Mutex
-	sessions := make(map[int64]*chat.Session)
+	return handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth, registry, controlSecret, newAgentSessionFactory(func(chatID int64) agentSession {
+		return newAgentSession(provider, memory, registry, chatID)
+	}), cronDeliveryQueue{})
+}
+
+func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue) http.Handler {
+	if sessionFor == nil {
+		sessionFor = func(int64, int64) agentSession { return nil }
+	}
 	var environmentSerialMu sync.Mutex
 	environmentProposals := make(map[environmentProposalKey]environmentProposal)
-	sessionFor := func(chatID int64) *chat.Session {
-		sessionsMu.Lock()
-		defer sessionsMu.Unlock()
-		if session := sessions[chatID]; session != nil {
-			return session
-		}
-		session := newAgentSession(provider, memory, registry, chatID)
-		sessions[chatID] = session
-		return session
-	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -429,6 +450,76 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 			diagnostics.Error("agent.healthz.write", err)
 		}
 	})
+	mux.HandleFunc(controltransport.ScheduledDeliveriesPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !validControlRequest(r, controlSecret) {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if deliveryQueue.Pending == nil {
+			http.Error(w, "scheduled delivery unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		deliveries, err := deliveryQueue.Pending()
+		if err != nil {
+			diagnostics.Error("agent.cron.outbox.load", err)
+			http.Error(w, "scheduled delivery unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(struct {
+			Deliveries []chat.ScheduledDelivery `json:"deliveries"`
+		}{Deliveries: deliveries}); err != nil {
+			diagnostics.Error("agent.cron.outbox.encode", err)
+		}
+	})
+	mux.HandleFunc(controltransport.ScheduledDeliveriesAckPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !validControlRequest(r, controlSecret) {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Content-Type") != "application/json" || deliveryQueue.Ack == nil {
+			http.Error(w, "scheduled delivery unavailable", http.StatusUnsupportedMediaType)
+			return
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
+		decoder.DisallowUnknownFields()
+		var request struct {
+			IDs []string `json:"ids"`
+		}
+		if err := decoder.Decode(&request); err != nil {
+			diagnostics.Error("agent.cron.outbox.ack_decode", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		var extra json.RawMessage
+		if err := decoder.Decode(&extra); err != io.EOF {
+			if err == nil {
+				err = errors.New("request contains multiple JSON values")
+			}
+			diagnostics.Error("agent.cron.outbox.ack_trailing_data", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if err := deliveryQueue.Ack(request.IDs); err != nil {
+			diagnostics.Error("agent.cron.outbox.ack", err)
+			http.Error(w, "scheduled delivery acknowledgement failed", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(struct {
+			Acknowledged bool `json:"acknowledged"`
+		}{Acknowledged: true}); err != nil {
+			diagnostics.Error("agent.cron.outbox.ack_encode", err)
+		}
+	})
 	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -446,6 +537,7 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 			Message     string                `json:"message"`
 			ChatID      int64                 `json:"chat_id"`
 			ChatType    string                `json:"chat_type,omitempty"`
+			ThreadID    int64                 `json:"thread_id,omitempty"`
 			UserID      int64                 `json:"user_id,omitempty"`
 			Attachments []attachment.Incoming `json:"attachments,omitempty"`
 		}
@@ -458,7 +550,7 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if request.ChatID == 0 || (strings.TrimSpace(request.Message) == "" && len(request.Attachments) == 0) {
+		if request.ChatID == 0 || request.ThreadID < 0 || (strings.TrimSpace(request.Message) == "" && len(request.Attachments) == 0) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
@@ -718,7 +810,13 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 				Arguments string `json:"arguments"`
 			}{"tool_call", name, arguments})
 		}
-		session := sessionFor(request.ChatID)
+		session := sessionFor(request.ChatID, request.ThreadID)
+		if session == nil {
+			err := errors.New("agent conversation session is unavailable")
+			diagnostics.Error("agent.chat.session", err, diagnostics.Field{Key: "reason", Value: "session factory returned nil"})
+			http.Error(w, "conversation session unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		if !chat.IsClearCommand(request.Message) {
 			if notice := session.PendingModelRecoveryNotice(); notice != "" {
 				emit(struct {
@@ -728,6 +826,8 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 			}
 		}
 		requestContext := chat.WithConversationType(r.Context(), request.ChatType)
+		requestContext = chat.WithConversationID(requestContext, request.ChatID)
+		requestContext = chat.WithConversationThreadID(requestContext, request.ThreadID)
 		requestContext = chat.WithToolCallObserver(requestContext, observer)
 		requestContext = chat.WithRuntimeFailureOperation(requestContext, "agent.chat")
 		values, environmentErr := runtimeEnvironment()
