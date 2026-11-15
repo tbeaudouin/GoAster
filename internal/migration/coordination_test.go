@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -42,7 +43,7 @@ func TestOfflineClaimCoordinatesImmediateCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	started, release := make(chan struct{}), make(chan struct{})
-	options := Options{WebOrigin: "https://example.invalid", LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { return nil }, HTTPClient: offlineDoer(func(r *http.Request) (*http.Response, error) {
+	options := Options{TempDirectory: t.TempDir(), MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, WebOrigin: "https://example.invalid", LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { return nil }, HTTPClient: offlineDoer(func(r *http.Request) (*http.Response, error) {
 		close(started)
 		<-release
 		return nil, errors.New("synthetic availability failure")
@@ -78,7 +79,7 @@ func TestOfflineVerificationFailureStopsMonitor(t *testing.T) {
 				t.Fatal(err)
 			}
 			jobs := &badVerificationScheduler{Scheduler: base, failStop: failStop}
-			options := Options{DeliverHandoff: func(context.Context, []byte) error { return nil }, HTTPClient: offlineDoer(func(*http.Request) (*http.Response, error) {
+			options := Options{TempDirectory: t.TempDir(), MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, DeliverHandoff: func(context.Context, []byte) error { return nil }, HTTPClient: offlineDoer(func(*http.Request) (*http.Response, error) {
 				t.Error("unexpected request")
 				return &http.Response{Body: io.NopCloser(strings.NewReader(""))}, nil
 			})}
@@ -101,7 +102,7 @@ func TestOfflineVerificationFailureStopsMonitor(t *testing.T) {
 func TestOfflineScheduledUnavailableReschedules(t *testing.T) {
 	now := time.Unix(1800000000, 0)
 	var jobs *scheduler.Scheduler
-	options := Options{WebOrigin: "https://example.invalid", LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { return nil }, HTTPClient: offlineDoer(func(*http.Request) (*http.Response, error) {
+	options := Options{TempDirectory: t.TempDir(), MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, WebOrigin: "https://example.invalid", LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { return nil }, HTTPClient: offlineDoer(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"version":"v1","server_type":"cx22","locations":[]}`))}, nil
 	})}
 	var err error
@@ -110,7 +111,14 @@ func TestOfflineScheduledUnavailableReschedules(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := Request{ServerType: "cx22", JobID: "migration-scheduled-offline"}
-	msg, err := schedulerMessage(req)
+	state, err := newOperation(req, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeOperation(options.TempDirectory, req.JobID, state); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := schedulerMessage(req, 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +158,7 @@ func TestClaimRejectsChangedMessageAndSchedule(t *testing.T) {
 				var jobs *scheduler.Scheduler
 				var wrapped changingClaimScheduler
 				calls := 0
-				opts := Options{LoadHetznerToken: func() (string, error) { calls++; return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { calls++; return nil }, HTTPClient: offlineDoer(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected request") })}
+				opts := Options{TempDirectory: t.TempDir(), MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, LoadHetznerToken: func() (string, error) { calls++; return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { calls++; return nil }, HTTPClient: offlineDoer(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected request") })}
 				var err error
 				jobs, err = scheduler.New(scheduler.Options{Path: path, Now: func() time.Time { return now }, Executor: func(ctx context.Context, message string) error { return ScheduledExecutor(ctx, message, wrapped, opts) }})
 				if err != nil {
@@ -176,7 +184,7 @@ func TestClaimRejectsChangedMessageAndSchedule(t *testing.T) {
 				}}
 				req := Request{ServerType: "cx22", JobID: "migration-race"}
 				if scheduled {
-					msg, err := schedulerMessage(req)
+					msg, err := schedulerMessage(req, 42)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -207,7 +215,7 @@ func TestRunDueAvailableCreateLostResponseAndStop(t *testing.T) {
 			now := time.Unix(1800000000, 0).UTC()
 			started, release := make(chan struct{}), make(chan struct{})
 			availability, creates, deliveries := 0, 0, 0
-			options := Options{WebOrigin: "https://example.invalid", Now: func() time.Time { return now }, TempDirectory: t.TempDir(), LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { deliveries++; return nil }, HTTPClient: offlineDoer(func(r *http.Request) (*http.Response, error) {
+			options := Options{TempDirectory: t.TempDir(), MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, WebOrigin: "https://example.invalid", Now: func() time.Time { return now }, LoadHetznerToken: func() (string, error) { return "synthetic", nil }, DeliverHandoff: func(context.Context, []byte) error { deliveries++; return nil }, HTTPClient: offlineDoer(func(r *http.Request) (*http.Response, error) {
 				switch r.URL.Path {
 				case "/migration/v1/machines/availability":
 					availability++
@@ -221,12 +229,20 @@ func TestRunDueAvailableCreateLostResponseAndStop(t *testing.T) {
 					if scenario == "lost_response" {
 						return nil, errors.New("synthetic lost response")
 					}
-					body := `{"version":"v1","state":"created","attempt":"` + strings.Repeat("a", 64) + `","server_label":"goaster-migration-` + strings.Repeat("a", 16) + `","server_id":123,"ip":"198.51.100.10","owner_url":"https://example.invalid/migration#attempt=` + strings.Repeat("a", 64) + `","expires":1800003600}`
+					var requestBody struct {
+						OperationID string `json:"operation_id"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+						return nil, err
+					}
+					id := requestBody.OperationID
+					body := `{"version":"v1","state":"created","attempt":"` + id + `","server_label":"goaster-migration-` + id[:16] + `","server_id":123,"ip":"198.51.100.10","owner_url":"https://example.invalid/migration#attempt=` + id + `","expires":1800003600}`
 					return &http.Response{StatusCode: 201, Body: io.NopCloser(strings.NewReader(body))}, nil
 				default:
 					return nil, errors.New("unexpected request")
 				}
 			})}
+			options.PrepareRecipientHandoff = func(int64) (func(context.Context, []byte) error, error) { return options.DeliverHandoff, nil }
 			var jobs *scheduler.Scheduler
 			var err error
 			jobs, err = scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json"), Now: func() time.Time { return now }, Executor: func(ctx context.Context, msg string) error { return ScheduledExecutor(ctx, msg, jobs, options) }})
@@ -234,7 +250,14 @@ func TestRunDueAvailableCreateLostResponseAndStop(t *testing.T) {
 				t.Fatal(err)
 			}
 			req := Request{ServerType: "cx22", Locations: []string{"fsn1"}, JobID: "migration-due"}
-			msg, err := schedulerMessage(req)
+			state, err := newOperation(req, 42)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := storeOperation(options.TempDirectory, req.JobID, state); err != nil {
+				t.Fatal(err)
+			}
+			msg, err := schedulerMessage(req, 42)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -271,4 +294,9 @@ func TestRunDueAvailableCreateLostResponseAndStop(t *testing.T) {
 			}
 		})
 	}
+}
+
+func offlineRecipient() (int64, error) { return 42, nil }
+func offlinePrepareRecipient(int64) (func(context.Context, []byte) error, error) {
+	return func(context.Context, []byte) error { return nil }, nil
 }

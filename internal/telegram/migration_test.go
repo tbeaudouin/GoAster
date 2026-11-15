@@ -55,3 +55,29 @@ func TestMigrationHandoffUsesOnlyStoredPairedUser(t *testing.T) {
 		t.Fatalf("document delivery leaked a group or model destination: %q", bodyText)
 	}
 }
+
+func TestOfflineMigrationRecipientChangePreventsDelivery(t *testing.T) {
+	runtime := t.TempDir()
+	paths := Paths{Token: filepath.Join(runtime, "token"), UserID: filepath.Join(runtime, "user-id")}
+	if err := writePrivate(paths.Token, []byte(testToken)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivate(paths.UserID, []byte("42")); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	client := doerFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, nil })
+	deliver, err := prepareRecipientMigrationHandoffWith(paths, client, "https://telegram.synthetic", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.UserID, []byte("99"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := deliver(t.Context(), []byte("synthetic")); err == nil || calls != 0 {
+		t.Fatalf("changed pairing accepted: err=%v calls=%d", err, calls)
+	}
+	if _, err := prepareRecipientMigrationHandoffWith(paths, client, "https://telegram.synthetic", 42); err == nil {
+		t.Fatal("changed pairing accepted for preparation")
+	}
+}

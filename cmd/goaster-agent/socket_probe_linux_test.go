@@ -88,8 +88,13 @@ func TestAgentSocketProbesAndGracefulStop(t *testing.T) {
 	if err := os.WriteFile(secretPath, []byte(strings.Repeat("ab", 32)+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", dir)
-	t.Setenv("USERPROFILE", dir)
+	home, err := os.MkdirTemp(working, ".agent-test-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("GOASTER_STARTER_DIR", filepath.Join(filepath.Dir(filepath.Dir(working)), "skills"))
 	t.Setenv(controlsecret.ValueEnv, "")
 	t.Setenv(controlsecret.FileEnv, secretPath)
@@ -140,7 +145,7 @@ func TestAgentSocketProbesAndGracefulStop(t *testing.T) {
 	// Hold the real starter lock while starting the actual service. Seeing its
 	// open lock descriptor proves the signal handler is installed and startup
 	// is waiting on this lock, rather than signaling a process before startup.
-	lockPath := filepath.Join(dir, ".goaster", "artefacts", ".skills-install.lock")
+	lockPath := filepath.Join(home, ".goaster", "artefacts", ".skills-install.lock")
 	lockFD, err := syscall.Open(lockPath, syscall.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)

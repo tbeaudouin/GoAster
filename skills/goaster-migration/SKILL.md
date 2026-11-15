@@ -1,6 +1,12 @@
 # GoAster central migration
 
-Migration execution and scheduler resumption are disabled pending full cross-service acceptance. Read-only estimates and availability remain available. Before any future billable operation, obtain ordinary explicit approval in a private conversation; no separate approval record is required. Conversational approval is not a trusted cryptographic binding.
+Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
+
+Enabled means enabled in this build; it does not establish which versions are
+installed or running, or that live integration has been verified. Migration
+requires a counterpart GoAsterWeb version implementing the machine API with
+valid Redis configuration. Exactly-once creation and Redis durability are not
+guaranteed or proven.
 
 Use the source-side `goaster_migration` tool to inspect one proposed migration
 against the existing GoAsterWeb service. The GoAster source implementation owns
@@ -30,16 +36,7 @@ browser `Origin` header, and `Content-Type: application/json`. The source and
 diagnostic paths never log request bodies, public keys, owner digests, provider
 tokens, owner links, or private keys.
 
-Availability sends the exact requested server type, an optional strict
-location allow-list, and the request-scoped Hetzner token:
-
-```json
-{
-  "server_type": "cx22",
-  "locations": ["fsn1", "nbg1"],
-  "hetzner_token": "request-scoped"
-}
-```
+Availability and the single create request use the same full immutable terms, plus a request-scoped `hetzner_token`. Terms are a fresh 64-character lower-case hexadecimal `operation_id`; a fresh 32-byte unpadded base64url `operation_capability`; the exact requested `server_type`; `locations` (empty means any eligible location, while a non-empty list is a strict allow-list); `image: ubuntu-24.04`; `architecture: x86`; `enable_ipv4: true`; `enable_ipv6: false`; `networks: []`; `billing_terms: provider-charges-uncapped-v1`; `login_public_key` (generated Ed25519 OpenSSH `ssh-ed25519` public key); and a 64-character lower-case hexadecimal SHA-256 `owner_secret_digest` for the local 32-byte owner-link secret. The immutable terms are identical across both requests. There is no price cap, target price, quote field, or silent substitution.
 
 An absent or empty location list means every eligible location for that exact
 type. A non-empty list is never widened. GoAsterWeb returns only `version`,
@@ -51,9 +48,7 @@ needed. Its source-side result repeats the exact location policy and requested
 locations for presentation, while keeping those fields out of the Web wire
 contract. It contains no price cap, approval, credential, or private material.
 
-Creation sends only the authorized-key public value, the lower-case SHA-256
-owner-secret digest of the locally generated 32-byte owner secret, the exact server
-type/location request, and the request-scoped token. It does not send the
+Creation sends the same immutable operation terms and the request-scoped token. It does not send the
 private key or owner secret. The successful response contains the v1 state,
 attempt, server label, server ID, public IP, owner URL without the owner
 secret, and absolute expiry. The source appends the local owner secret to the
@@ -91,7 +86,7 @@ requirement only; it does not provide a trusted cryptographic binding between
 the user, the terms, and the future provider request.
 
 The runtime relies on that private-conversation workflow; it does not accept
-or create a separate approval mechanism. When execution is enabled after acceptance, call `start` only after the owner has
+or create a separate approval mechanism. Call `start` only after the owner has
 approved the exact terms conversationally. The source preflights the protected
 paired-Telegram delivery path before the create request.
 

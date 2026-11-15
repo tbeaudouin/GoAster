@@ -98,6 +98,7 @@ func (fixture *machineFixture) handle(writer http.ResponseWriter, request *http.
 			return
 		}
 		var value struct {
+			OperationID       string   `json:"operation_id"`
 			ServerType        string   `json:"server_type"`
 			Locations         []string `json:"locations"`
 			LoginPublicKey    string   `json:"login_public_key"`
@@ -113,9 +114,9 @@ func (fixture *machineFixture) handle(writer http.ResponseWriter, request *http.
 			return
 		}
 		writeJSONStatus(writer, http.StatusCreated, map[string]any{
-			"version": "v1", "state": "created", "attempt": strings.Repeat("a", 64),
-			"server_label": "goaster-migration-" + strings.Repeat("a", 16), "server_id": 123,
-			"ip": "198.51.100.10", "owner_url": fixture.ownerURL, "expires": fixture.now.Add(time.Hour).Unix(),
+			"version": "v1", "state": "created", "attempt": value.OperationID,
+			"server_label": "goaster-migration-" + value.OperationID[:16], "server_id": 123,
+			"ip": "198.51.100.10", "owner_url": fixture.server.URL + "/migration#attempt=" + value.OperationID, "expires": fixture.now.Add(time.Hour).Unix(),
 		})
 	default:
 		writeJSONStatus(writer, http.StatusNotFound, map[string]string{"error": "not found"})
@@ -124,6 +125,10 @@ func (fixture *machineFixture) handle(writer http.ResponseWriter, request *http.
 
 func (fixture *machineFixture) options(taskDirectory string) Options {
 	return Options{
+		MigrationRecipient: func() (int64, error) { return 42, nil },
+		PrepareRecipientHandoff: func(int64) (func(context.Context, []byte) error, error) {
+			return func(context.Context, []byte) error { return nil }, nil
+		},
 		WebOrigin:         fixture.server.URL,
 		HTTPClient:        fixture.server.Client(),
 		Now:               func() time.Time { return fixture.now },
@@ -152,7 +157,7 @@ func TestAvailabilityUsesOnlyTheV1ContractAndNoOriginHeader(t *testing.T) {
 	if err := json.Unmarshal(fixture.requestBody, &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body) != 3 || body["server_type"] == nil || body["locations"] == nil || body["hetzner_token"] == nil {
+	if len(body) != 13 || body["server_type"] == nil || body["locations"] == nil || body["hetzner_token"] == nil {
 		t.Fatalf("availability request fields = %#v", body)
 	}
 	if strings.Contains(string(fixture.requestBody), "Origin") {
@@ -162,6 +167,7 @@ func TestAvailabilityUsesOnlyTheV1ContractAndNoOriginHeader(t *testing.T) {
 
 func TestCreateKeepsPrivateMaterialOutOfTheRequestAndModelResult(t *testing.T) {
 	fixture := newMachineFixture(t)
+	fixture.available.Store(true)
 	taskDirectory := t.TempDir()
 	if err := os.Chmod(taskDirectory, 0700); err != nil {
 		t.Fatal(err)
@@ -202,6 +208,7 @@ func TestCreateKeepsPrivateMaterialOutOfTheRequestAndModelResult(t *testing.T) {
 
 func TestCreateSupportsPreparedHandoffDelivery(t *testing.T) {
 	fixture := newMachineFixture(t)
+	fixture.available.Store(true)
 	taskDirectory := t.TempDir()
 	if err := os.Chmod(taskDirectory, 0700); err != nil {
 		t.Fatal(err)
@@ -257,7 +264,7 @@ func TestCreateLostResponseIsOneRequestAndSchedulerDisablesMonitor(t *testing.T)
 	if err != nil || !first.ManualReview {
 		t.Fatalf("first singleton start: %#v %v", first, err)
 	}
-	second, err := StartMonitor(t.Context(), Request{ServerType: "cx22"}, options, singletonJobs)
+	second, err := StartMonitor(t.Context(), Request{ServerType: "other-type"}, options, singletonJobs)
 	if err != nil || !second.ManualReview || first.MonitorID != second.MonitorID || fixture.creates.Load() != 2 {
 		t.Fatalf("repeat: %#v %v creates=%d", second, err, fixture.creates.Load())
 	}
@@ -305,7 +312,14 @@ func TestStopMonitorReportsRunningDuringAvailability(t *testing.T) {
 	options := fixture.options(t.TempDir())
 	options.DeliverHandoff = func(context.Context, []byte) error { return nil }
 	request := Request{ServerType: "cx22", Locations: []string{"fsn1"}, JobID: "migration-stop-race"}
-	message, err := schedulerMessage(request)
+	state, err := newOperation(request, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeOperation(options.TempDirectory, request.JobID, state); err != nil {
+		t.Fatal(err)
+	}
+	message, err := schedulerMessage(request, 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,8 +465,8 @@ func TestAvailabilityDefaultsToAnyEligibleLocation(t *testing.T) {
 	if err := json.Unmarshal(fixture.requestBody, &body); err != nil {
 		t.Fatal(err)
 	}
-	if _, present := body["locations"]; present {
-		t.Fatalf("default location policy was not omitted from request: %s", fixture.requestBody)
+	if string(body["locations"]) != "[]" {
+		t.Fatal("expected empty location list")
 	}
 }
 

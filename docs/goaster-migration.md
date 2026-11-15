@@ -1,6 +1,12 @@
 # GoAster central migration
 
-Migration execution and scheduler resumption are disabled pending full cross-service acceptance. Read-only estimates and availability remain available. Ordinary explicit approval in a private conversation is required before any future billable operation; there is no separate approval record.
+Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
+
+Enabled means enabled in this build; it does not establish which versions are
+installed or running, or that live integration has been verified. Migration
+requires a counterpart GoAsterWeb version implementing the machine API with
+valid Redis configuration. Exactly-once creation and Redis durability are not
+guaranteed or proven.
 
 GoAster implements the source side of the versioned central migration machine
 API. It uses the existing scheduler and paired Telegram delivery path; it does
@@ -18,15 +24,15 @@ The source workflow is deliberately small:
    workflow requirement, not a trusted cryptographic binding.
 4. GoAster checks central availability immediately and schedules the same check
    every 30 minutes while no eligible location exists.
-5. When availability is returned, GoAster disables and verifies the exact
-   monitor, generates the login key and owner-link secret locally, and sends
+5. GoAster generates the login key and owner-link secret before its first check.
+   When availability is returned, it disables and verifies the exact monitor and sends
    exactly one creation request.
 6. GoAster stores the private key and protected handoff in a private
    `~/.goaster/tmp/migration-*` task directory and sends the setup link plus
    private key directly to the locally paired Telegram user. The model sees
    only safe status and provider identity fields.
 
-The scheduler and creation workflow below describe intended behavior, not enabled runtime behavior. Scheduler state is model-writable and must not be trusted as authority to create. A trusted execution boundary and cross-service acceptance are required before enabling it.
+Migration scheduler state resides in a private directory outside the model-writable artefacts workspace.
 
 The task directory and handoff are intentionally retained for the owner’s
 manual cleanup. There is no automatic cleanup implementation.
@@ -44,9 +50,7 @@ not represented or bound here, and the digest is not authentication,
 authorization, or owner approval.
 
 This local digest does not establish who produced the terms or that an owner
-approved them. Compatibility with GoAsterWeb remains unverified: a future Web
-contract must explicitly define and validate how these local terms map before
-any live execution can use the binding.
+approved them. The separate local utility is not used as the machine API binding; live GoAsterWeb behavior remains unverified.
 
 This representation is intentionally not added to the current v1 Web request
 payloads, scheduler messages, or model-facing tool schema. It remains a local
@@ -69,15 +73,7 @@ request body, public key, owner digest, provider token, owner URL, or private
 key. The `hetzner_token` is read locally and placed only in the individual
 request.
 
-Availability sends:
-
-```json
-{
-  "server_type": "cx22",
-  "locations": ["fsn1", "nbg1"],
-  "hetzner_token": "request-scoped"
-}
-```
+Availability sends the full immutable operation terms and request-scoped token defined in the [machine API contract](central-machine-api-contract.md). These include the operation identity and capability, fixed machine and billing terms, generated login public key, and `owner_secret_digest`, the lower-case SHA-256 hex digest of the owner-link secret.
 
 `locations` may be absent or empty. In that case GoAsterWeb considers all
 eligible locations for the exact `server_type`. Otherwise it is a strict
@@ -91,19 +87,7 @@ The model-facing read-only `availability` result adds the source-side
 are presentation metadata; they are not accepted from or sent to GoAsterWeb,
 and the result contains no price, cap, approval, or credential fields.
 
-Creation adds the locally generated authorized-key public value and the
-lower-case SHA-256 hex digest of the locally generated 32-byte unpadded
-base64url owner secret:
-
-```json
-{
-  "server_type": "cx22",
-  "locations": ["fsn1"],
-  "login_public_key": "ssh-ed25519 AAAA...",
-  "owner_secret_digest": "64 lower-case hex characters",
-  "hetzner_token": "request-scoped"
-}
-```
+Creation sends those same immutable terms and token.
 
 The private key and owner secret never cross this request. GoAsterWeb owns the
 exact provider create sequence, Ubuntu 24.04 image, SSH registration, callback
@@ -162,8 +146,7 @@ model context, log, or shared temporary directory.
 
 The handoff is sent as a document to the positive user ID already stored in
 protected Telegram pairing state. No model-selected chat or group is used.
-The runtime preflights that protected local delivery state before the create
-request. If the Telegram delivery itself fails, the monitor remains stopped
+The monitor persists the paired user at start and requires the same pairing at execution, before creation, and before delivery. A changed or unavailable pairing requires manual follow-up. Legacy jobs without a recipient require manual review. If the Telegram delivery itself fails, the monitor remains stopped
 and the protected handoff is left for manual inspection; it is not resent
 automatically.
 

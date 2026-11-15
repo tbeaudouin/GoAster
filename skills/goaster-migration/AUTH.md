@@ -1,6 +1,12 @@
 # Authentication and authorization
 
-Migration execution and scheduler resumption are disabled pending full cross-service acceptance. Read-only estimates and availability remain available. Before any future billable operation, obtain ordinary explicit approval in a private conversation; no separate approval record is required.
+Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
+
+Enabled means enabled in this build; it does not establish which versions are
+installed or running, or that live integration has been verified. Migration
+requires a counterpart GoAsterWeb version implementing the machine API with
+valid Redis configuration. Exactly-once creation and Redis durability are not
+guaranteed or proven.
 
 This skill does not grant access to Hetzner, GoAsterWeb, Telegram, a server,
 SSH, or any secret. Load `goaster-env` and `hetzner-auth` for the configured

@@ -288,9 +288,25 @@ func migrationOperations(options migration.Options, jobs migrationSchedulerRunti
 	}
 }
 
+func startMigrationRuntime(ctx context.Context, registrar chat.ToolRegistrar, options migration.Options, jobs migrationSchedulerRuntime) error {
+	if jobs == nil {
+		return errors.New("migration scheduler is unavailable")
+	}
+	if err := jobs.Start(ctx); err != nil {
+		return fmt.Errorf("start migration scheduler: %w", err)
+	}
+	if err := chat.RegisterMigrationTool(registrar, migrationOperations(options, jobs, true)); err != nil {
+		jobs.Stop()
+		return fmt.Errorf("register migration tool: %w", err)
+	}
+	return nil
+}
+
 func pairedMigrationOptions() migration.Options {
 	options := migration.DefaultOptions()
 	options.PrepareHandoff = telegram.PrepareMigrationHandoff
+	options.MigrationRecipient = telegram.MigrationRecipient
+	options.PrepareRecipientHandoff = telegram.PrepareRecipientMigrationHandoff
 	return options
 }
 
@@ -311,10 +327,14 @@ func serve(store chat.CredentialStore) (serveErr error) {
 	}
 	defer func() { serveErr = errors.Join(serveErr, backgroundManager.Close()) }()
 	migrationOptions := pairedMigrationOptions()
-	// Execution and scheduler resumption remain disabled pending cross-service acceptance.
-	if err := chat.RegisterMigrationTool(provider, migrationOperations(migrationOptions, nil, false)); err != nil {
-		return fmt.Errorf("register migration tool: %w", err)
+	migrationJobs, err := newMigrationScheduler(migrationOptions)
+	if err != nil {
+		return err
 	}
+	if err := startMigrationRuntime(ctx, provider, migrationOptions, migrationJobs); err != nil {
+		return err
+	}
+	defer migrationJobs.Stop()
 	listener, err := controltransport.Listen()
 	if err != nil {
 		return fmt.Errorf("could not start local agent listener: %w", err)

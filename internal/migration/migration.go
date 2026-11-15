@@ -42,7 +42,6 @@ const (
 	webResponseMaxBytes   = 64 * 1024
 	handoffMaxBytes       = 32 * 1024
 	maxMigrationLocations = 64
-	migrationLifetime     = 7 * 24 * time.Hour
 
 	handoffPrivateKeyName = "id_ed25519"
 	handoffDocumentName   = "migration-handoff.txt"
@@ -161,17 +160,19 @@ type availabilityResponse struct {
 // tests; production leaves it empty so the GoAster temporary policy is
 // resolved here.
 type Options struct {
-	WebOrigin            string
-	ProviderEndpoint     string
-	HTTPClient           httpDoer
-	Now                  func() time.Time
-	LoadHetznerToken     func() (string, error)
-	PrepareHandoff       func() (func(context.Context, []byte) error, error)
-	CheckHandoffDelivery func() error
-	DeliverHandoff       func(context.Context, []byte) error
-	DisableMonitor       func() error
-	TempDirectory        string
-	AllowInsecureHTTP    bool
+	WebOrigin               string
+	ProviderEndpoint        string
+	HTTPClient              httpDoer
+	Now                     func() time.Time
+	LoadHetznerToken        func() (string, error)
+	MigrationRecipient      func() (int64, error)
+	PrepareRecipientHandoff func(int64) (func(context.Context, []byte) error, error)
+	PrepareHandoff          func() (func(context.Context, []byte) error, error)
+	CheckHandoffDelivery    func() error
+	DeliverHandoff          func(context.Context, []byte) error
+	DisableMonitor          func() error
+	TempDirectory           string
+	AllowInsecureHTTP       bool
 }
 
 // DefaultOptions returns fixed HTTPS endpoints and a client that neither uses
@@ -203,7 +204,18 @@ func Availability(ctx context.Context, request PriceRequest, options Options) (A
 	if !validHetznerToken(token) {
 		return AvailabilityResult{}, errors.Join(errManualReview, errors.New("migration provider token is invalid"))
 	}
-	return availabilityWithToken(ctx, request.ServerType, request.Locations, token, options)
+	state, err := newOperation(Request{ServerType: request.ServerType, Locations: request.Locations}, 0)
+	if err != nil {
+		return AvailabilityResult{}, err
+	}
+	dir, err := migrationTaskDirectory(options.TempDirectory)
+	if err != nil {
+		return AvailabilityResult{}, err
+	}
+	if err = storeOperation(dir, state.Terms.OperationID, state); err != nil {
+		return AvailabilityResult{}, err
+	}
+	return availabilityWithToken(ctx, state.Terms, token, options)
 }
 
 // CheckAvailability is the explicit name used by monitor callers.
@@ -211,13 +223,9 @@ func CheckAvailability(ctx context.Context, request Request, options Options) (A
 	return Availability(ctx, PriceRequest{ServerType: request.ServerType, Locations: request.Locations}, options)
 }
 
-func availabilityWithToken(ctx context.Context, serverType string, locations []string, token string, options Options) (AvailabilityResult, error) {
-	payload := struct {
-		ServerType   string   `json:"server_type"`
-		Locations    []string `json:"locations,omitempty"`
-		HetznerToken string   `json:"hetzner_token"`
-	}{ServerType: serverType, Locations: append([]string(nil), locations...), HetznerToken: token}
-	body, err := json.Marshal(payload)
+func availabilityWithToken(ctx context.Context, terms machineTerms, token string, options Options) (AvailabilityResult, error) {
+	serverType, locations := terms.ServerType, terms.Locations
+	body, err := machinePayload(terms, token)
 	if err != nil {
 		return AvailabilityResult{}, fmt.Errorf("encode migration availability request: %w", err)
 	}
@@ -254,6 +262,9 @@ func Create(ctx context.Context, request Request, options Options) (CreateResult
 	if options.DeliverHandoff == nil && options.PrepareHandoff == nil {
 		return CreateResult{}, errors.New("migration handoff delivery is unavailable")
 	}
+	if err := checkHandoffDelivery(options); err != nil {
+		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, errors.Join(errManualReview, err)
+	}
 	token, err := options.LoadHetznerToken()
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("load migration provider token: %w", err)
@@ -261,7 +272,28 @@ func Create(ctx context.Context, request Request, options Options) (CreateResult
 	if !validHetznerToken(token) {
 		return CreateResult{}, errors.Join(errManualReview, errors.New("migration provider token is invalid"))
 	}
-	return createWithToken(ctx, request, token, options)
+	state, err := newOperation(request, 0)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	dir, err := migrationTaskDirectory(options.TempDirectory)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if err = storeOperation(dir, state.Terms.OperationID, state); err != nil {
+		return CreateResult{}, err
+	}
+	available, err := availabilityWithToken(ctx, state.Terms, token, options)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if len(available.Locations) == 0 {
+		return CreateResult{Status: "monitoring", ServerType: request.ServerType}, nil
+	}
+	if err = markDispatch(dir, state.Terms.OperationID); err != nil {
+		return CreateResult{}, err
+	}
+	return createWithToken(ctx, request, state, token, options)
 }
 
 func checkHandoffDelivery(options Options) error {
@@ -277,7 +309,7 @@ func checkHandoffDelivery(options Options) error {
 	return nil
 }
 
-func createWithToken(ctx context.Context, request Request, token string, options Options) (CreateResult, error) {
+func createWithToken(ctx context.Context, request Request, state operationState, token string, options Options) (CreateResult, error) {
 	if err := validateBillableRequest(request); err != nil {
 		return CreateResult{}, err
 	}
@@ -292,12 +324,7 @@ func createWithToken(ctx context.Context, request Request, token string, options
 			return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, errors.Join(errManualReview, errors.New("prepare migration handoff delivery"), err)
 		}
 	}
-	publicKey, privateKey, ownerSecret, ownerDigest, err := generateLoginMaterial()
-	if err != nil {
-		return CreateResult{}, fmt.Errorf("generate migration login material: %w", err)
-	}
-	defer clear(privateKey)
-
+	privateKey, ownerSecret := state.PrivateKey, state.OwnerSecret
 	taskDirectory, err := migrationTaskDirectory(options.TempDirectory)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("prepare migration temporary directory: %w", err)
@@ -306,30 +333,22 @@ func createWithToken(ctx context.Context, request Request, token string, options
 	if _, err := protectedfile.WriteExclusive(privateKeyPath, privateKey); err != nil {
 		return CreateResult{}, fmt.Errorf("store migration private key: %w", err)
 	}
-
-	payload := struct {
-		ServerType        string   `json:"server_type"`
-		Locations         []string `json:"locations,omitempty"`
-		LoginPublicKey    string   `json:"login_public_key"`
-		OwnerSecretDigest string   `json:"owner_secret_digest"`
-		HetznerToken      string   `json:"hetzner_token"`
-	}{
-		ServerType:        request.ServerType,
-		Locations:         append([]string(nil), request.Locations...),
-		LoginPublicKey:    publicKey,
-		OwnerSecretDigest: ownerDigest,
-		HetznerToken:      token,
-	}
-	body, err := json.Marshal(payload)
+	body, err := machinePayload(state.Terms, token)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("encode migration create request: %w", err)
 	}
 	defer clear(body)
 	var response createResponse
+	if err := checkHandoffDelivery(options); err != nil {
+		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, err)
+	}
 	if err := webJSON(ctx, options, "/migration/v1/machines/create", body, http.StatusCreated, &response); err != nil {
 		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, fmt.Errorf("migration creation request: %w", err))
 	}
-	if err := validateCreateResponse(response, options); err != nil {
+	if err := validateCreateResponse(response, options); err != nil || response.Attempt != state.Terms.OperationID {
+		if err == nil {
+			err = errInvalidRequest
+		}
 		return CreateResult{Status: "manual_review", ServerType: request.ServerType, ManualReview: true, TaskDirectory: taskDirectory}, errors.Join(errManualReview, fmt.Errorf("migration creation response: %w", err))
 	}
 
@@ -453,14 +472,14 @@ func validateCreateResponse(response createResponse, options Options) error {
 	if _, err := hex.DecodeString(response.Attempt); err != nil {
 		return errInvalidRequest
 	}
-	if response.ServerLabel != "goaster-migration-"+response.Attempt[:16] {
+	if !strings.HasPrefix(response.ServerLabel, "goaster-migration-") {
 		return errInvalidRequest
 	}
 	if net.ParseIP(response.IP) == nil || !publicIP(response.IP) {
 		return errInvalidRequest
 	}
 	now := currentTime(options.Now)
-	if response.Expires <= now.Unix() || response.Expires > now.Add(migrationLifetime).Unix() {
+	if response.Expires <= now.Unix() {
 		return errInvalidRequest
 	}
 	if err := validateOwnerURL(response.OwnerURL, response.Attempt, options.WebOrigin, options.AllowInsecureHTTP); err != nil {
@@ -653,7 +672,7 @@ func webJSON(ctx context.Context, options Options, path string, body []byte, exp
 	if len(data) > webResponseMaxBytes {
 		return errors.New("migration web response exceeds the limit")
 	}
-	if response.StatusCode != expectedStatus {
+	if response.StatusCode != expectedStatus && !(expectedStatus == http.StatusCreated && response.StatusCode == http.StatusOK) {
 		return fmt.Errorf("migration web returned HTTP %d", response.StatusCode)
 	}
 	if output == nil {
@@ -680,9 +699,21 @@ func decodeExactJSON(data []byte, output any) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return fmt.Errorf("inspect migration JSON fields: %w", err)
 	}
-	for field := range fields {
-		if field != strings.ToLower(field) {
-			return errors.New("migration JSON field names must be lower-case")
+	inspector := json.NewDecoder(bytes.NewReader(data))
+	if token, err := inspector.Token(); err != nil || token != json.Delim('{') {
+		return errors.New("migration JSON must be an object")
+	}
+	seen := make(map[string]bool, len(fields))
+	for inspector.More() {
+		token, err := inspector.Token()
+		field, ok := token.(string)
+		if err != nil || !ok || field != strings.ToLower(field) || seen[field] {
+			return errors.New("migration JSON field names must be unique and lower-case")
+		}
+		seen[field] = true
+		var value json.RawMessage
+		if err := inspector.Decode(&value); err != nil {
+			return fmt.Errorf("inspect migration JSON value: %w", err)
 		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

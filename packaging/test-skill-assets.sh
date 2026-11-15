@@ -72,7 +72,7 @@ for phrase in (
 
 migration = (root / "skills" / "goaster-migration" / "SKILL.md").read_text(encoding="utf-8")
 migration_text = " ".join(migration.split())
-for phrase in (
+migration_required_phrases = (
     "source-side `goaster_migration` tool",
     "30-minute availability monitor",
     "no new database",
@@ -80,23 +80,45 @@ for phrase in (
     "POST /migration/v1/machines/availability",
     "POST /migration/v1/machines/create",
     "exact lower-case fields",
+    "same full immutable terms, plus a request-scoped `hetzner_token`",
+    "fresh 64-character lower-case hexadecimal `operation_id`",
+    "fresh 32-byte unpadded base64url `operation_capability`",
+    "the exact requested `server_type`",
+    "`locations` (empty means any eligible location, while a non-empty list is a strict allow-list)",
+    "`image: ubuntu-24.04`",
+    "`architecture: x86`",
+    "`enable_ipv4: true`",
+    "`enable_ipv6: false`",
+    "`networks: []`",
+    "`billing_terms: provider-charges-uncapped-v1`",
+    "`login_public_key` (generated Ed25519 OpenSSH `ssh-ed25519` public key)",
+    "64-character lower-case hexadecimal SHA-256 `owner_secret_digest`",
+    "The immutable terms are identical across both requests.",
+    "There is no price cap, target price, quote field, or silent substitution.",
     "no browser `Origin` header",
     "does not return prices",
-    "request-scoped Hetzner token",
+    "request-scoped `hetzner_token`",
     "strict location allow-list",
-    "owner-secret digest",
+    "`owner_secret_digest`",
     "does not send the private key or owner secret",
     "read-only provider lookups",
     "does not accept an approval flag",
     "ordinary explicit user approval",
     "private conversation",
-    "not a trusted cryptographic binding",
+    "does not provide a trusted cryptographic binding between the user, the terms, and the future provider request",
     "Do not invent or require a special command",
     "dedicated approval record",
-    "Migration execution and scheduler resumption are disabled",
+    "Migration execution and scheduler resumption are enabled.",
+    "Ordinary explicit approval in a private conversation is required before a billable operation",
+    "there is no separate approval record",
+    "leaves one non-secret scheduler job enabled at exactly 30-minute intervals",
+    "token is loaded only when a check runs",
+    "never placed in the scheduler message",
     "checks availability immediately",
-    "exactly 30-minute intervals",
     "disables that exact job",
+    "verifies the disabled state before the create request",
+    "Availability errors, monitor state errors, and disablement uncertainty stop the workflow for manual review.",
+    "The create endpoint is called once.",
     "does not retry the HTTP request",
     "manual inspection",
     "Ed25519 login key pair",
@@ -108,11 +130,17 @@ for phrase in (
     "already paired positive user ID",
     "never appear in model output",
     "do not resend automatically",
-):
+)
+for phrase in migration_required_phrases:
     if phrase not in migration_text:
         raise SystemExit(f"goaster-migration workflow missing required guidance: {phrase!r}")
 
 installed_migration = (installed_root / "skills" / "goaster-migration" / "SKILL.md").read_text(encoding="utf-8")
+installed_migration_text = " ".join(installed_migration.split())
+for phrase in migration_required_phrases:
+    if phrase not in installed_migration_text:
+        raise SystemExit(f"installed goaster-migration workflow missing required guidance: {phrase!r}")
+
 for forbidden in ("GoAsterWeb/", "../../docs/", "../docs/", "migration-handoff-20261112"):
     if forbidden in installed_migration:
         raise SystemExit(f"installed migration skill retained a local checkout/document dependency: {forbidden!r}")
@@ -135,7 +163,7 @@ for phrase in (
     "manual-reconciliation condition",
     "ordinary explicit approval",
     "private conversation",
-    "not a trusted cryptographic binding",
+    "does not provide a trusted cryptographic binding",
     "dedicated approval record",
     "runtime relies on this private-conversation workflow",
     "<real user home>/.goaster/tmp",

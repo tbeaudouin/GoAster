@@ -1,6 +1,12 @@
 # GoAster
 
-Migration execution and scheduler resumption are disabled pending full cross-service acceptance. Read-only estimates and availability remain available. Before any future billable operation, obtain ordinary explicit approval in a private conversation; no separate approval record is required.
+Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
+
+Enabled means enabled in this build; it does not establish which versions are
+installed or running, or that live integration has been verified. Migration
+requires a counterpart GoAsterWeb version implementing the machine API with
+valid Redis configuration. Exactly-once creation and Redis durability are not
+guaranteed or proven.
 
 GoAster provides an agent runtime and a Telegram adapter with a subscription-backed OpenAI provider, tools, memory, and scheduling.
 
@@ -121,10 +127,7 @@ For a central migration, use a private conversation and obtain ordinary
 explicit user approval for the exact server type, strict location preference,
 current estimate/currency (or unavailable pricing), and exactly one create
 before any billable operation. This is a conversational workflow requirement,
-not a trusted cryptographic binding or a separate approval mechanism. Migration
-execution and scheduler resumption remain disabled pending full cross-service
-acceptance; if separately enabled later, terminal or uncertain outcomes must
-remain stopped for manual review.
+not a trusted cryptographic binding or a separate approval mechanism. Terminal or uncertain outcomes remain stopped for manual review.
 
 ## Models
 

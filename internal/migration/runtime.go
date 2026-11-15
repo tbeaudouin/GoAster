@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
-	"goaster/internal/artefacts"
 	"goaster/internal/diagnostics"
 	"goaster/internal/scheduler"
 )
@@ -17,9 +17,10 @@ import (
 const schedulerMessagePrefix = "goaster_migration_v1:"
 
 type scheduledMigration struct {
-	Version string  `json:"version"`
-	JobID   string  `json:"job_id"`
-	Request Request `json:"request"`
+	Version   string  `json:"version"`
+	JobID     string  `json:"job_id"`
+	Request   Request `json:"request"`
+	Recipient int64   `json:"recipient"`
 }
 
 // MonitorScheduler is the small existing-scheduler surface needed by the
@@ -42,11 +43,15 @@ type monitorExecutionCoordinator interface {
 // SchedulerPath returns the private scheduler file used only for migration
 // monitor jobs. It is scheduler state, not a migration attempt ledger.
 func SchedulerPath() (string, error) {
-	root, err := artefacts.Root()
+	root, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("find migration scheduler root: %w", err)
 	}
-	return filepath.Join(root, "state", "migration-monitor", "jobs.json"), nil
+	directory := filepath.Join(root, ".goaster", "migration-monitor")
+	if err := ensurePrivatePath(directory); err != nil {
+		return "", fmt.Errorf("protect migration scheduler directory: %w", err)
+	}
+	return filepath.Join(directory, "jobs.json"), nil
 }
 
 // StartMonitor adds one non-secret 30-minute monitor and performs its first
@@ -68,22 +73,37 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 	if !safeJobID(request.JobID) {
 		return Result{}, errors.New("migration monitor ID is invalid")
 	}
-	message, err := schedulerMessage(request)
+	if job, exists := jobs.Get(request.JobID); exists {
+		if job.Status == scheduler.StatusRunning {
+			return Result{Status: "in_progress", MonitorID: request.JobID, ServerType: request.ServerType}, scheduler.ErrExecutionInProgress
+		}
+		if !job.Enabled || job.ReviewRequired {
+			return Result{Status: "manual_review", ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true}, nil
+		}
+	}
+	if options.MigrationRecipient == nil || options.PrepareRecipientHandoff == nil {
+		return Result{}, errors.New("migration recipient capability is unavailable")
+	}
+	recipient, err := options.MigrationRecipient()
+	if err != nil || recipient <= 0 {
+		return Result{}, errors.Join(errors.New("migration recipient is unavailable"), err)
+	}
+	message, err := schedulerMessage(request, recipient)
 	if err != nil {
 		return Result{}, err
 	}
 	job, exists := jobs.Get(request.JobID)
 	if exists {
-		if job.Message != message || job.Kind != scheduler.ScheduleEvery || job.EverySeconds != MonitorIntervalSeconds {
-			return Result{}, errors.New("migration monitor ID is already in use")
-		}
 		if job.Status == scheduler.StatusRunning {
 			return Result{Status: "in_progress", MonitorID: request.JobID, ServerType: request.ServerType}, scheduler.ErrExecutionInProgress
 		}
-		if job.Enabled {
-			return Result{Status: "monitoring", ServerType: request.ServerType, MonitorID: request.JobID}, nil
+		if !job.Enabled || job.ReviewRequired {
+			return Result{Status: "manual_review", ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true}, nil
 		}
-		return Result{Status: "manual_review", ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true}, nil
+		if job.Message != message || job.Kind != scheduler.ScheduleEvery || job.EverySeconds != MonitorIntervalSeconds {
+			return Result{}, errors.New("migration monitor ID is already in use")
+		}
+		return Result{Status: "monitoring", ServerType: request.ServerType, MonitorID: request.JobID}, nil
 	}
 	if options.DeliverHandoff == nil && options.PrepareHandoff == nil {
 		return Result{}, errors.New("migration handoff delivery is unavailable")
@@ -94,6 +114,17 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 	coordinator, err := monitorExecutionCoordinatorFor(jobs)
 	if err != nil {
 		return Result{}, err
+	}
+	dir, err := operationDirectory(options)
+	if err != nil {
+		return Result{}, err
+	}
+	state, err := newOperation(request, recipient)
+	if err != nil {
+		return Result{}, err
+	}
+	if err = storeOperation(dir, request.JobID, state); err != nil {
+		return Result{}, fmt.Errorf("store migration operation: %w", err)
 	}
 	if _, err := jobs.Add(scheduler.Job{
 		ID:           request.JobID,
@@ -112,7 +143,7 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 	}
 
 	runOptions := options
-	result, runErr := executeMonitor(ctx, request, runOptions, coordinator, request.JobID)
+	result, runErr := executeMonitor(ctx, request, recipient, runOptions, coordinator, request.JobID)
 	result.MonitorID = request.JobID
 	if runErr == nil {
 		return result, nil
@@ -129,11 +160,11 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 	return result, nil
 }
 
-func executeMonitor(ctx context.Context, request Request, options Options, coordinator monitorExecutionCoordinator, jobID string) (result Result, runErr error) {
+func executeMonitor(ctx context.Context, request Request, recipient int64, options Options, coordinator monitorExecutionCoordinator, jobID string) (result Result, runErr error) {
 	if coordinator == nil {
 		return Result{}, errors.New("migration monitor execution claim capability is unavailable")
 	}
-	message, err := schedulerMessage(request)
+	message, err := schedulerMessage(request, recipient)
 	if err != nil {
 		return Result{}, err
 	}
@@ -154,9 +185,21 @@ func executeMonitor(ctx context.Context, request Request, options Options, coord
 			}
 		}()
 	}
-	if err := checkHandoffDelivery(options); err != nil {
-		return Result{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, errors.Join(errManualReview, err)
+	if options.MigrationRecipient == nil || options.PrepareRecipientHandoff == nil {
+		return Result{}, errors.New("migration recipient capability is unavailable")
 	}
+	current, err := options.MigrationRecipient()
+	if err != nil || recipient <= 0 || current != recipient {
+		return Result{}, errors.Join(errors.New("migration recipient changed or is unavailable"), err)
+	}
+	options.CheckHandoffDelivery = func() error {
+		current, err := options.MigrationRecipient()
+		if err != nil || current != recipient {
+			return errors.Join(errors.New("migration recipient changed or is unavailable"), err)
+		}
+		return nil
+	}
+	options.PrepareHandoff = func() (func(context.Context, []byte) error, error) { return options.PrepareRecipientHandoff(recipient) }
 	token, err := options.LoadHetznerToken()
 	if err != nil {
 		return Result{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, fmt.Errorf("load migration provider token: %w", err)
@@ -164,14 +207,25 @@ func executeMonitor(ctx context.Context, request Request, options Options, coord
 	if !validHetznerToken(token) {
 		return Result{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, errors.New("migration provider token is invalid")
 	}
-	availability, err := availabilityWithToken(ctx, request.ServerType, request.Locations, token, options)
+	dir, err := operationDirectory(options)
+	if err != nil {
+		return Result{}, err
+	}
+	state, err := loadOperation(dir, jobID, request, recipient)
+	if err != nil {
+		return Result{}, fmt.Errorf("load migration operation: %w", err)
+	}
+	availability, err := availabilityWithToken(ctx, state.Terms, token, options)
 	if err != nil {
 		return Result{Status: "manual_review", ServerType: request.ServerType, ManualReview: true}, fmt.Errorf("check migration availability: %w", err)
 	}
 	if len(availability.Locations) == 0 {
 		return Result{Status: "monitoring", ServerType: request.ServerType}, nil
 	}
-	created, createErr := createWithToken(ctx, request, token, options)
+	if err := markDispatch(dir, jobID); err != nil {
+		return Result{}, err
+	}
+	created, createErr := createWithToken(ctx, request, state, token, options)
 	if createErr != nil {
 		created.Status = "manual_review"
 		created.ManualReview = true
@@ -204,7 +258,7 @@ func ScheduledExecutor(ctx context.Context, message string, jobs MonitorSchedule
 		return review(err)
 	}
 	runOptions := completeOptions(options)
-	result, runErr := executeMonitor(ctx, scheduled.Request, runOptions, coordinator, scheduled.JobID)
+	result, runErr := executeMonitor(ctx, scheduled.Request, scheduled.Recipient, runOptions, coordinator, scheduled.JobID)
 	if runErr != nil {
 		disableErr := stopAndVerifyMonitor(coordinator, scheduled.JobID)
 		return review(errors.Join(runErr, disableErr))
@@ -263,8 +317,12 @@ func StopMonitor(jobID string, jobs MonitorScheduler) (Result, error) {
 	return Result{Status: "stopped", ServerType: scheduled.Request.ServerType, MonitorID: jobID}, nil
 }
 
-func schedulerMessage(request Request) (string, error) {
-	data, err := json.Marshal(scheduledMigration{Version: "v1", JobID: request.JobID, Request: request})
+func schedulerMessage(request Request, recipient ...int64) (string, error) {
+	var id int64
+	if len(recipient) > 0 {
+		id = recipient[0]
+	}
+	data, err := json.Marshal(scheduledMigration{Version: "v1", JobID: request.JobID, Request: request, Recipient: id})
 	if err != nil {
 		return "", fmt.Errorf("encode migration monitor message: %w", err)
 	}
@@ -285,7 +343,7 @@ func parseSchedulerMessage(message string) (scheduledMigration, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return scheduledMigration{}, errors.New("migration scheduler message contains trailing data")
 	}
-	if scheduled.Version != "v1" || !safeJobID(scheduled.JobID) || scheduled.Request.JobID != scheduled.JobID || validateMachineRequest(scheduled.Request.ServerType, scheduled.Request.Locations) != nil {
+	if scheduled.Version != "v1" || scheduled.Recipient <= 0 || !safeJobID(scheduled.JobID) || scheduled.Request.JobID != scheduled.JobID || validateMachineRequest(scheduled.Request.ServerType, scheduled.Request.Locations) != nil {
 		return scheduledMigration{}, errors.New("migration scheduler message is invalid")
 	}
 	if err := rejectLegacyPriceApproval(scheduled.Request); err != nil {
