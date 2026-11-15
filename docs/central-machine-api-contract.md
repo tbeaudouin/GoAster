@@ -54,12 +54,14 @@ secret. The following requested terms are bound to the operation:
 }
 ```
 
-The current destination flow accepts only Ubuntu 24.04, x86, public IPv4,
-disabled IPv6, and no additional private networks. Unsupported terms are
-rejected; no image, architecture, network, server type, or location is silently
-substituted. There is no `price_cap`, target price, quote, or price-based
-eligibility field. `billing_terms` explicitly binds that the provider may charge
-without a price cap.
+The current destination flow accepts only Ubuntu 24.04, public IPv4, disabled
+IPv6, and no additional private networks. The Web architecture values are
+exactly `x86` and `arm`: the source sends `arm` for a lowercase `cax` followed
+by one or more digits, and `x86` for every other validated server type.
+Unsupported terms are rejected; no image, architecture, network, server type, or
+location is silently substituted. There is no `price_cap`, target price, quote,
+or price-based eligibility field. `billing_terms` explicitly binds that the
+provider may charge without a price cap.
 
 An omitted or empty `locations` list means no location preference. A non-empty
 list is a strict allow-list. Location order is canonicalized for the binding;

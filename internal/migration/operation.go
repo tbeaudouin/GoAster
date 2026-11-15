@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"goaster/internal/protectedfile"
 )
@@ -37,6 +38,24 @@ type operationState struct {
 	PrivateKey  []byte       `json:"private_key"`
 	OwnerSecret string       `json:"owner_secret"`
 	Recipient   int64        `json:"recipient"`
+}
+
+const (
+	machineArchitectureX86 = "x86"
+	machineArchitectureArm = "arm"
+)
+
+func architectureForServerType(serverType string) string {
+	const caxPrefix = "cax"
+	if !strings.HasPrefix(serverType, caxPrefix) || len(serverType) == len(caxPrefix) {
+		return machineArchitectureX86
+	}
+	for _, character := range serverType[len(caxPrefix):] {
+		if character < '0' || character > '9' {
+			return machineArchitectureX86
+		}
+	}
+	return machineArchitectureArm
 }
 
 func operationDirectory(options Options) (string, error) {
@@ -66,12 +85,12 @@ func newOperation(request Request, recipient int64) (operationState, error) {
 		return operationState{}, err
 	}
 	locations := append([]string{}, request.Locations...)
-	return operationState{Terms: machineTerms{OperationID: hex.EncodeToString(id[:]), OperationCapability: base64.RawURLEncoding.EncodeToString(capability[:]), ServerType: request.ServerType, Locations: locations, Image: "ubuntu-24.04", Architecture: "x86", EnableIPv4: true, Networks: []string{}, BillingTerms: "provider-charges-uncapped-v1", LoginPublicKey: pub, OwnerSecretDigest: digest}, PrivateKey: priv, OwnerSecret: secret, Recipient: recipient}, nil
+	return operationState{Terms: machineTerms{OperationID: hex.EncodeToString(id[:]), OperationCapability: base64.RawURLEncoding.EncodeToString(capability[:]), ServerType: request.ServerType, Locations: locations, Image: "ubuntu-24.04", Architecture: architectureForServerType(request.ServerType), EnableIPv4: true, Networks: []string{}, BillingTerms: "provider-charges-uncapped-v1", LoginPublicKey: pub, OwnerSecretDigest: digest}, PrivateKey: priv, OwnerSecret: secret, Recipient: recipient}, nil
 }
 func validateOperation(s operationState, request Request, recipient int64) error {
 	t := s.Terms
 	id, e := hex.DecodeString(t.OperationID)
-	if e != nil || len(id) != 32 || hex.EncodeToString(id) != t.OperationID || !validOwnerSecret(t.OperationCapability) || !validOwnerSecret(s.OwnerSecret) || s.Recipient != recipient || t.ServerType != request.ServerType || !reflect.DeepEqual(t.Locations, append([]string{}, request.Locations...)) || t.Image != "ubuntu-24.04" || t.Architecture != "x86" || !t.EnableIPv4 || t.EnableIPv6 || t.Networks == nil || len(t.Networks) != 0 || t.BillingTerms != "provider-charges-uncapped-v1" {
+	if e != nil || len(id) != 32 || hex.EncodeToString(id) != t.OperationID || !validOwnerSecret(t.OperationCapability) || !validOwnerSecret(s.OwnerSecret) || s.Recipient != recipient || t.ServerType != request.ServerType || !reflect.DeepEqual(t.Locations, append([]string{}, request.Locations...)) || t.Image != "ubuntu-24.04" || t.Architecture != architectureForServerType(request.ServerType) || !t.EnableIPv4 || t.EnableIPv6 || t.Networks == nil || len(t.Networks) != 0 || t.BillingTerms != "provider-charges-uncapped-v1" {
 		return errInvalidRequest
 	}
 	secret, _ := base64.RawURLEncoding.DecodeString(s.OwnerSecret)

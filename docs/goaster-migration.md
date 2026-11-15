@@ -73,7 +73,7 @@ request body, public key, owner digest, provider token, owner URL, or private
 key. The `hetzner_token` is read locally and placed only in the individual
 request.
 
-Availability sends the full immutable operation terms and request-scoped token defined in the [machine API contract](central-machine-api-contract.md). These include the operation identity and capability, fixed machine and billing terms, generated login public key, and `owner_secret_digest`, the lower-case SHA-256 hex digest of the owner-link secret.
+Availability sends the full immutable operation terms and request-scoped token defined in the [machine API contract](central-machine-api-contract.md). These include the operation identity and capability, fixed machine and billing terms, generated login public key, and `owner_secret_digest`, the lower-case SHA-256 hex digest of the owner-link secret. The Web architecture values are exactly `x86` and `arm`: GoAster derives `arm` for a lowercase `cax` followed by one or more digits and keeps `x86` for every other validated server type.
 
 `locations` may be absent or empty. In that case GoAsterWeb considers all
 eligible locations for the exact `server_type`. Otherwise it is a strict
