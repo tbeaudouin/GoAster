@@ -18,8 +18,10 @@ corrupt history, and ambiguous history fail closed. Recovery ordering uses
 only the nonzero retained creation timestamp; when the two newest valid
 attempts share that timestamp, recovery stops and never uses a monitor ID as a
 tie-break. A valid `history.Failure` monitor ID is retained in an omitted-ID
-status error's top-level result, nested diagnostic, and bounded log; invalid
-IDs are dropped. No provider or paid call, automatic retry, new state store,
+status error's top-level result, nested diagnostic, and bounded log only when
+the validated failure attempt belongs to the current recipient. Different,
+missing, invalid, or unavailable owners produce a generic persisted-state
+failure without monitor or server details; invalid IDs are dropped. No provider or paid call, automatic retry, new state store,
 secret exposure, or create path is involved.
 
 Focused offline regressions cover HTTP 422 diagnostics/log metadata, malformed
@@ -42,3 +44,13 @@ Validation commands and results:
 
 No network, credentials, production systems, deployment, or GitHub writes were
 used. Changes are committed locally only.
+
+Review follow-up validation (offline):
+
+- `go test ./internal/migration -run TestStatusHistoryFailureOwnership -count=1` — passed, covering same-owner retention, cross-owner corruption, missing and invalid current owners, lookup errors, and malformed history without a verified owner.
+- `go test ./... -count=1 -timeout 180s` — passed.
+- `go test -race -count=1 ./internal/migration ./internal/chat ./internal/scheduler` — passed.
+- `go vet ./...` — passed.
+- `git diff --check` — passed.
+
+Go commands used `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off`.

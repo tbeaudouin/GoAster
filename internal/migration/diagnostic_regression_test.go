@@ -209,39 +209,64 @@ func TestStatusWithoutIDDoesNotCrossPairedOwner(t *testing.T) {
 	}
 }
 
-func TestStatusHistoryFailureRetainsValidMonitorIDInResultAndLog(t *testing.T) {
+func TestStatusHistoryFailureOwnership(t *testing.T) {
 	const monitorID = "migration-history-error"
-	jbs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := jbs.Add(scheduler.Job{
-		ID:           monitorID,
-		Message:      schedulerMessagePrefix + `{"private":"history-secret"}`,
-		Kind:         scheduler.ScheduleEvery,
-		EverySeconds: MonitorIntervalSeconds,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	var output bytes.Buffer
-	restore := diagnostics.SetOutput(&output)
-	defer restore()
-	status, err := MigrationStatusWithOptions("", jbs, Options{})
-	if !errors.Is(err, ErrPersistedStateInvalid) {
-		t.Fatalf("history failure error = %v", err)
-	}
-	if status.MonitorID != monitorID || status.Migration.MonitorID != monitorID || status.Migration.Diagnostic.MonitorID != monitorID || status.Diagnostic.MonitorID != monitorID {
-		t.Fatalf("history failure monitor ID was not retained: %+v", status)
-	}
-	if status.Migration.Status != resultManualReview || status.Migration.Diagnostic.Code != codePersistedStateInvalid {
-		t.Fatalf("history failure result = %+v", status.Migration)
-	}
-	log := output.String()
-	if !strings.Contains(log, `monitor_id="`+monitorID+`"`) {
-		t.Fatalf("history failure log omitted monitor ID: %q", log)
-	}
-	if strings.Contains(log, "history-secret") {
-		t.Fatalf("history failure log leaked scheduler content: %q", log)
+	const serverType = "cx22"
+	for _, tc := range []struct {
+		name      string
+		recipient func() (int64, error)
+		malformed bool
+		retain    bool
+	}{
+		{name: "same owner", recipient: func() (int64, error) { return 42, nil }, retain: true},
+		{name: "other owner", recipient: func() (int64, error) { return 99, nil }},
+		{name: "missing current owner"},
+		{name: "invalid current owner", recipient: func() (int64, error) { return 0, nil }},
+		{name: "owner lookup error", recipient: func() (int64, error) { return 42, errors.New("owner unavailable") }},
+		{name: "missing attempt owner", recipient: func() (int64, error) { return 42, nil }, malformed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jbs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			message, err := schedulerMessage(Request{ServerType: serverType, JobID: monitorID}, 42)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.malformed {
+				message = schedulerMessagePrefix + `{"private":"history-secret"}`
+			}
+			if _, err := jbs.Add(scheduler.Job{ID: monitorID, Message: message, Kind: scheduler.ScheduleEvery, EverySeconds: MonitorIntervalSeconds}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := jbs.SetEnabled(monitorID, false); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			restore := diagnostics.SetOutput(&output)
+			defer restore()
+			status, err := MigrationStatusWithOptions("", jbs, Options{TempDirectory: t.TempDir(), MigrationRecipient: tc.recipient})
+			if !errors.Is(err, ErrPersistedStateInvalid) {
+				t.Fatalf("history failure error = %v", err)
+			}
+			if status.Migration.Status != resultManualReview || status.Migration.Diagnostic.Code != codePersistedStateInvalid {
+				t.Fatalf("history failure result = %+v", status)
+			}
+			if tc.retain {
+				if status.MonitorID != monitorID || status.Migration.MonitorID != monitorID || status.Migration.Diagnostic.MonitorID != monitorID || status.Diagnostic.MonitorID != monitorID || status.Migration.ServerType != serverType || !strings.Contains(output.String(), `monitor_id="`+monitorID+`"`) {
+					t.Fatalf("owned failure lost details: %+v log=%q", status, output.String())
+				}
+			} else {
+				encoded, marshalErr := json.Marshal(status)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				combined := string(encoded) + err.Error() + output.String()
+				if strings.Contains(combined, monitorID) || strings.Contains(combined, serverType) || strings.Contains(combined, "history-secret") {
+					t.Fatalf("unowned failure disclosed details: %s", combined)
+				}
+			}
+		})
 	}
 }

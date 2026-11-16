@@ -982,6 +982,13 @@ func MigrationStatusWithOptions(jobID string, jobs MonitorScheduler, options Opt
 	if jobID == "" {
 		history, historyErr := inspectMigrationHistory(jobs.List(), options)
 		if historyErr != nil {
+			if options.MigrationRecipient == nil {
+				return fail(ErrPersistedStateInvalid, Result{Status: resultManualReview, ManualReview: true})
+			}
+			recipient, recipientErr := options.MigrationRecipient()
+			if recipientErr != nil || recipient <= 0 || history.Failure.Scheduled.Recipient <= 0 || history.Failure.Scheduled.Recipient != recipient {
+				return fail(ErrPersistedStateInvalid, Result{Status: resultManualReview, ManualReview: true})
+			}
 			failed, failureErr := historyFailureResult(history, historyErr)
 			result.Migration = failed
 			result.Diagnostic = failed.Diagnostic
