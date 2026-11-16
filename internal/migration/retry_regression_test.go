@@ -120,7 +120,7 @@ func TestUnknownRetryRequiresExactCurrentConfirmationAndFreshRecords(t *testing.
 	}
 }
 
-func TestConfirmedCreatedAttemptBlocksEveryRetry(t *testing.T) {
+func TestConfirmedCreatedAttemptRequiresExactFreshConfirmation(t *testing.T) {
 	fixture := newMachineFixture(t)
 	fixture.available.Store(true)
 	jobs, options := retryTestOptions(t, fixture, filepath.Join(t.TempDir(), "jobs.json"), t.TempDir())
@@ -131,11 +131,59 @@ func TestConfirmedCreatedAttemptBlocksEveryRetry(t *testing.T) {
 	var tokenLoads atomic.Int32
 	options.LoadHetznerToken = func() (string, error) {
 		tokenLoads.Add(1)
-		return "", ErrHetznerTokenMissing
+		return fixture.token, nil
 	}
-	blocked, err := StartMonitor(t.Context(), Request{ServerType: "cx32", RetryAttempt: first.MonitorID}, options, jobs)
-	if err != nil || blocked.MonitorID != first.MonitorID || blocked.Diagnostic.Code != codeCreated || blocked.Diagnostic.CreationState != creationCreated || fixture.creates.Load() != 1 || tokenLoads.Load() != 0 {
-		t.Fatalf("confirmed-created retry = %+v, %v creates=%d tokenLoads=%d", blocked, err, fixture.creates.Load(), tokenLoads.Load())
+	blocked, err := StartMonitor(t.Context(), Request{ServerType: "cx22"}, options, jobs)
+	if !errors.Is(err, ErrRetryConfirmationRequired) || blocked.MonitorID != first.MonitorID || blocked.Diagnostic.Code != codeRetryConfirmation || blocked.Diagnostic.CreationState != creationCreated || fixture.creates.Load() != 1 || tokenLoads.Load() != 0 {
+		t.Fatalf("unconfirmed created retry = %+v, %v creates=%d tokenLoads=%d", blocked, err, fixture.creates.Load(), tokenLoads.Load())
+	}
+	confirmed, err := StartMonitor(t.Context(), Request{ServerType: "cx22", Locations: []string{"fsn1"}, RetryAttempt: first.MonitorID}, options, jobs)
+	if err != nil || confirmed.MonitorID == first.MonitorID || confirmed.Diagnostic.CreationState != creationCreated || fixture.creates.Load() != 2 {
+		t.Fatalf("confirmed created retry = %+v, %v creates=%d", confirmed, err, fixture.creates.Load())
+	}
+	stale, err := StartMonitor(t.Context(), Request{ServerType: "cx22", Locations: []string{"fsn1"}, RetryAttempt: first.MonitorID}, options, jobs)
+	if !errors.Is(err, ErrRetryConfirmationRequired) || stale.MonitorID != confirmed.MonitorID || stale.Diagnostic.CreationState != creationCreated || fixture.creates.Load() != 2 {
+		t.Fatalf("stale created confirmation = %+v, %v creates=%d", stale, err, fixture.creates.Load())
+	}
+	if oldOperation, newOperation := operationIDForTest(t, options.TempDirectory, first.MonitorID), operationIDForTest(t, options.TempDirectory, confirmed.MonitorID); oldOperation == newOperation {
+		t.Fatalf("created retry reused operation ID %q", oldOperation)
+	}
+	if jobsFound := jobs.List(); len(jobsFound) != 2 {
+		t.Fatalf("created retry did not retain scheduler records: %+v", jobsFound)
+	}
+}
+
+func TestCreatedHandoffFailureRequiresConfirmationBeforeFreshAttempt(t *testing.T) {
+	fixture := newMachineFixture(t)
+	fixture.available.Store(true)
+	jobs, options := retryTestOptions(t, fixture, filepath.Join(t.TempDir(), "jobs.json"), t.TempDir())
+	var failDelivery atomic.Bool
+	failDelivery.Store(true)
+	options.PrepareRecipientHandoff = func(int64) (func(context.Context, []byte) error, error) {
+		return func(context.Context, []byte) error {
+			if failDelivery.Load() {
+				return errors.New("synthetic handoff delivery failure")
+			}
+			return nil
+		}, nil
+	}
+	request := Request{ServerType: "cx22", Locations: []string{"fsn1"}}
+	first, err := StartMonitor(t.Context(), request, options, jobs)
+	if !errors.Is(err, ErrHandoffFailure) || first.Diagnostic.Code != codeHandoffFailure || first.Diagnostic.CreationState != creationCreated || fixture.creates.Load() != 1 {
+		t.Fatalf("created handoff failure = %+v, %v creates=%d", first, err, fixture.creates.Load())
+	}
+	status, statusErr := MigrationStatusWithOptions(first.MonitorID, jobs, options)
+	if statusErr != nil || status.Diagnostic.Code != codeHandoffFailure || status.Diagnostic.CreationState != creationCreated || status.Migration.Delivered {
+		t.Fatalf("handoff-failure status = %+v, %v", status, statusErr)
+	}
+	failDelivery.Store(false)
+	blocked, err := StartMonitor(t.Context(), request, options, jobs)
+	if !errors.Is(err, ErrRetryConfirmationRequired) || blocked.MonitorID != first.MonitorID || blocked.Diagnostic.CreationState != creationCreated || fixture.creates.Load() != 1 {
+		t.Fatalf("unconfirmed handoff-failure retry = %+v, %v creates=%d", blocked, err, fixture.creates.Load())
+	}
+	confirmed, err := StartMonitor(t.Context(), Request{ServerType: request.ServerType, Locations: request.Locations, RetryAttempt: first.MonitorID}, options, jobs)
+	if err != nil || confirmed.MonitorID == first.MonitorID || confirmed.Diagnostic.CreationState != creationCreated || !confirmed.Delivered || fixture.creates.Load() != 2 {
+		t.Fatalf("confirmed handoff-failure retry = %+v, %v creates=%d", confirmed, err, fixture.creates.Load())
 	}
 }
 
@@ -226,6 +274,53 @@ func TestConcurrentConfirmedRetriesShareOneActiveAttempt(t *testing.T) {
 	}
 	if fixture.creates.Load() != 2 || len(jbs.List()) != 2 {
 		t.Fatalf("confirmed retries overlapped: creates=%d jobs=%+v", fixture.creates.Load(), jbs.List())
+	}
+}
+
+func TestConcurrentConfirmedCreatedRetriesShareOneActiveAttempt(t *testing.T) {
+	fixture := newMachineFixture(t)
+	fixture.available.Store(true)
+	jobs, options := retryTestOptions(t, fixture, filepath.Join(t.TempDir(), "jobs.json"), t.TempDir())
+	first, err := StartMonitor(t.Context(), Request{ServerType: "cx22", Locations: []string{"fsn1"}}, options, jobs)
+	if err != nil || first.Diagnostic.CreationState != creationCreated || fixture.creates.Load() != 1 {
+		t.Fatalf("initial created attempt = %+v, %v creates=%d", first, err, fixture.creates.Load())
+	}
+	fixture.availabilityStarted = make(chan struct{})
+	fixture.availabilityRelease = make(chan struct{})
+	fixture.availabilityOnce = sync.Once{}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, retryErr := StartMonitor(t.Context(), Request{ServerType: "cx22", Locations: []string{"fsn1"}, RetryAttempt: first.MonitorID}, options, jobs)
+		firstDone <- retryErr
+	}()
+	select {
+	case <-fixture.availabilityStarted:
+	case <-timeAfterForRetryTest():
+		t.Fatal("confirmed created retry did not reach availability")
+	}
+	const concurrent = 6
+	errorsSeen := make(chan error, concurrent)
+	var wait sync.WaitGroup
+	for i := 0; i < concurrent; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, retryErr := StartMonitor(t.Context(), Request{ServerType: "cx22", Locations: []string{"fsn1"}, RetryAttempt: first.MonitorID}, options, jobs)
+			errorsSeen <- retryErr
+		}()
+	}
+	wait.Wait()
+	close(fixture.availabilityRelease)
+	if retryErr := <-firstDone; retryErr != nil {
+		t.Fatalf("confirmed created retry failed: %v", retryErr)
+	}
+	for i := 0; i < concurrent; i++ {
+		if retryErr := <-errorsSeen; !errors.Is(retryErr, scheduler.ErrExecutionInProgress) {
+			t.Fatalf("concurrent confirmed created retry error = %v", retryErr)
+		}
+	}
+	if fixture.creates.Load() != 2 || len(jobs.List()) != 2 {
+		t.Fatalf("confirmed created retries overlapped: creates=%d jobs=%+v", fixture.creates.Load(), jobs.List())
 	}
 }
 
@@ -384,5 +479,35 @@ func TestDispatchMarkerMakesStatusAndStopUncertain(t *testing.T) {
 	stopped, err := StopMonitorWithOptions(first.MonitorID, jobs, options)
 	if err != nil || stopped.Diagnostic.CreationState != creationUnknown {
 		t.Fatalf("stop: %+v %v", stopped.Diagnostic, err)
+	}
+}
+
+func TestRetryHistoryUsesLatestAttemptAfterCreated(t *testing.T) {
+	old := migrationAttempt{Job: scheduler.Job{ID: "migration-old"}, CreatedAt: 1, CreationState: creationCreated}
+	latest := migrationAttempt{Job: scheduler.Job{ID: "migration-latest"}, CreatedAt: 2, CreationState: creationUnknown}
+	history := migrationStartHistory{HasCreated: true, Created: old, HasUnknown: true, Unknown: latest, HasLatest: true, Latest: latest}
+	outcome, err := startHistoryOutcome(history, Request{RetryAttempt: old.Job.ID})
+	if err != nil || outcome.Kind != startOutcomeConfirmation || outcome.Attempt.Job.ID != latest.Job.ID {
+		t.Fatalf("old confirmation with newer unknown = %+v, %v", outcome, err)
+	}
+	outcome, err = startHistoryOutcome(history, Request{RetryAttempt: latest.Job.ID})
+	if err != nil || !outcome.Allowed {
+		t.Fatalf("latest confirmation = %+v, %v", outcome, err)
+	}
+	history.HasUnknown = false
+	history.Latest.CreationState = creationNotCreated
+	outcome, err = startHistoryOutcome(history, Request{})
+	if err != nil || !outcome.Allowed {
+		t.Fatalf("newer not-created = %+v, %v", outcome, err)
+	}
+	outcome, err = startHistoryOutcome(history, Request{RetryAttempt: old.Job.ID})
+	if err == nil || outcome.Allowed {
+		t.Fatalf("stale confirmation after not-created = %+v, %v", outcome, err)
+	}
+	history.HasActive = true
+	history.Active = latest
+	outcome, err = startHistoryOutcome(history, Request{RetryAttempt: old.Job.ID})
+	if err != nil || outcome.Kind != startOutcomeActive || outcome.Attempt.Job.ID != latest.Job.ID {
+		t.Fatalf("active attempt = %+v, %v", outcome, err)
 	}
 }

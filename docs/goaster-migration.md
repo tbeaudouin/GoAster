@@ -136,8 +136,12 @@ timeout, lost response, missing details, malformed response, or
 Redis/provider binding uncertainty is a manual-reconciliation condition. After
 that review, an uncertain result may be followed only by one explicit `start`
 with `retry_attempt` equal to the exact prior monitor ID and the owner’s
-duplicate-server confirmation. The old attempt is never re-enabled, and a
-confirmed-created result is never retryable.
+duplicate-server confirmation. A confirmed-created result uses the same
+attempt-specific confirmation: warn that the server already exists, refer the
+owner to the existing private setup handoff when delivery succeeded, and state
+delivery failure when it did not. Another server may add charges even if the
+prior server was manually deleted. The old attempt is never re-enabled, and
+the confirmation is never reused for a different or newer monitor ID.
 
 ## Protected handoff and ownership boundary
 

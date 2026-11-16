@@ -48,7 +48,6 @@ var errStartNotAdded = errors.New("migration start was not added")
 
 const (
 	startOutcomeActive       = "active"
-	startOutcomeCreated      = "created"
 	startOutcomeConfirmation = "confirmation"
 )
 
@@ -276,8 +275,12 @@ func startHistoryOutcome(history migrationStartHistory, request Request) (migrat
 	if history.HasActive {
 		return migrationStartOutcome{Kind: startOutcomeActive, Attempt: history.Active}, nil
 	}
-	if history.HasCreated {
-		return migrationStartOutcome{Kind: startOutcomeCreated, Attempt: history.Created}, nil
+	if history.HasCreated && (!history.HasLatest || !newerMigrationAttempt(history.Latest, history.Created)) {
+		target := history.Created
+		if request.RetryAttempt != target.Job.ID {
+			return migrationStartOutcome{Kind: startOutcomeConfirmation, Attempt: target}, nil
+		}
+		return migrationStartOutcome{Allowed: true}, nil
 	}
 	if history.HasUnknown && (!history.HasLatest || !newerMigrationAttempt(history.Latest, history.Unknown)) {
 		target := history.Unknown
@@ -307,6 +310,9 @@ func startOutcomeResult(outcome migrationStartOutcome, jobs MonitorScheduler, op
 	if outcome.Kind == startOutcomeConfirmation {
 		diagnostic := diagnosticTemplate(stageMonitor, codeRetryConfirmation)
 		diagnostic.MonitorID = attempt.Job.ID
+		if knownCreationState(attempt.CreationState) {
+			diagnostic.CreationState = attempt.CreationState
+		}
 		diagnostic.MonitoringState = monitoringStopped
 		diagnostic.MonitoringStopped = true
 		return failureResult(stageMonitor, ErrRetryConfirmationRequired, Result{Status: resultManualReview, ServerType: serverType, MonitorID: attempt.Job.ID, ManualReview: true, Diagnostic: diagnostic})

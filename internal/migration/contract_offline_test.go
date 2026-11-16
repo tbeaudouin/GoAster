@@ -20,7 +20,7 @@ func TestContractUnavailableRestartCreateOnce(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(t.TempDir(), "jobs.json")
 	calls, creates := 0, 0
-	var first machineTerms
+	termsByOperation := make(map[string]machineTerms)
 	options := Options{TempDirectory: dir, WebOrigin: "https://example.invalid", Now: func() time.Time { return time.Unix(1800000000, 0) }, MigrationRecipient: offlineRecipient, PrepareRecipientHandoff: offlinePrepareRecipient, DeliverHandoff: func(context.Context, []byte) error { return nil }, LoadHetznerToken: func() (string, error) { return "synthetic", nil }}
 	options.HTTPClient = offlineDoer(func(r *http.Request) (*http.Response, error) {
 		data, err := io.ReadAll(r.Body)
@@ -48,10 +48,12 @@ func TestContractUnavailableRestartCreateOnce(t *testing.T) {
 		if payload.HetznerToken != "synthetic" || payload.Image != "ubuntu-24.04" || payload.Architecture != "x86" || !payload.EnableIPv4 || payload.EnableIPv6 || payload.Networks == nil || len(payload.Networks) != 0 || payload.BillingTerms != "provider-charges-uncapped-v1" {
 			t.Fatal("invalid terms")
 		}
-		if calls == 0 {
-			first = payload.machineTerms
-		} else if !reflect.DeepEqual(first, payload.machineTerms) {
-			t.Fatal("operation bindings changed")
+		if previous, ok := termsByOperation[payload.OperationID]; ok {
+			if !reflect.DeepEqual(previous, payload.machineTerms) {
+				t.Fatal("operation bindings changed")
+			}
+		} else {
+			termsByOperation[payload.OperationID] = payload.machineTerms
 		}
 		calls++
 		if r.URL.Path == "/migration/v1/machines/availability" {
@@ -88,19 +90,28 @@ func TestContractUnavailableRestartCreateOnce(t *testing.T) {
 	if err = ScheduledExecutor(t.Context(), job.Message, jobs, options); err != nil {
 		t.Fatal(err)
 	}
-	if creates != 1 || calls != 3 {
+	if creates != 1 || calls != 3 || len(termsByOperation) != 1 {
 		t.Fatalf("calls=%d creates=%d", calls, creates)
 	}
 	if err = ScheduledExecutor(t.Context(), job.Message, jobs, options); err == nil || creates != 1 {
 		t.Fatal("create retried")
 	}
 	again, err := StartMonitor(t.Context(), Request{ServerType: "cx32"}, options, jobs)
-	if err != nil || again.ServerType != "cx22" || again.Diagnostic.Code != codeCreated || again.Diagnostic.CreationState != creationCreated || creates != 1 {
-		t.Fatalf("terminal restart: %+v %v creates=%d", again, err, creates)
+	if !errors.Is(err, ErrRetryConfirmationRequired) || again.MonitorID != result.MonitorID || again.Diagnostic.CreationState != creationCreated || creates != 1 {
+		t.Fatalf("unconfirmed terminal restart: %+v %v creates=%d", again, err, creates)
+	}
+	confirmed, err := StartMonitor(t.Context(), Request{ServerType: "cx22", RetryAttempt: result.MonitorID}, options, jobs)
+	if err != nil || confirmed.MonitorID == result.MonitorID || confirmed.Diagnostic.Code != codeCreated || confirmed.Diagnostic.CreationState != creationCreated || creates != 2 || calls != 5 || len(termsByOperation) != 2 {
+		t.Fatalf("confirmed terminal restart: %+v %v creates=%d calls=%d operations=%d", confirmed, err, creates, calls, len(termsByOperation))
 	}
 	encoded, _ := json.Marshal(result)
-	if bytes.Contains(encoded, []byte(first.OperationCapability)) || bytes.Contains(encoded, []byte("PRIVATE KEY")) {
-		t.Fatal("secret in result")
+	for _, terms := range termsByOperation {
+		if bytes.Contains(encoded, []byte(terms.OperationCapability)) {
+			t.Fatal("secret in result")
+		}
+	}
+	if bytes.Contains(encoded, []byte("PRIVATE KEY")) {
+		t.Fatal("private key in result")
 	}
 }
 func TestOperationRejectsChangedBindings(t *testing.T) {
