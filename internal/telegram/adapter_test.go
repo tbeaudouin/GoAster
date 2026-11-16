@@ -115,7 +115,7 @@ func TestPrivatePairingAndAuthorization(t *testing.T) {
 		t.Fatal("/start did not explain pairing without authorizing anyone")
 	}
 	a.handle(context.Background(), privateMessage(42, "/pair "+testCode))
-	if p.userID != 42 || len(sent) != 3 || !strings.Contains(sent[2].Text, "Paired") || sent[2].ParseMode != "HTML" {
+	if p.userID != 42 || len(sent) != 3 || sent[2].Text != "To see all available shortcut commands, use /help." || sent[2].ParseMode != "HTML" {
 		t.Fatal("valid private pairing failed")
 	}
 	a.handle(context.Background(), privateMessage(99, telegramHelpCommand))
@@ -392,7 +392,7 @@ func TestPairCommandIsPrimaryAndRejectsInvalidPairingMessages(t *testing.T) {
 	}
 
 	a.handle(context.Background(), privateMessage(42, "/pair "+testCode))
-	if p.userID != 42 || len(sent) != 3 || !strings.Contains(sent[2], "Paired") {
+	if p.userID != 42 || len(sent) != 3 || !strings.Contains(sent[2], "Paired") || !strings.Contains(sent[2], "not ready") {
 		t.Fatalf("valid /pair did not authorize the private user: user=%d sent=%q", p.userID, sent)
 	}
 	a.handle(context.Background(), privateMessage(99, "/start "+testCode))
@@ -400,7 +400,7 @@ func TestPairCommandIsPrimaryAndRejectsInvalidPairingMessages(t *testing.T) {
 		t.Fatal("a consumed code or legacy command authorized another user")
 	}
 	a.handle(context.Background(), privateMessage(42, "/start"))
-	if len(sent) != 4 || !strings.Contains(sent[3], "not ready") {
+	if len(sent) != 4 || sent[3] != "The remote agent is not ready; check its remote authentication. You can still use /m to view or select a model and /clear to clear this chat's history." {
 		t.Fatalf("normal /start did not retain paired-user behavior: %q", sent)
 	}
 }
@@ -460,7 +460,7 @@ func TestStartCodeIsIgnoredBeforeAndGivesReadinessAfterPairing(t *testing.T) {
 		t.Fatalf("/pair CODE did not authorize without exposing the code: user=%d sent=%q forwarded=%q", p.userID, sent, forwarded)
 	}
 	a.handle(context.Background(), privateMessage(42, "/start "+testCode))
-	if p.userID != 42 || len(forwarded) != 0 || len(sent) != 3 || !strings.Contains(sent[2], "ready for text messages") || strings.Contains(sent[2], testCode) {
+	if p.userID != 42 || len(forwarded) != 0 || len(sent) != 3 || sent[2] != "To see all available shortcut commands, use /help." || strings.Contains(sent[2], testCode) {
 		t.Fatalf("/start CODE did not give code-free readiness guidance after pairing: user=%d sent=%q forwarded=%q", p.userID, sent, forwarded)
 	}
 }
@@ -522,7 +522,7 @@ func TestPairedPairCommandIsNotForwardedOrEchoed(t *testing.T) {
 	if len(forwarded) != 0 {
 		t.Fatalf("pairing commands reached the agent: %#v", forwarded)
 	}
-	const readyMessage = "GoAster is ready for text messages, images, and documents. Use /m to view the model, /m MODEL_OR_ALIAS to select one, and /clear to clear this chat's history."
+	const readyMessage = "To see all available shortcut commands, use /help."
 	if len(sent) != 3 {
 		t.Fatalf("expected a safe command response for each command, got %#v", sent)
 	}
@@ -1161,7 +1161,7 @@ func TestStartReportsCurrentAgentReadiness(t *testing.T) {
 	available = true
 	a.handle(context.Background(), privateMessage(42, "/start"))
 	if len(sent) != 2 || !strings.Contains(sent[0], "not ready") || !strings.Contains(sent[0], "/clear") ||
-		!strings.Contains(sent[1], "ready for text messages") || !strings.Contains(sent[1], "/clear") {
+		sent[1] != "To see all available shortcut commands, use /help." {
 		t.Fatalf("readiness messages = %q", sent)
 	}
 }

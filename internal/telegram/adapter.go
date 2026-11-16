@@ -580,7 +580,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		}
 		if paired {
 			if a.agentEndpointAvailable(ctx, "/healthz") {
-				a.send(ctx, m.Chat.ID, "Paired. Send text, an image, or a document to chat. Use /m to view the model, /m MODEL_OR_ALIAS to select one, and /clear to clear this chat's history.")
+				a.send(ctx, m.Chat.ID, "To see all available shortcut commands, use /help.")
 			} else {
 				a.send(ctx, m.Chat.ID, "Paired. The remote agent is not ready; check its remote authentication. You can still use /m to view or select a model and /clear to clear this chat's history.")
 			}
@@ -677,7 +677,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 	if text == telegramPairCommand || strings.HasPrefix(text, telegramPairCommand+" ") ||
 		text == telegramStartCommand || strings.HasPrefix(text, telegramStartCommand+" ") {
 		if a.agentEndpointAvailable(ctx, "/healthz") {
-			a.send(ctx, m.Chat.ID, "GoAster is ready for text messages, images, and documents. Use /m to view the model, /m MODEL_OR_ALIAS to select one, and /clear to clear this chat's history.")
+			a.send(ctx, m.Chat.ID, "To see all available shortcut commands, use /help.")
 		} else {
 			a.send(ctx, m.Chat.ID, "The remote agent is not ready; check its remote authentication. You can still use /m to view or select a model and /clear to clear this chat's history.")
 		}
