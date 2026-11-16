@@ -180,6 +180,13 @@ that are not currently listed as available. The final authoritative
 availability decision happens only inside the approved `start`/monitor
 workflow.
 
+Before asking for approval, explain that high-demand server types may take
+days to become available, including when checking multiple locations or when
+the owner has no location preference. Present this only as a possibility, not
+a guaranteed timeframe: broader location preferences do not guarantee
+availability, and do not promise when migration will complete. Availability
+checks continue at the existing 30-minute interval.
+
 Present the exact type, strict location preference, indicative currency and
 per-location estimate when available, and the fact that one provider creation
 sequence would occur. The model-facing `start` call accepts only the exact
