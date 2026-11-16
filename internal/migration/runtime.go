@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -343,8 +345,8 @@ func SchedulerPath() (string, error) {
 
 // StartMonitor adds one non-secret 30-minute monitor and performs its first
 // availability check immediately. A ready result disables the exact job before
-// one create request. Any post-add failure is returned as manual review and is
-// never eligible for automatic retry.
+// one create request. Only the bounded pre-create availability failures handled
+// by executeMonitor keep the exact job enabled.
 func StartMonitor(ctx context.Context, request Request, options Options, jobs MonitorScheduler) (result Result, returnErr error) {
 	defer func() {
 		if returnErr != nil {
@@ -526,6 +528,138 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 	return NormalizeResult(result), failureWithDiagnostic(result.Diagnostic, runErr)
 }
 
+func availabilityFailureMayRetry(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if findDiagnosticCarrier(err).Code != "" {
+		return false
+	}
+	for _, terminal := range []error{ErrCredentialStorageUnreadable, ErrHetznerTokenMissing, ErrHetznerTokenInvalid, ErrProtectedStorage, ErrInvalidResponse, ErrPersistedStateInvalid, errInvalidRequest, errManualReview} {
+		if errors.Is(err, terminal) {
+			return false
+		}
+	}
+	var webResponse webResponseError
+	if errors.As(err, &webResponse) {
+		return false
+	}
+	var providerResponse providerResponseError
+	if errors.As(err, &providerResponse) {
+		return false
+	}
+	var providerStatus providerHTTPError
+	if errors.As(err, &providerStatus) {
+		return false
+	}
+	var providerTransport providerTransportError
+	if errors.As(err, &providerTransport) {
+		return false
+	}
+	var status webHTTPError
+	if errors.As(err, &status) {
+		return availabilityHTTPErrorMayRetry(status)
+	}
+	var transport webTransportError
+	if !errors.As(err, &transport) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary())
+}
+
+// availabilityHTTPErrorMayRetry requires a decoded v1 envelope with a known
+// transient cause. A status-only fallback has no provenance and stays
+// terminal, including plain gateway 502/503/504 responses.
+func availabilityHTTPErrorMayRetry(status webHTTPError) bool {
+	if status.Code == "" {
+		return false
+	}
+	switch status.Code {
+	case "rate_limited":
+		return status.Status == http.StatusTooManyRequests &&
+			(status.Stage == "service" && status.ProviderCode == "" ||
+				status.Stage == "provider" && status.ProviderCode == "rate_limit_exceeded")
+	case "unavailable":
+		return transientAvailabilityHTTPStatus(status.Status) &&
+			(status.Stage == "service" && status.ProviderCode == "" ||
+				status.Stage == "provider" && status.ProviderCode == "resource_unavailable")
+	case "provider_timeout":
+		return transientAvailabilityHTTPStatus(status.Status) && status.Stage == "provider" && status.ProviderCode == ""
+	default:
+		return false
+	}
+}
+
+func transientAvailabilityHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func availabilityRetryResult(err error, monitorID, serverType string, count int) Result {
+	diagnostic := diagnosticForFailure(stageAvailability, err, Result{
+		Status:    resultManualReview,
+		MonitorID: monitorID,
+		Diagnostic: Diagnostic{
+			Stage:         stageAvailability,
+			CreationState: creationNotCreated,
+		},
+	})
+	diagnostic.MonitorID = monitorID
+	diagnostic.ResultState = resultMonitoring
+	diagnostic.CreationState = creationNotCreated
+	diagnostic.MonitoringState = monitoringRunning
+	diagnostic.MonitoringStopped = false
+	diagnostic.RetryCount = count
+	diagnostic.RetryState = retryStatePending
+	return NormalizeResult(Result{Status: resultMonitoring, ServerType: serverType, MonitorID: monitorID, Diagnostic: diagnostic})
+}
+
+func availabilityRetryExhaustedResult(err error, monitorID, serverType string) (Result, error) {
+	base := Diagnostic{}
+	if err != nil {
+		base = diagnosticForFailure(stageAvailability, err, Result{
+			Status:     resultManualReview,
+			MonitorID:  monitorID,
+			Diagnostic: Diagnostic{Stage: stageAvailability, CreationState: creationNotCreated},
+		})
+	}
+	diagnostic := diagnosticTemplate(stageAvailability, codeAvailabilityRetryExhausted)
+	diagnostic.MonitorID = monitorID
+	diagnostic.HTTPStatus = base.HTTPStatus
+	diagnostic.ProviderCode = base.ProviderCode
+	diagnostic.ResultState = resultManualReview
+	diagnostic.CreationState = creationNotCreated
+	diagnostic.MonitoringState = monitoringUnknown
+	diagnostic.MonitoringStopped = false
+	diagnostic.RetryCount = availabilityRetryLimit
+	diagnostic.RetryState = retryStateExhausted
+	result := NormalizeResult(Result{Status: resultManualReview, ServerType: serverType, MonitorID: monitorID, ManualReview: true, Diagnostic: diagnostic})
+	cause := errAvailabilityRetryBudgetExhausted
+	if err != nil {
+		cause = errors.Join(errAvailabilityRetryBudgetExhausted, fmt.Errorf("availability check failed: %w", err))
+	}
+	return result, failureWithDiagnostic(result.Diagnostic, cause)
+}
+
+func retainedCreationEvidenceFailure(monitorID, serverType, state string) (Result, error) {
+	diagnostic := diagnosticTemplate(stageMonitor, codeManualReview)
+	diagnostic.MonitorID = monitorID
+	diagnostic.ResultState = resultManualReview
+	diagnostic.CreationState = state
+	diagnostic.MonitoringState = monitoringUnknown
+	diagnostic.MonitoringStopped = false
+	result := NormalizeResult(Result{Status: resultManualReview, ServerType: serverType, MonitorID: monitorID, ManualReview: true, Diagnostic: diagnostic})
+	return result, failureWithDiagnostic(result.Diagnostic, errors.Join(errManualReview, errors.New("durable migration creation evidence prevents another create")))
+}
+
 func executeMonitor(ctx context.Context, request Request, recipient int64, options Options, coordinator monitorExecutionCoordinator, jobID string) (result Result, runErr error) {
 	if coordinator == nil {
 		return failureResult(stageMonitor, errors.New("migration monitor execution claim capability is unavailable"), Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: jobID})
@@ -538,7 +672,47 @@ func executeMonitor(ctx context.Context, request Request, recipient int64, optio
 	if err != nil {
 		return failureResult(stageMonitor, fmt.Errorf("claim migration monitor execution: %w", err), Result{Status: resultInProgress, ServerType: request.ServerType, MonitorID: jobID, Diagnostic: diagnosticTemplate(stageMonitor, codeMonitorInProgress)})
 	}
-	result = Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: jobID, Diagnostic: diagnosticTemplate(stageMonitor, codeMonitorInProgress)}
+	initialDiagnostic := diagnosticTemplate(stageMonitor, codeMonitorInProgress)
+	initialDiagnostic.CreationState = creationNotCreated
+	result = Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: jobID, Diagnostic: initialDiagnostic}
+	persistMonitoringDiagnostic := false
+	var dir string
+	var stored Diagnostic
+	preflightResult, preflightErr := func() (Result, error) {
+		var err error
+		dir, err = operationDirectory(options)
+		if err != nil {
+			unknown := result
+			unknown.Diagnostic.CreationState = creationUnknown
+			return failureResult(stageStorage, errors.Join(ErrProtectedStorage, err), unknown)
+		}
+		dispatching, err := createDispatchMarkerExists(dir, jobID)
+		if err != nil {
+			unknown := result
+			unknown.Diagnostic.CreationState = creationUnknown
+			return failureResult(stageStorage, errors.Join(ErrPersistedStateInvalid, err), unknown)
+		}
+		evidence, err := loadMonitorDiagnosticEvidence(options, jobID)
+		if err != nil {
+			unknown := result
+			unknown.Diagnostic.CreationState = creationUnknown
+			return failureResult(stageStorage, err, unknown)
+		}
+		if evidence.HasCreated || evidence.Diagnostic.CreationState == creationCreated {
+			return retainedCreationEvidenceFailure(jobID, request.ServerType, creationCreated)
+		}
+		if dispatching || evidence.HasUnknown || (evidence.Diagnostic.CreationState == creationUnknown && evidence.Diagnostic.Code != codeMonitorStarted) {
+			return retainedCreationEvidenceFailure(jobID, request.ServerType, creationUnknown)
+		}
+		stored = initialMonitorDiagnostic(jobID)
+		if evidence.Found {
+			stored = NormalizeResult(Result{Status: evidence.Diagnostic.ResultState, MonitorID: jobID, Diagnostic: evidence.Diagnostic}).Diagnostic
+		}
+		if stored.RetryState == retryStateExhausted || stored.RetryCount >= availabilityRetryLimit {
+			return availabilityRetryExhaustedResult(nil, jobID, request.ServerType)
+		}
+		return Result{}, nil
+	}()
 	defer func() {
 		if result.Status != resultMonitoring {
 			result.Diagnostic = DiagnosticFor(runErr, result)
@@ -559,8 +733,25 @@ func executeMonitor(ctx context.Context, request Request, recipient int64, optio
 			}
 			result.Diagnostic.MonitoringState = monitoringUnknown
 			result.Diagnostic.MonitoringStopped = false
-			if err := storeMonitorDiagnostic(options, result.Diagnostic); err != nil {
-				runErr = errors.Join(runErr, err)
+			if storeErr := storeMonitorDiagnostic(options, result.Diagnostic); storeErr != nil {
+				runErr = errors.Join(runErr, storeErr)
+				result.Status = resultManualReview
+				result.ManualReview = true
+				result.Diagnostic = diagnosticForFailure(stageStorage, storeErr, result)
+				result.Diagnostic.MonitorID = jobID
+				result.Diagnostic.MonitoringState = monitoringUnknown
+				result.Diagnostic.MonitoringStopped = false
+			}
+		} else if persistMonitoringDiagnostic {
+			result.Diagnostic.MonitorID = jobID
+			if storeErr := storeMonitorDiagnostic(options, result.Diagnostic); storeErr != nil {
+				runErr = errors.Join(runErr, storeErr)
+				result.Status = resultManualReview
+				result.ManualReview = true
+				result.Diagnostic = diagnosticForFailure(stageStorage, storeErr, result)
+				result.Diagnostic.MonitorID = jobID
+				result.Diagnostic.MonitoringState = monitoringUnknown
+				result.Diagnostic.MonitoringStopped = false
 			}
 		}
 		if complete != nil {
@@ -589,6 +780,9 @@ func executeMonitor(ctx context.Context, request Request, recipient int64, optio
 			}
 		}
 	}()
+	if preflightErr != nil {
+		return preflightResult, preflightErr
+	}
 	if options.MigrationRecipient == nil || options.PrepareRecipientHandoff == nil {
 		return failureResult(stageRecipient, ErrRecipientUnavailable, result)
 	}
@@ -617,21 +811,33 @@ func executeMonitor(ctx context.Context, request Request, recipient int64, optio
 	if !validHetznerToken(token) {
 		return failureResult(stageConfiguration, ErrHetznerTokenInvalid, result)
 	}
-	dir, err := operationDirectory(options)
-	if err != nil {
-		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, err), result)
-	}
 	state, err := loadOperation(dir, jobID, request, recipient)
 	if err != nil {
 		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, fmt.Errorf("load migration operation: %w", err)), result)
 	}
 	availability, err := availabilityWithToken(ctx, state.Terms, token, options)
 	if err != nil {
+		if availabilityFailureMayRetry(err) {
+			count := 1
+			if stored.RetryState == retryStatePending {
+				count = stored.RetryCount + 1
+			}
+			if count < availabilityRetryLimit {
+				retry := availabilityRetryResult(err, jobID, request.ServerType, count)
+				logMigrationFailure("migration.monitor.availability.retry", err, retry.Diagnostic)
+				persistMonitoringDiagnostic = true
+				return retry, nil
+			}
+			return availabilityRetryExhaustedResult(err, jobID, request.ServerType)
+		}
 		return failureResult(stageAvailability, fmt.Errorf("check migration availability: %w", err), result)
 	}
 	if len(availability.Locations) == 0 {
 		result.Status = resultMonitoring
 		result.Diagnostic = initialMonitorDiagnostic(jobID)
+		if stored.RetryState == retryStatePending || stored.RetryCount != 0 {
+			persistMonitoringDiagnostic = true
+		}
 		return result, nil
 	}
 	if err := markDispatch(dir, jobID); err != nil {

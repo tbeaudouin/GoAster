@@ -32,38 +32,39 @@ const (
 	stageTool          = "tool"
 	stageUnknown       = "unknown"
 
-	codeInvalidArguments       = "invalid_arguments"
-	codeCapabilityUnavailable  = "capability_unavailable"
-	codeMissingToken           = "missing_hcloud_token"
-	codeCredentialUnreadable   = "credential_storage_unreadable"
-	codeInvalidToken           = "invalid_hcloud_token"
-	codeProtectedStorage       = "protected_storage_failure"
-	codeRecipientUnavailable   = "recipient_unavailable"
-	codeRecipientChanged       = "recipient_changed"
-	codeHandoffFailure         = "handoff_failure"
-	codeCancelled              = "cancelled"
-	codeTimeout                = "timeout"
-	codeDNSFailure             = "dns_failure"
-	codeTLSFailure             = "tls_failure"
-	codeTransportFailure       = "transport_failure"
-	codeInvalidResponse        = "invalid_response"
-	codeWebAuthRejected        = "web_auth_rejected"
-	codeWebHTTPError           = "web_http_error"
-	codeProviderAuthRejected   = "provider_auth_rejected"
-	codeProviderHTTPError      = "provider_http_error"
-	codeUpstreamUnknown        = "upstream_unknown"
-	codeMonitorState           = "monitor_state_failure"
-	codeMonitorNotFound        = "monitor_not_found"
-	codeMonitorInProgress      = "monitor_in_progress"
-	codeMonitorStopUnconfirmed = "monitor_stop_unconfirmed"
-	codePersistedStateInvalid  = "persisted_state_invalid"
-	codeMonitorStarted         = "monitor_started"
-	codeMonitorStopped         = "monitor_stopped"
-	codeRetryConfirmation      = "retry_confirmation_required"
-	codeCreated                = "created"
-	codeCreatedDeliveryFailed  = "created_delivery_failed"
-	codeManualReview           = "manual_review"
-	codeUnknownFailure         = "unknown_failure"
+	codeInvalidArguments           = "invalid_arguments"
+	codeCapabilityUnavailable      = "capability_unavailable"
+	codeMissingToken               = "missing_hcloud_token"
+	codeCredentialUnreadable       = "credential_storage_unreadable"
+	codeInvalidToken               = "invalid_hcloud_token"
+	codeProtectedStorage           = "protected_storage_failure"
+	codeRecipientUnavailable       = "recipient_unavailable"
+	codeRecipientChanged           = "recipient_changed"
+	codeHandoffFailure             = "handoff_failure"
+	codeCancelled                  = "cancelled"
+	codeTimeout                    = "timeout"
+	codeDNSFailure                 = "dns_failure"
+	codeTLSFailure                 = "tls_failure"
+	codeTransportFailure           = "transport_failure"
+	codeInvalidResponse            = "invalid_response"
+	codeWebAuthRejected            = "web_auth_rejected"
+	codeWebHTTPError               = "web_http_error"
+	codeProviderAuthRejected       = "provider_auth_rejected"
+	codeProviderHTTPError          = "provider_http_error"
+	codeUpstreamUnknown            = "upstream_unknown"
+	codeMonitorState               = "monitor_state_failure"
+	codeMonitorNotFound            = "monitor_not_found"
+	codeMonitorInProgress          = "monitor_in_progress"
+	codeMonitorStopUnconfirmed     = "monitor_stop_unconfirmed"
+	codePersistedStateInvalid      = "persisted_state_invalid"
+	codeMonitorStarted             = "monitor_started"
+	codeMonitorStopped             = "monitor_stopped"
+	codeRetryConfirmation          = "retry_confirmation_required"
+	codeCreated                    = "created"
+	codeCreatedDeliveryFailed      = "created_delivery_failed"
+	codeAvailabilityRetryExhausted = "availability_retry_exhausted"
+	codeManualReview               = "manual_review"
+	codeUnknownFailure             = "unknown_failure"
 
 	resultMonitoring      = "monitoring"
 	resultCreated         = "created"
@@ -83,6 +84,13 @@ const (
 	monitoringStopped    = "stopped"
 	monitoringUnknown    = "unknown"
 	monitoringNotStarted = "not_started"
+
+	retryStateNone      = "none"
+	retryStatePending   = "pending"
+	retryStateExhausted = "exhausted"
+
+	availabilityRetryLimit = 3
+	retryPendingNextAction = "wait for the next 30-minute availability check; the bounded availability retry is automatic"
 
 	maxDiagnosticBytes      = 4 * 1024
 	maxDiagnosticTimestamp  = int64(4102444800) // 2100-01-01 UTC
@@ -106,23 +114,26 @@ type Diagnostic struct {
 	MonitoringState   string `json:"monitoring_state"`
 	MonitoringStopped bool   `json:"monitoring_stopped"`
 	NextAction        string `json:"next_action"`
+	RetryCount        int    `json:"retry_count"`
+	RetryState        string `json:"retry_state"`
 	UpdatedAt         int64  `json:"updated_at,omitempty"`
 }
 
 var (
 	// These sentinels preserve safe classification while retaining the wrapped
 	// storage, transport, or provider cause for diagnostics.Error.
-	ErrCredentialStorageUnreadable = errors.New("migration credential storage is unreadable")
-	ErrHetznerTokenInvalid         = errors.New("HCLOUD_TOKEN is invalid")
-	ErrProtectedStorage            = errors.New("migration protected storage failed")
-	ErrRecipientUnavailable        = errors.New("migration recipient is unavailable")
-	ErrRecipientChanged            = errors.New("migration recipient changed")
-	ErrHandoffFailure              = errors.New("migration handoff failed")
-	ErrInvalidResponse             = errors.New("migration response is invalid")
-	ErrMonitorStopUnconfirmed      = errors.New("migration monitor stop is unconfirmed")
-	ErrMonitorNotFound             = errors.New("migration monitor was not found")
-	ErrPersistedStateInvalid       = errors.New("migration persisted diagnostic state is invalid")
-	ErrRetryConfirmationRequired   = errors.New("migration retry confirmation is required")
+	ErrCredentialStorageUnreadable      = errors.New("migration credential storage is unreadable")
+	ErrHetznerTokenInvalid              = errors.New("HCLOUD_TOKEN is invalid")
+	ErrProtectedStorage                 = errors.New("migration protected storage failed")
+	ErrRecipientUnavailable             = errors.New("migration recipient is unavailable")
+	ErrRecipientChanged                 = errors.New("migration recipient changed")
+	ErrHandoffFailure                   = errors.New("migration handoff failed")
+	ErrInvalidResponse                  = errors.New("migration response is invalid")
+	ErrMonitorStopUnconfirmed           = errors.New("migration monitor stop is unconfirmed")
+	ErrMonitorNotFound                  = errors.New("migration monitor was not found")
+	ErrPersistedStateInvalid            = errors.New("migration persisted diagnostic state is invalid")
+	ErrRetryConfirmationRequired        = errors.New("migration retry confirmation is required")
+	errAvailabilityRetryBudgetExhausted = errors.New("migration availability retry budget exhausted")
 )
 
 type migrationFailure struct {
@@ -144,8 +155,9 @@ type diagnosticCarrier interface {
 	MigrationDiagnostic() Diagnostic
 }
 
-// webHTTPError carries only the response status. The counterpart's body is
-// intentionally never retained or decoded into a user-facing cause.
+// webHTTPError carries only the response status and allowlisted envelope
+// fields. The counterpart's body is intentionally never retained or decoded
+// into a user-facing cause.
 type webHTTPError struct {
 	Status       int
 	Code         string
@@ -455,6 +467,7 @@ func diagnosticTemplate(stage, code string) Diagnostic {
 		CreationState:   creationStateForCode(code),
 		MonitoringState: monitoringStateForCode(code),
 		NextAction:      nextActionForCode(code),
+		RetryState:      retryStateNone,
 	}
 }
 
@@ -472,7 +485,16 @@ func normalizeDiagnostic(input Diagnostic, stage string, result Result) Diagnost
 	if input.Cause != template.Cause {
 		input.Cause = template.Cause
 	}
-	if input.NextAction != template.NextAction {
+	if input.RetryState == "" && input.RetryCount == 0 {
+		input.RetryState = retryStateNone
+	}
+	if !validRetryState(input.RetryState, input.RetryCount) {
+		input.RetryCount = 0
+		input.RetryState = retryStateNone
+	}
+	if input.RetryState == retryStatePending {
+		input.NextAction = retryPendingNextAction
+	} else if input.NextAction != template.NextAction {
 		input.NextAction = template.NextAction
 	}
 	if !knownResultState(input.ResultState) {
@@ -500,6 +522,19 @@ func normalizeDiagnostic(input Diagnostic, stage string, result Result) Diagnost
 		input.UpdatedAt = 0
 	}
 	return input
+}
+
+func validRetryState(state string, count int) bool {
+	switch state {
+	case retryStateNone:
+		return count == 0
+	case retryStatePending:
+		return count > 0 && count < availabilityRetryLimit
+	case retryStateExhausted:
+		return count == availabilityRetryLimit
+	default:
+		return false
+	}
 }
 
 func codeForResult(result Result) string {
@@ -559,9 +594,6 @@ func creationStateFor(result Result, code string) string {
 	if result.Diagnostic.CreationState == creationCreated {
 		return creationCreated
 	}
-	if result.Diagnostic.CreationState == creationUnknown && definitelyNotCreatedCode(code) {
-		return creationNotCreated
-	}
 	if knownCreationState(result.Diagnostic.CreationState) {
 		return result.Diagnostic.CreationState
 	}
@@ -570,6 +602,9 @@ func creationStateFor(result Result, code string) string {
 	}
 	if result.Diagnostic.Stage == stageCreate && result.Status == resultManualReview {
 		return creationUnknown
+	}
+	if result.Diagnostic.Stage == stageAvailability && result.Status == resultManualReview {
+		return creationNotCreated
 	}
 	if code == codeWebHTTPError || code == codeWebAuthRejected || code == codeTransportFailure || code == codeTimeout || code == codeDNSFailure || code == codeTLSFailure || code == codeInvalidResponse || code == codeUpstreamUnknown {
 		creationUncertain := result.Diagnostic.Stage == stageCreate || result.Diagnostic.Stage == stageAvailability || result.Diagnostic.Stage == stageMonitor
@@ -587,15 +622,6 @@ func creationStateFor(result Result, code string) string {
 		return creationUnknown
 	}
 	return creationNotCreated
-}
-
-func definitelyNotCreatedCode(code string) bool {
-	switch code {
-	case codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeRecipientUnavailable, codeRecipientChanged:
-		return true
-	default:
-		return false
-	}
 }
 
 func monitoringStateFor(result Result, code string) string {
@@ -636,7 +662,7 @@ func knownStage(stage string) bool {
 
 func knownDiagnosticCode(code string) bool {
 	switch code {
-	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", codeInvalidArguments, codeCapabilityUnavailable, codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeProtectedStorage, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeCancelled, codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeInvalidResponse, codeWebAuthRejected, codeWebHTTPError, codeProviderAuthRejected, codeProviderHTTPError, codeUpstreamUnknown, codeMonitorState, codeMonitorNotFound, codeMonitorInProgress, codeMonitorStopUnconfirmed, codePersistedStateInvalid, codeMonitorStarted, codeMonitorStopped, codeRetryConfirmation, codeCreated, codeCreatedDeliveryFailed, codeManualReview, codeUnknownFailure:
+	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", codeInvalidArguments, codeCapabilityUnavailable, codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeProtectedStorage, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeCancelled, codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeInvalidResponse, codeWebAuthRejected, codeWebHTTPError, codeProviderAuthRejected, codeProviderHTTPError, codeUpstreamUnknown, codeMonitorState, codeMonitorNotFound, codeMonitorInProgress, codeMonitorStopUnconfirmed, codePersistedStateInvalid, codeMonitorStarted, codeMonitorStopped, codeRetryConfirmation, codeCreated, codeCreatedDeliveryFailed, codeAvailabilityRetryExhausted, codeManualReview, codeUnknownFailure:
 		return true
 	default:
 		return false
@@ -682,6 +708,8 @@ func resultStateForCode(code string) string {
 		return resultInProgress
 	case codeCreated, codeCreatedDeliveryFailed:
 		return resultCreated
+	case codeAvailabilityRetryExhausted:
+		return resultManualReview
 	case codeInvalidArguments:
 		return resultRejected
 	case codeCapabilityUnavailable:
@@ -695,7 +723,7 @@ func creationStateForCode(code string) string {
 	switch code {
 	case codeCreated, codeCreatedDeliveryFailed:
 		return creationCreated
-	case codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeProtectedStorage, codeInvalidArguments, codeCapabilityUnavailable, codeProviderAuthRejected, codeProviderHTTPError:
+	case codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeProtectedStorage, codeInvalidArguments, codeCapabilityUnavailable, codeProviderAuthRejected, codeProviderHTTPError, codeAvailabilityRetryExhausted:
 		return creationNotCreated
 	default:
 		return creationUnknown
@@ -803,6 +831,8 @@ func causeForCode(code string) string {
 		return "the migration was created and handoff completed"
 	case codeCreatedDeliveryFailed:
 		return "the migration was created but handoff delivery failed"
+	case codeAvailabilityRetryExhausted:
+		return "the bounded pre-create availability retry budget was exhausted"
 	case codeManualReview:
 		return "the migration requires manual review"
 	default:
@@ -836,6 +866,8 @@ func nextActionForCode(code string) string {
 		return "inspect status and the named service before any new owner-approved attempt; do not retry an uncertain create"
 	case codeInvalidResponse:
 		return "inspect the counterpart status and provider project before any new owner-approved attempt"
+	case codeAvailabilityRetryExhausted:
+		return "resolve the availability service failure, then obtain fresh owner approval before a new attempt"
 	case codeMonitorState, codeMonitorNotFound, codePersistedStateInvalid:
 		return "reconcile the retained monitor record manually before any new attempt"
 	case codeMonitorInProgress:
@@ -1076,7 +1108,12 @@ func sequenceForDiagnostic(name string) int64 {
 }
 
 func validatePersistedDiagnostic(diagnostic Diagnostic, monitorID string) error {
-	if diagnostic.MonitorID != monitorID || !safeJobID(monitorID) || !knownStage(diagnostic.Stage) || !knownDiagnosticCode(diagnostic.Code) || !knownResultState(diagnostic.ResultState) || !knownCreationState(diagnostic.CreationState) || !knownMonitoringState(diagnostic.MonitoringState) || diagnostic.Cause != causeForCode(diagnostic.Code) || diagnostic.NextAction != nextActionForCode(diagnostic.Code) || diagnostic.MonitoringStopped != (diagnostic.MonitoringState == monitoringStopped) || diagnostic.HTTPStatus < 0 || diagnostic.HTTPStatus > 599 || diagnostic.HTTPStatus > 0 && diagnostic.HTTPStatus < 100 || safeProviderCode(diagnostic.ProviderCode) != diagnostic.ProviderCode || diagnostic.UpdatedAt < 0 || diagnostic.UpdatedAt > maxDiagnosticTimestamp {
+	retryStateValid := validRetryState(diagnostic.RetryState, diagnostic.RetryCount) || diagnostic.RetryState == "" && diagnostic.RetryCount == 0
+	expectedNextAction := nextActionForCode(diagnostic.Code)
+	if diagnostic.RetryState == retryStatePending {
+		expectedNextAction = retryPendingNextAction
+	}
+	if diagnostic.MonitorID != monitorID || !safeJobID(monitorID) || !knownStage(diagnostic.Stage) || !knownDiagnosticCode(diagnostic.Code) || !knownResultState(diagnostic.ResultState) || !knownCreationState(diagnostic.CreationState) || !knownMonitoringState(diagnostic.MonitoringState) || !retryStateValid || diagnostic.Cause != causeForCode(diagnostic.Code) || diagnostic.NextAction != expectedNextAction || diagnostic.MonitoringStopped != (diagnostic.MonitoringState == monitoringStopped) || diagnostic.HTTPStatus < 0 || diagnostic.HTTPStatus > 599 || diagnostic.HTTPStatus > 0 && diagnostic.HTTPStatus < 100 || safeProviderCode(diagnostic.ProviderCode) != diagnostic.ProviderCode || diagnostic.UpdatedAt < 0 || diagnostic.UpdatedAt > maxDiagnosticTimestamp {
 		return errors.New("migration diagnostic state failed validation")
 	}
 	return nil
@@ -1085,6 +1122,7 @@ func validatePersistedDiagnostic(diagnostic Diagnostic, monitorID string) error 
 func initialMonitorDiagnostic(monitorID string) Diagnostic {
 	diagnostic := diagnosticTemplate(stageMonitor, codeMonitorStarted)
 	diagnostic.MonitorID = monitorID
+	diagnostic.CreationState = creationNotCreated
 	return diagnostic
 }
 

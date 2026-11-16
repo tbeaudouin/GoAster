@@ -222,9 +222,11 @@ If the read-only check finds no matching available location, explain that
 high-demand server types may take days to become available and ask whether the
 user approves the existing 30-minute monitor, which can lead to exactly one
 eventual create. This is a possibility, not a guaranteed timeframe. Do not
-start the monitor before approval. If availability is unknown, resolve
-authentication or configuration errors safely; do not bypass them or start
-the monitor.
+start the monitor before approval. A valid successful empty `Locations` result
+is no capacity: the approved monitor remains enabled indefinitely at its
+existing 30-minute interval and resets any bounded availability-error budget.
+If availability is unknown, resolve authentication or configuration errors
+safely; do not bypass them or start the monitor.
 
 Before any billable operation, obtain ordinary explicit user approval for the
 exact server type, strict location preference, current estimate and currency
@@ -247,9 +249,30 @@ immediately; this is the final authoritative check, not the first check. If no e
 location is returned, it leaves one non-secret scheduler job enabled at
 exactly 30-minute intervals. The token is loaded only when a check runs; it is
 never placed in the scheduler message. A ready result disables that exact job
-and verifies the disabled state before the create request. Availability errors,
-monitor state errors, and disablement uncertainty stop the workflow for manual
-review.
+and verifies the disabled state before the create request. Monitor state errors
+and disablement uncertainty stop the workflow for manual review. Direct
+GoAsterWeb HTTP-client transport errors remain retryable when they prove a
+timeout or temporary network failure (`context.DeadlineExceeded`, `Timeout()`,
+or `Temporary()`). HTTP envelope retries require a matching status and a
+trusted, internally consistent v1 transient combination: `provider_timeout`
+with `stage=provider` and no `provider_code` for HTTP 500/502/503/504;
+`unavailable` paired with `resource_unavailable` at the provider stage (or
+with no provider code at the service stage) for HTTP 500/502/503/504; and
+`rate_limited` paired with `rate_limit_exceeded` at the provider stage (or no
+provider code at the service stage) for HTTP 429. Provider DNS, TLS, and
+transport failure envelopes stop immediately because those categories do not
+establish a temporary cause. Malformed, unknown, status-only, or inconsistent
+responses are terminal. The initial failed availability check counts as one
+of exactly three consecutive checks; the first two failed checks leave the
+existing 30-minute monitor enabled, with the count persisted across scheduler
+runs and process restarts. The third failed check stops the monitor with the
+safe bounded-budget diagnosis. Any successful availability response,
+including valid empty `Locations`, resets the count. Provider `unauthorized`, `forbidden`, and
+`invalid_input` causes; provider DNS/TLS/transport failures; storage/create/
+integrity/unknown failures; authentication or credential failures; and invalid
+request/type/image/architecture responses stop immediately for manual review.
+They are never guessed to be transient. This is the source scheduler’s bounded
+policy, not a model-managed cron retry.
 
 The create endpoint is called once. Each fresh attempt has its own single create request. GoAsterWeb uses the exact server type,
 strict location allow-list, Ubuntu 24.04, the generated public key, and its
