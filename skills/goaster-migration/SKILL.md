@@ -39,8 +39,8 @@ requires a counterpart GoAsterWeb version implementing the machine API with
 valid Redis configuration. Exactly-once creation and Redis durability are not
 guaranteed or proven.
 
-Use the source-side `goaster_migration` tool to inspect one proposed migration
-against the existing GoAsterWeb service. The GoAster source implementation owns
+Use the source-side `goaster_migration` tool for an approved migration against
+the existing GoAsterWeb service. The GoAster source implementation owns
 the bounded HTTPS requests, local login-key and owner-secret generation,
 30-minute availability monitor, and protected Telegram handoff. GoAsterWeb
 owns the provider create sequence, callback secret, Redis handoff, destination
@@ -85,11 +85,13 @@ type. A non-empty list is never widened. GoAsterWeb returns only `version`,
 `server_type`, and eligible `locations`; this endpoint does not return prices
 and does not call the Hetzner pricing API.
 
-The final authoritative availability check is internal to the approved
-`start`/monitor workflow. It is not a model-facing discovery action. Its
-source-side result repeats the exact location policy and requested locations
-for presentation, while keeping those fields out of the Web wire contract.
-It contains no price cap, approval, credential, or private material.
+The pre-approval availability lookup below is an ordinary read-only provider
+check. The final authoritative availability check remains internal to the
+approved `start`/monitor workflow; it is a recheck before creation, not the
+first availability check. Its source-side result repeats the exact location
+policy and requested locations for presentation, while keeping those fields
+out of the Web wire contract. It contains no price cap, approval, credential,
+or private material.
 
 Creation sends the same immutable operation terms and the request-scoped token. It does not send the
 private key or owner secret. The successful response contains the v1 state,
@@ -99,9 +101,10 @@ fragment only and never puts it in a query string.
 
 ## Indicative pricing, discovery, and ordinary private-conversation approval
 
-Before asking for approval, discover the exact requested server type and
-optional locations. Follow `hetzner-auth` and `goaster-env` for authenticated
-read-only provider lookups and pricing. The credential variable is exactly
+Before asking for approval, do both best-effort indicative pricing and an
+authenticated read-only availability lookup for the exact requested server
+type and optional locations. Follow `hetzner-auth` and `goaster-env` for
+authenticated provider lookups and pricing. The credential variable is exactly
 `HCLOUD_TOKEN`; the current migration lookup checks protected
 `<real user home>/.goaster/env` first, then falls back to process
 `HCLOUD_TOKEN`. If protected settings cannot be read, stop rather than
@@ -111,16 +114,35 @@ diagnostics. The existing approved protected env file remains a credential
 source. The only permitted displayed header schematic is `Authorization: Bearer <token>` with
 the literal placeholder, never a real credential.
 
+Before conversational approval, do not call `start` or any GoAsterWeb machine
+endpoint, generate operation, key, or owner-secret state, start cron or a
+monitor, or perform any mutation. The provider availability lookup is read-only.
+
 The read-only provider calls use HTTPS at `https://api.hetzner.cloud`:
 
 ```text
 GET https://api.hetzner.cloud/v1/pricing
 GET https://api.hetzner.cloud/v1/server_types?name=<exact-type>
-GET https://api.hetzner.cloud/v1/locations
 ```
 
-URL-encode the exact type query value. There is no Web quote endpoint and no
-pricing call is part of migration execution. Authenticated provider list
+URL-encode the exact type query value and use the exact requested type; do not
+use the deprecated datacenters endpoint. The official `server_types[]`
+response has `locations[]` entries with `id`, `name`, `available`, and
+`recommended`. Filter entries by the strict optional location allow-list;
+when it is empty, every returned location is eligible. Check the `available`
+boolean explicitly: report matching available locations when true and
+matching unavailable locations when false. Missing, invalid, or ambiguous
+fields, or a failed lookup, mean availability is unknown, never no capacity.
+Do not infer capacity from prices, location listings, or `recommended`.
+Report current available matching locations, unavailable results, or unknown
+before requesting approval. State that this is a snapshot, not a reservation,
+and retain a broad location policy when the user has no preference. On unknown,
+safely report the lookup/configuration problem and resolve authentication or
+configuration errors rather than bypassing them.
+
+There is no Web quote endpoint; the Web availability endpoint is used only by
+the approved migration workflow. No pricing call is part of migration
+execution. Authenticated provider list
 prices are distinct from anonymous public website prices; label the source
 accurately. If authenticated pricing is unavailable, pricing is best-effort:
 use public documentation as fallback and state its source, or say unavailable.
@@ -174,11 +196,12 @@ unavailable, say so plainly. Do not substitute a cheaper type or silently
 choose a different location.
 
 An omitted or empty location list means any compatible location. A non-empty
-list is a strict allow-list and must not be widened. Public discovery does not
-authorize or block the future request, and a public estimate may omit locations
-that are not currently listed as available. The final authoritative
-availability decision happens only inside the approved `start`/monitor
-workflow.
+list is a strict allow-list and must not be widened. Public pricing discovery
+does not authorize or block the future request, and a public estimate may omit
+locations that are not currently listed as available. The authenticated
+read-only availability lookup informs the pre-approval conversation but does
+not reserve capacity or replace the authoritative recheck inside the approved
+`start`/monitor workflow.
 
 Before asking for approval, explain that high-demand server types may take
 days to become available, including when checking multiple locations or when
@@ -194,6 +217,14 @@ type and location request, plus the narrowly scoped `retry_attempt` value when
 the skill is carrying the owner’s confirmation for an uncertain prior attempt;
 it does not accept an approval flag, quoted price, currency, arbitrary monitor
 ID, chat ID, or any secret.
+
+If the read-only check finds no matching available location, explain that
+high-demand server types may take days to become available and ask whether the
+user approves the existing 30-minute monitor, which can lead to exactly one
+eventual create. This is a possibility, not a guaranteed timeframe. Do not
+start the monitor before approval. If availability is unknown, resolve
+authentication or configuration errors safely; do not bypass them or start
+the monitor.
 
 Before any billable operation, obtain ordinary explicit user approval for the
 exact server type, strict location preference, current estimate and currency
@@ -211,8 +242,8 @@ paired-Telegram delivery path before the create request.
 
 ## Monitor and one create per attempt
 
-After the required conversational approval, the source checks availability
-immediately. If no eligible
+After the required conversational approval, the source rechecks availability
+immediately; this is the final authoritative check, not the first check. If no eligible
 location is returned, it leaves one non-secret scheduler job enabled at
 exactly 30-minute intervals. The token is loaded only when a check runs; it is
 never placed in the scheduler message. A ready result disables that exact job
