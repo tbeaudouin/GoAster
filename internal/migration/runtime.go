@@ -343,6 +343,7 @@ func currentOwnerMigrationMonitorID(history migrationStartHistory, options Optio
 	}
 	var latest migrationAttempt
 	found := false
+	ambiguous := false
 	for _, attempt := range history.Attempts {
 		if attempt.Scheduled.Recipient != recipient {
 			continue
@@ -350,7 +351,13 @@ func currentOwnerMigrationMonitorID(history migrationStartHistory, options Optio
 		if !found || newerMigrationAttempt(attempt, latest) {
 			latest = attempt
 			found = true
+			ambiguous = false
+		} else if attempt.CreatedAt > 0 && attempt.CreatedAt == latest.CreatedAt {
+			ambiguous = true
 		}
+	}
+	if ambiguous {
+		return "", migrationHistoryOrderAmbiguousError()
 	}
 	if !found || !safeJobID(latest.Job.ID) {
 		return "", errors.Join(ErrMonitorNotFound, errors.New("current migration monitor is unavailable"))
@@ -983,11 +990,11 @@ func MigrationStatusWithOptions(jobID string, jobs MonitorScheduler, options Opt
 		history, historyErr := inspectMigrationHistory(jobs.List(), options)
 		if historyErr != nil {
 			if options.MigrationRecipient == nil {
-				return fail(ErrPersistedStateInvalid, Result{Status: resultManualReview, ManualReview: true})
+				return fail(failureWithDiagnostic(historyFailureDiagnostic(""), historyErr), Result{Status: resultManualReview, ManualReview: true})
 			}
 			recipient, recipientErr := options.MigrationRecipient()
 			if recipientErr != nil || recipient <= 0 || history.Failure.Scheduled.Recipient <= 0 || history.Failure.Scheduled.Recipient != recipient {
-				return fail(ErrPersistedStateInvalid, Result{Status: resultManualReview, ManualReview: true})
+				return fail(failureWithDiagnostic(historyFailureDiagnostic(""), errors.Join(historyErr, recipientErr)), Result{Status: resultManualReview, ManualReview: true})
 			}
 			failed, failureErr := historyFailureResult(history, historyErr)
 			result.Migration = failed

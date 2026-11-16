@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,6 +207,68 @@ func TestStatusWithoutIDDoesNotCrossPairedOwner(t *testing.T) {
 	status, err := MigrationStatusWithOptions("", jbs, options)
 	if !errors.Is(err, ErrMonitorNotFound) || status.MonitorID != "" || status.Migration.MonitorID != "" {
 		t.Fatalf("cross-owner status without ID = %+v, %v", status, err)
+	}
+}
+
+func TestStatusWithoutIDRejectsOwnerTimestampTieBehindForeignAttempt(t *testing.T) {
+	jbs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []struct {
+		id               string
+		owner, timestamp int64
+	}{
+		{"migration-owner-a", 42, 100},
+		{"migration-owner-b", 42, 100},
+		{"migration-foreign", 99, 200},
+	} {
+		message, err := schedulerMessage(Request{ServerType: "cx22", JobID: attempt.id, AttemptCreatedAt: attempt.timestamp}, attempt.owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := jbs.Add(scheduler.Job{ID: attempt.id, Message: message, Kind: scheduler.ScheduleEvery, EverySeconds: MonitorIntervalSeconds}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := MigrationStatusWithOptions("", jbs, Options{TempDirectory: t.TempDir(), MigrationRecipient: func() (int64, error) { return 42, nil }})
+	if !errors.Is(err, ErrPersistedStateInvalid) || status.MonitorID != "" || status.Migration.MonitorID != "" {
+		t.Fatalf("ambiguous owner status = %+v, %v", status, err)
+	}
+}
+
+func TestStatusHistoryOwnershipErrorPreservesCausesWithoutDisclosure(t *testing.T) {
+	const monitorID = "migration-private-history"
+	const privateCause = "recipient-private-cause"
+	recipientCause := errors.New(privateCause)
+	jbs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := schedulerMessage(Request{ServerType: "cx22", JobID: monitorID}, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = jbs.Add(scheduler.Job{ID: monitorID, Message: message, Kind: scheduler.ScheduleEvery, EverySeconds: MonitorIntervalSeconds}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = jbs.SetEnabled(monitorID, false); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	restore := diagnostics.SetOutput(&output)
+	defer restore()
+	status, err := MigrationStatusWithOptions("", jbs, Options{TempDirectory: t.TempDir(), MigrationRecipient: func() (int64, error) { return 0, fmt.Errorf("lookup: %w", recipientCause) }})
+	if !errors.Is(err, ErrPersistedStateInvalid) || !errors.Is(err, recipientCause) || !strings.Contains(fmt.Sprint(errors.Unwrap(errors.Unwrap(err))), "inspect migration attempt "+monitorID) {
+		t.Fatalf("wrapped causes missing: %+v", err)
+	}
+	encoded, marshalErr := json.Marshal(status)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	combined := string(encoded) + err.Error() + output.String()
+	if status.Migration.Diagnostic.Code != codePersistedStateInvalid || !strings.Contains(output.String(), "ERROR operation=migration.monitor.status") || strings.Contains(combined, monitorID) || strings.Contains(combined, "cx22") || strings.Contains(combined, privateCause) {
+		t.Fatalf("unsafe status, error, or log: %s", combined)
 	}
 }
 

@@ -54,3 +54,9 @@ Review follow-up validation (offline):
 - `git diff --check` — passed.
 
 Go commands used `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off`.
+
+Final review follow-up (offline):
+
+- Omitted-ID recovery rejects equal newest timestamps within the current owner's attempts, including when a foreign owner's newer attempt makes the global history order unambiguous.
+- When history fails and ownership cannot be verified, the returned error retains the history and recipient lookup causes while the status, error text, and bounded log retain only generic failure details.
+- Focused ownership and cause-preservation regressions passed; `go test ./... -count=1 -timeout 180s`, `go test -race -count=1 ./internal/migration ./internal/chat ./internal/scheduler`, `go vet ./...`, and `git diff --check` passed. Go commands used `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off`.
