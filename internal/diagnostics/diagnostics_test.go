@@ -105,3 +105,31 @@ func TestRemoteMetadataAllowlist(t *testing.T) {
 		t.Fatalf("injected log: %q", log)
 	}
 }
+
+func TestMigrationDiagnosticMetadataAllowlist(t *testing.T) {
+	var output bytes.Buffer
+	restore := SetOutput(&output)
+	defer restore()
+
+	Error("migration.create", errors.New("private response body"),
+		Field{Key: "stage", Value: "create"},
+		Field{Key: "code", Value: "invalid_request"},
+		Field{Key: "creation_state", Value: "not_created"},
+		Field{Key: "monitor_id", Value: "migration-safe"},
+		Field{Key: "stage", Value: "private-stage"},
+		Field{Key: "code", Value: "private-code"},
+		Field{Key: "creation_state", Value: "private-state"},
+		Field{Key: "monitor_id", Value: "/tmp/private"})
+
+	log := output.String()
+	for _, want := range []string{`stage="create"`, `code="invalid_request"`, `creation_state="not_created"`, `monitor_id="migration-safe"`} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("migration diagnostic = %q, missing %q", log, want)
+		}
+	}
+	for _, unwanted := range []string{"private-stage", "private-code", "private-state", "/tmp/private", "private response body"} {
+		if strings.Contains(log, unwanted) {
+			t.Fatalf("migration diagnostic leaked %q: %q", unwanted, log)
+		}
+	}
+}

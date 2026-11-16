@@ -224,14 +224,34 @@ func failureWithDiagnostic(diagnostic Diagnostic, cause error) error {
 	return migrationFailure{diagnostic: normalizeDiagnostic(diagnostic, diagnostic.Stage, Result{MonitorID: diagnostic.MonitorID, Status: diagnostic.ResultState, Diagnostic: diagnostic}), cause: cause}
 }
 
-func logMigrationFailure(operation string, err error, diagnostic Diagnostic) {
-	fields := make([]diagnostics.Field, 0, 2)
+// DiagnosticLogFields returns the bounded migration context accepted by the
+// central diagnostics logger. The logger repeats the allowlist validation at
+// its own boundary before emitting any field.
+func DiagnosticLogFields(diagnostic Diagnostic) []diagnostics.Field {
+	fields := make([]diagnostics.Field, 0, 6)
 	if diagnostic.HTTPStatus != 0 {
 		fields = append(fields, diagnostics.Field{Key: "status", Value: fmt.Sprintf("%d", diagnostic.HTTPStatus)})
 	}
 	if diagnostic.ProviderCode != "" {
 		fields = append(fields, diagnostics.Field{Key: "backend_code", Value: diagnostic.ProviderCode})
 	}
+	if knownStage(diagnostic.Stage) {
+		fields = append(fields, diagnostics.Field{Key: "stage", Value: diagnostic.Stage})
+	}
+	if knownDiagnosticCode(diagnostic.Code) {
+		fields = append(fields, diagnostics.Field{Key: "code", Value: diagnostic.Code})
+	}
+	if knownCreationState(diagnostic.CreationState) {
+		fields = append(fields, diagnostics.Field{Key: "creation_state", Value: diagnostic.CreationState})
+	}
+	if safeJobID(diagnostic.MonitorID) {
+		fields = append(fields, diagnostics.Field{Key: "monitor_id", Value: diagnostic.MonitorID})
+	}
+	return fields
+}
+
+func logMigrationFailure(operation string, err error, diagnostic Diagnostic) {
+	fields := DiagnosticLogFields(diagnostic)
 	diagnostics.Error(operation, err, fields...)
 }
 
@@ -285,10 +305,32 @@ func NormalizeStatusResult(result StatusResult) StatusResult {
 	if result.MonitorID != "" && !safeJobID(result.MonitorID) {
 		result.MonitorID = ""
 	}
+	if safeJobID(result.MonitorID) {
+		if result.Migration.MonitorID == "" {
+			result.Migration.MonitorID = result.MonitorID
+		}
+		if result.Migration.Diagnostic.MonitorID == "" {
+			result.Migration.Diagnostic.MonitorID = result.MonitorID
+		}
+		if result.Diagnostic.MonitorID == "" {
+			result.Diagnostic.MonitorID = result.MonitorID
+		}
+	}
 	result.Migration = NormalizeResult(result.Migration)
 	result.Diagnostic = normalizeDiagnostic(result.Diagnostic, stageForResult(result.Migration), result.Migration)
 	if result.MonitorID == "" && safeJobID(result.Migration.MonitorID) {
 		result.MonitorID = result.Migration.MonitorID
+	}
+	if result.MonitorID == "" && safeJobID(result.Diagnostic.MonitorID) {
+		result.MonitorID = result.Diagnostic.MonitorID
+	}
+	if safeJobID(result.MonitorID) {
+		if result.Migration.MonitorID == "" {
+			result.Migration.MonitorID = result.MonitorID
+		}
+		if result.Migration.Diagnostic.MonitorID == "" {
+			result.Migration.Diagnostic.MonitorID = result.MonitorID
+		}
 	}
 	if result.Diagnostic.MonitorID == "" && safeJobID(result.MonitorID) {
 		result.Diagnostic.MonitorID = result.MonitorID

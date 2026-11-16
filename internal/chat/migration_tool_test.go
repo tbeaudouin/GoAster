@@ -106,6 +106,9 @@ func TestMigrationToolExposesOnlySafeMonitorActions(t *testing.T) {
 	ops := MigrationToolOperations{
 		Status: func(_ context.Context, jobID string) (migration.StatusResult, error) {
 			actions = append(actions, "status:"+jobID)
+			if jobID == "" {
+				return migration.StatusResult{MonitorID: "migration-recovered", MonitorOn: true, Migration: migration.Result{Status: "monitoring"}}, nil
+			}
 			return migration.StatusResult{MonitorID: jobID, MonitorOn: true, Migration: migration.Result{Status: "monitoring", MonitorID: jobID}}, nil
 		},
 		Stop: func(_ context.Context, jobID string) (migration.Result, error) {
@@ -117,21 +120,39 @@ func TestMigrationToolExposesOnlySafeMonitorActions(t *testing.T) {
 	if err != nil || !strings.Contains(result, `"monitor_id":"migration-safe"`) || len(actions) != 1 {
 		t.Fatalf("status action = %q, %v actions=%v", result, err, actions)
 	}
+	result, err = executeMigrationTool(context.Background(), `{"action":"status"}`, ops)
+	if err != nil || !strings.Contains(result, `"monitor_id":"migration-recovered"`) || len(actions) != 2 || actions[1] != "status:" {
+		t.Fatalf("status recovery action = %q, %v actions=%v", result, err, actions)
+	}
 	result, err = executeMigrationTool(context.Background(), `{"action":"status","job_id":"migration-safe","retry_attempt":"migration-prior-attempt"}`, ops)
-	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 1 {
+	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 2 {
 		t.Fatalf("status retry bypass = %q, %v actions=%v", result, err, actions)
 	}
 	result, err = executeMigrationTool(context.Background(), `{"action":"stop","job_id":"migration-safe"}`, ops)
-	if err != nil || !strings.Contains(result, `"status":"stopped"`) || len(actions) != 2 {
+	if err != nil || !strings.Contains(result, `"status":"stopped"`) || len(actions) != 3 {
 		t.Fatalf("stop action = %q, %v actions=%v", result, err, actions)
 	}
 	result, err = executeMigrationTool(context.Background(), `{"action":"stop","job_id":"migration-safe","retry_attempt":"migration-prior-attempt"}`, ops)
-	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 2 {
+	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 3 {
 		t.Fatalf("stop retry bypass = %q, %v actions=%v", result, err, actions)
 	}
 	result, err = executeMigrationTool(context.Background(), `{"action":"status","job_id":"/tmp/private"}`, ops)
-	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 2 {
+	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 3 {
 		t.Fatalf("unsafe monitor ID = %q, %v actions=%v", result, err, actions)
+	}
+}
+
+func TestMigrationToolStatusErrorUsesNormalizedMonitorID(t *testing.T) {
+	result, err := executeMigrationTool(context.Background(), `{"action":"status","job_id":"migration-status-error"}`, MigrationToolOperations{
+		Status: func(context.Context, string) (migration.StatusResult, error) {
+			return migration.StatusResult{
+				MonitorID: "migration-status-error",
+				Migration: migration.Result{Status: "manual_review", Diagnostic: migration.Diagnostic{Stage: "status", Code: "invalid_response"}},
+			}, migration.ErrInvalidResponse
+		},
+	})
+	if err != nil || !strings.Contains(result, `"code":"invalid_response"`) || !strings.Contains(result, `"monitor_id":"migration-status-error"`) {
+		t.Fatalf("status error = %q, %v", result, err)
 	}
 }
 

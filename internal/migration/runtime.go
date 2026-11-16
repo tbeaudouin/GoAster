@@ -306,6 +306,31 @@ func historyFailureResult(history migrationStartHistory, err error) (Result, err
 	return failureResult(stageStorage, err, Result{Status: resultManualReview, MonitorID: monitorID, ServerType: history.Failure.Scheduled.Request.ServerType, ManualReview: true, Diagnostic: diagnostic})
 }
 
+func currentOwnerMigrationMonitorID(history migrationStartHistory, options Options) (string, error) {
+	if options.MigrationRecipient == nil {
+		return "", errors.Join(ErrRecipientUnavailable, errors.New("current migration monitor owner is unavailable"))
+	}
+	recipient, err := options.MigrationRecipient()
+	if err != nil || recipient <= 0 {
+		return "", errors.Join(ErrRecipientUnavailable, err)
+	}
+	var latest migrationAttempt
+	found := false
+	for _, attempt := range history.Attempts {
+		if attempt.Scheduled.Recipient != recipient {
+			continue
+		}
+		if !found || newerMigrationAttempt(attempt, latest) {
+			latest = attempt
+			found = true
+		}
+	}
+	if !found || !safeJobID(latest.Job.ID) {
+		return "", errors.Join(ErrMonitorNotFound, errors.New("current migration monitor is unavailable"))
+	}
+	return latest.Job.ID, nil
+}
+
 func startOutcomeResult(outcome migrationStartOutcome, jobs MonitorScheduler, options Options) (Result, error) {
 	attempt := outcome.Attempt
 	serverType := attempt.Scheduled.Request.ServerType
@@ -924,7 +949,22 @@ func MigrationStatusWithOptions(jobID string, jobs MonitorScheduler, options Opt
 		result.MonitorID = failed.MonitorID
 		return result, failureErr
 	}
-	if jobs == nil || !safeJobID(jobID) {
+	if jobs == nil {
+		return fail(errors.New("migration status is unavailable"), Result{Status: resultUnavailable, MonitorID: jobID})
+	}
+	if jobID == "" {
+		history, historyErr := inspectMigrationHistory(jobs.List(), options)
+		if historyErr != nil {
+			return fail(historyErr, Result{Status: resultManualReview, ManualReview: true})
+		}
+		ownerMonitorID, ownerErr := currentOwnerMigrationMonitorID(history, options)
+		if ownerErr != nil {
+			return fail(ownerErr, Result{Status: resultUnavailable})
+		}
+		jobID = ownerMonitorID
+		result.MonitorID = jobID
+	}
+	if !safeJobID(jobID) {
 		return fail(errors.New("migration status is unavailable"), Result{Status: resultUnavailable, MonitorID: jobID})
 	}
 	job, ok := jobs.Get(jobID)
@@ -1057,7 +1097,7 @@ func parseSchedulerMessage(message string) (scheduledMigration, error) {
 }
 
 func safeJobID(value string) bool {
-	if !strings.HasPrefix(value, "migration-") || len(value) > 96 || !safeName(value, 96) {
+	if len(value) <= len("migration-") || !strings.HasPrefix(value, "migration-") || len(value) > 96 || !safeName(value, 96) {
 		return false
 	}
 	for _, character := range value {

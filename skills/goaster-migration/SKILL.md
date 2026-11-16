@@ -66,7 +66,10 @@ valid Redis configuration. Exactly-once creation and Redis durability are not
 guaranteed or proven.
 
 Use the source-side `goaster_migration` tool for an approved migration against
-the existing GoAsterWeb service. The GoAster source implementation owns
+the existing GoAsterWeb service. For `status`, omit `job_id` when the current
+retained monitor should be inspected; the authenticated local runtime
+recovers the current paired-owner attempt. Do not ask the owner for a monitor
+ID that the runtime can recover. The GoAster source implementation owns
 the bounded HTTPS requests, local login-key and owner-secret generation,
 30-minute availability monitor, and protected Telegram handoff. GoAsterWeb
 owns the provider create sequence, callback secret, Redis handoff, destination

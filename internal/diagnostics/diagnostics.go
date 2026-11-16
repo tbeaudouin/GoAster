@@ -146,6 +146,14 @@ func Error(operation string, err error, fields ...Field) {
 			if n, e := strconv.Atoi(field.Value); e == nil && n >= 100 && n <= 599 {
 				value = strconv.Itoa(n)
 			}
+		case "stage":
+			value = MigrationStage(field.Value)
+		case "code":
+			value = MigrationCode(field.Value)
+		case "creation_state":
+			value = MigrationCreationState(field.Value)
+		case "monitor_id":
+			value = MigrationMonitorID(field.Value)
 		case "phase":
 			switch field.Value {
 			case "pre-stream", "stream", "post-stream":
@@ -167,6 +175,53 @@ func Error(operation string, err error, fields ...Field) {
 	_, _ = io.WriteString(output, record)
 	outputMu.Unlock()
 }
+
+// MigrationStage retains only the fixed migration diagnostic stages.
+func MigrationStage(value string) string {
+	switch value {
+	case "input", "configuration", "storage", "recipient", "monitor", "availability", "create", "handoff", "provider", "status", "stop", "tool", "unknown":
+		return value
+	default:
+		return ""
+	}
+}
+
+// MigrationCode retains only the fixed migration diagnostic codes. The legacy
+// values remain accepted because validated retained records may contain them.
+func MigrationCode(value string) string {
+	switch value {
+	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable",
+		"invalid_arguments", "capability_unavailable", "missing_hcloud_token", "credential_storage_unreadable", "invalid_hcloud_token", "protected_storage_failure", "recipient_unavailable", "recipient_changed", "handoff_failure", "cancelled", "timeout", "dns_failure", "tls_failure", "transport_failure", "invalid_response", "web_auth_rejected", "web_http_error", "provider_auth_rejected", "provider_http_error", "upstream_unknown", "monitor_state_failure", "monitor_not_found", "monitor_in_progress", "monitor_stop_unconfirmed", "persisted_state_invalid", "monitor_started", "monitor_stopped", "retry_confirmation_required", "created", "created_delivery_failed", "availability_retry_exhausted", "manual_review", "unknown_failure":
+		return value
+	default:
+		return ""
+	}
+}
+
+// MigrationCreationState retains only the bounded creation states used by
+// migration diagnostics.
+func MigrationCreationState(value string) string {
+	switch value {
+	case "created", "not_created", "unknown":
+		return value
+	default:
+		return ""
+	}
+}
+
+// MigrationMonitorID retains only non-secret local migration monitor IDs.
+func MigrationMonitorID(value string) string {
+	if len(value) <= len("migration-") || len(value) > 96 || !strings.HasPrefix(value, "migration-") {
+		return ""
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
+			return ""
+		}
+	}
+	return value
+}
+
 func token(s string) string {
 	if len(s) > 96 {
 		s = s[:96]

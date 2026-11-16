@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -97,7 +96,7 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 				},
 				"job_id": map[string]any{
 					"type":        "string",
-					"description": "Non-secret monitor ID for status or stop only; start generates its own monitor ID",
+					"description": "Non-secret monitor ID for stop, or optional for status; omit it to inspect the current retained migration monitor. Do not ask the owner for an ID when the current monitor can be recovered internally",
 				},
 				"retry_attempt": map[string]any{
 					"type":        "string",
@@ -156,7 +155,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		return encodeMigrationToolResult(migration.NormalizeResult(result))
 	case "status":
-		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 || parsed.RetryAttempt != "" {
+		if parsed.JobID != "" && !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 || parsed.RetryAttempt != "" {
 			return migrationToolRejected("status_requires_only_monitor_id"), nil
 		}
 		if operations.Status == nil {
@@ -164,7 +163,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		result, err := operations.Status(ctx, parsed.JobID)
 		if err != nil {
-			return migrationToolOperationFailure(err, result.Migration), nil
+			return migrationToolOperationFailure(err, migration.NormalizeStatusResult(result).Migration), nil
 		}
 		return encodeMigrationToolResult(migration.NormalizeStatusResult(result))
 	case "stop":
@@ -228,13 +227,7 @@ func migrationToolRejected(code string) string {
 func migrationToolOperationFailure(err error, result migration.Result) string {
 	diagnostic := migration.DiagnosticFor(err, result)
 	if !migration.IsMigrationFailure(err) {
-		fields := make([]diagnostics.Field, 0, 2)
-		if diagnostic.HTTPStatus != 0 {
-			fields = append(fields, diagnostics.Field{Key: "status", Value: fmt.Sprintf("%d", diagnostic.HTTPStatus)})
-		}
-		if diagnostic.ProviderCode != "" {
-			fields = append(fields, diagnostics.Field{Key: "backend_code", Value: diagnostic.ProviderCode})
-		}
+		fields := migration.DiagnosticLogFields(diagnostic)
 		diagnostics.Error("migration.tool", err, fields...)
 	}
 	return encodeMigrationToolError("error", diagnostic)

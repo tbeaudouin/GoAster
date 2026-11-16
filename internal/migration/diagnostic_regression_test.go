@@ -158,3 +158,51 @@ func TestCorruptHistoryDoesNotPreventStop(t *testing.T) {
 		t.Fatalf("unsafe diagnostic JSON: %s (error: %v)", encoded, marshalErr)
 	}
 }
+
+func TestStatusRecoversCurrentMonitorWithoutUserID(t *testing.T) {
+	options := Options{TempDirectory: t.TempDir(), MigrationRecipient: func() (int64, error) { return 42, nil }}
+	jbs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{ServerType: "cx22", JobID: "migration-current"}
+	message, err := schedulerMessage(request, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jbs.Add(scheduler.Job{ID: request.JobID, Message: message, Kind: scheduler.ScheduleEvery, EverySeconds: MonitorIntervalSeconds}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeMonitorDiagnostic(options, initialMonitorDiagnostic(request.JobID)); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := MigrationStatusWithOptions("", jbs, options)
+	if err != nil || status.MonitorID != request.JobID || status.Migration.MonitorID != request.JobID || status.Migration.Diagnostic.MonitorID != request.JobID || status.Diagnostic.MonitorID != request.JobID || status.Request.JobID != request.JobID {
+		t.Fatalf("status without ID = %+v, %v", status, err)
+	}
+}
+
+func TestStatusWithoutIDDoesNotCrossPairedOwner(t *testing.T) {
+	options := Options{TempDirectory: t.TempDir(), MigrationRecipient: func() (int64, error) { return 42, nil }}
+	jbs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{ServerType: "cx22", JobID: "migration-other-owner"}
+	message, err := schedulerMessage(request, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jbs.Add(scheduler.Job{ID: request.JobID, Message: message, Kind: scheduler.ScheduleEvery, EverySeconds: MonitorIntervalSeconds}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeMonitorDiagnostic(options, initialMonitorDiagnostic(request.JobID)); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := MigrationStatusWithOptions("", jbs, options)
+	if !errors.Is(err, ErrMonitorNotFound) || status.MonitorID != "" || status.Migration.MonitorID != "" {
+		t.Fatalf("cross-owner status without ID = %+v, %v", status, err)
+	}
+}

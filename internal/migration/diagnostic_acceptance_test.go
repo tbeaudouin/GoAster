@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"goaster/internal/diagnostics"
 	"goaster/internal/scheduler"
 )
 
@@ -44,6 +46,45 @@ func TestDiagnosticWebEnvelopeOffline(t *testing.T) {
 		if strings.Contains(string(data), "secret") {
 			t.Fatalf("private text leaked: %s", data)
 		}
+	}
+}
+
+func TestHTTP422DiagnosticAndLogAreBoundedOffline(t *testing.T) {
+	const monitorID = "migration-http422"
+	valid := decodeWebError([]byte(`{"version":"v1","error":{"code":"invalid_request","stage":"request","http_status":422}}`), http.StatusUnprocessableEntity)
+	if valid.Code != "invalid_request" || valid.Stage != "request" || valid.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("valid HTTP 422 envelope = %+v", valid)
+	}
+	result, err := failureResult(stageAvailability, valid, Result{Status: resultManualReview, MonitorID: monitorID, Diagnostic: Diagnostic{Stage: stageAvailability}})
+	if err == nil || result.Diagnostic.Stage != stageInput || result.Diagnostic.Code != "invalid_request" || result.Diagnostic.HTTPStatus != http.StatusUnprocessableEntity || result.Diagnostic.CreationState != creationNotCreated {
+		t.Fatalf("valid HTTP 422 result = %+v, %v", result, err)
+	}
+
+	var output bytes.Buffer
+	restore := diagnostics.SetOutput(&output)
+	defer restore()
+	logMigrationFailure("migration.http422", err, result.Diagnostic)
+	log := output.String()
+	for _, want := range []string{
+		`status="422"`,
+		`stage="input"`,
+		`code="invalid_request"`,
+		`creation_state="not_created"`,
+		`monitor_id="migration-http422"`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("HTTP 422 log = %q, missing %q", log, want)
+		}
+	}
+
+	malformed := decodeWebError([]byte(`{"version":"v1","error":{"code":"invalid_request","stage":"request","http_status":422,"message":"private response body","provider_code":"invalid_input"}}`), http.StatusUnprocessableEntity)
+	if malformed.Code != "" || malformed.Status != http.StatusUnprocessableEntity || malformed.Stage != "" || malformed.ProviderCode != "" {
+		t.Fatalf("malformed HTTP 422 envelope was trusted = %+v", malformed)
+	}
+	malformedDiagnostic := DiagnosticFor(malformed, Result{Status: resultManualReview, MonitorID: monitorID, Diagnostic: Diagnostic{Stage: stageAvailability}})
+	encoded, marshalErr := json.Marshal(malformedDiagnostic)
+	if marshalErr != nil || strings.Contains(string(encoded), "private response body") {
+		t.Fatalf("malformed HTTP 422 diagnostic leaked response data: %s (%v)", encoded, marshalErr)
 	}
 }
 
