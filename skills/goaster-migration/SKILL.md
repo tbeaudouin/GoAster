@@ -64,17 +64,81 @@ attempt, server label, server ID, public IP, owner URL without the owner
 secret, and absolute expiry. The source appends the local owner secret to the
 fragment only and never puts it in a query string.
 
-## Indicative public discovery and ordinary private-conversation approval
+## Indicative pricing, discovery, and ordinary private-conversation approval
 
-Before asking for approval, use ordinary public information for the exact
-Hetzner server type and optional locations. Public Hetzner pricing, ordinary
-server-type discovery, and ordinary location discovery may be gathered with
-read-only provider lookups or public documentation, but they are indicative
-and best-effort. Include the public gross hourly estimate and currency when
-available; if public pricing is unavailable, say so plainly. Do not put a
-provider credential into model context or a public request. Do not substitute
-a cheaper type, silently choose a different location, or claim that the
-GoAsterWeb availability response contains a price.
+Before asking for approval, discover the exact requested server type and
+optional locations. Follow `hetzner-auth` and `goaster-env` for authenticated
+read-only provider pricing. The credential variable is exactly
+`HCLOUD_TOKEN`; the current migration lookup checks protected
+`<real user home>/.goaster/env` first, then falls back to process
+`HCLOUD_TOKEN`. If protected settings cannot be read, stop rather than
+bypassing them. Keep the token in memory only: never expose it in model
+context, logs, chat, command-line arguments, new secret files or copies, or
+diagnostics. The existing approved protected env file remains a credential
+source. The only permitted displayed header schematic is `Authorization: Bearer <token>` with
+the literal placeholder, never a real credential.
+
+The read-only provider calls use HTTPS at `https://api.hetzner.cloud`:
+
+```text
+GET https://api.hetzner.cloud/v1/pricing
+GET https://api.hetzner.cloud/v1/server_types?name=<exact-type>
+GET https://api.hetzner.cloud/v1/locations
+```
+
+URL-encode the exact type query value. There is no Web quote endpoint and no
+pricing call is part of migration execution. Authenticated provider list
+prices are distinct from anonymous public website prices; label the source
+accurately. If authenticated pricing is unavailable, pricing is best-effort:
+use public documentation as fallback and state its source, or say unavailable.
+Authentication failure stops auth-dependent work, while informational
+pricing may remain best-effort through public documentation. Pricing never
+proves project identity; do not invent a project metadata API. Do not claim
+the GoAsterWeb availability response contains a price.
+
+Use the in-process HTTP recipe in `hetzner-auth`: load the exact token through
+`goaster-env`, set the Bearer header in request memory, GET `/v1/pricing` only
+at the fixed HTTPS origin, use a finite timeout and body bound, disable
+redirects and verbose tracing, then parse and filter safe fields and discard
+the raw body. Never shell-source the env file or pass the token in a curl
+argument. See the official [Cloud API documentation](https://docs.hetzner.cloud/reference/cloud)
+and [hcloud-go pricing schema](https://github.com/hetznercloud/hcloud-go/blob/main/hcloud/schema/pricing.go).
+Match `pricing.server_types[].name` and requested exact locations. Compute
+prices use `pricing.server_types[].prices[].location`,
+`pricing.server_types[].prices[].price_hourly.gross`,
+`pricing.server_types[].prices[].price_hourly.net`,
+`pricing.server_types[].prices[].price_monthly.gross`, and
+`pricing.server_types[].prices[].price_monthly.net`. Match
+`pricing.primary_ips[].type` to `ipv4`; its price fields are
+`pricing.primary_ips[].prices[].location`,
+`pricing.primary_ips[].prices[].price_hourly.gross`,
+`pricing.primary_ips[].prices[].price_hourly.net`,
+`pricing.primary_ips[].prices[].price_monthly.gross`, and
+`pricing.primary_ips[].prices[].price_monthly.net`. Price amounts are decimal
+strings; currency, names and locations are ordinary strings, and server type
+ID is int64. Preserve decimal precision, report `pricing.currency` without
+assumptions, and distinguish gross (includes VAT) from net (excludes VAT).
+Do not convert through binary floats. For an empty location list, summarize
+matching per-location prices or a range without narrowing the policy or ranking
+locations by price.
+
+The current migration enables IPv4. Present any matching IPv4 estimate
+separately from compute; do not describe base compute as all-in. Output only
+allowlisted type, location, currency, hourly/monthly compute estimate,
+optional hourly/monthly IPv4 estimate, and source timestamp. Never output the
+authorization value, raw server listings, provider body, or error text. If
+filtering cannot safely yield those fields, report pricing unavailable
+without exposing the response. At runtime failure boundaries, emit a loud,
+bounded ERROR diagnostic with safe operation and status context as required
+by repository rules; never include raw provider bodies or errors. Estimates
+are indicative only: do not rank types, apply a price cap, imply availability,
+perform mutations, or invoke
+migration for a quote.
+
+Include the indicative gross hourly compute estimate and currency when
+available, plus the separate IPv4 estimate when available; if pricing is
+unavailable, say so plainly. Do not substitute a cheaper type or silently
+choose a different location.
 
 An omitted or empty location list means any compatible location. A non-empty
 list is a strict allow-list and must not be widened. Public discovery does not
