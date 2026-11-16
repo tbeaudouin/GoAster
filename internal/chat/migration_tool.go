@@ -63,6 +63,7 @@ func ConversationType(ctx context.Context) string {
 // the privileged migration executor. No operation accepts a token, key,
 // owner URL, chat ID, or callback secret.
 type MigrationToolOperations struct {
+	Create func(context.Context, migration.Request, int64) migration.OneShotResult
 	Start  func(context.Context, migration.Request) (migration.Result, error)
 	Status func(context.Context, string) (migration.StatusResult, error)
 	Stop   func(context.Context, string) (migration.Result, error)
@@ -77,35 +78,12 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 	}
 	return registrar.RegisterTool(Tool{
 		Name:        migrationToolName,
-		Description: "Start, inspect status, or stop the exact central migration monitor. Use the bundled goaster-migration skill for indicative public Hetzner pricing, ordinary server-type and location discovery, private-conversation approval, and the one-call retry confirmation for a prior attempt that may have created a server. When retry confirmation is required for an interactive private goaster_migration NEW attempt, say exactly: \"" + migrationRetryConfirmationWarning + "\" A single yes starts exactly one fresh attempt with the exact prior monitor recovered from the current result; a decline starts none. The account check in that warning is a recommendation, not a prerequisite: do not require account findings, deletion proof, a user-supplied monitor ID, or repeated confirmation. A created result must say that a server was already created and preserve the reported private handoff delivery state. Pricing and discovery are informational only; final authoritative availability is checked inside the approved start/monitor workflow. An omitted location list allows any compatible location; a non-empty list remains strict. No provider token, private key, owner link, chat ID, or approval field is accepted or returned here.",
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"action": map[string]any{
-					"type": "string",
-					"enum": []string{"start", "status", "stop"},
-				},
-				"server_type": map[string]any{
-					"type":        "string",
-					"description": "Exact Hetzner server type name, for example cx22; no substitution is allowed",
-				},
-				"locations": map[string]any{
-					"type":        "array",
-					"items":       map[string]any{"type": "string"},
-					"description": "Optional strict location allow-list; omit or leave empty to allow every eligible location",
-				},
-				"job_id": map[string]any{
-					"type":        "string",
-					"description": "Non-secret monitor ID for stop, or optional for status; omit it to inspect the current retained migration monitor. Do not ask the owner for an ID when the current monitor can be recovered internally",
-				},
-				"retry_attempt": map[string]any{
-					"type":        "string",
-					"description": "Start only: exact prior monitor recovered from the current retry-required result; pass it once after the owner's single yes. The runtime binds it to retained history. Never ask the owner to supply a monitor ID; omit otherwise",
-				},
-			},
-			"required":             []string{"action"},
-			"additionalProperties": false,
-		},
+		Description: "Create one server with the exact type and optional strict locations after owner approval in a private chat. Never schedule creation or automatically retry. A lost response may mean a server was created. The private setup handoff is sent directly to the paired owner.",
+		Parameters: map[string]any{"type": "object", "properties": map[string]any{
+			"action":      map[string]any{"type": "string", "enum": []string{"create"}},
+			"server_type": map[string]any{"type": "string"},
+			"locations":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		}, "required": []string{"action", "server_type"}, "additionalProperties": false},
 		Handler: func(ctx context.Context, arguments string) (string, error) {
 			return executeMigrationTool(ctx, arguments, operations)
 		},
@@ -113,11 +91,9 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 }
 
 type migrationToolArguments struct {
-	Action       string   `json:"action"`
-	ServerType   string   `json:"server_type,omitempty"`
-	Locations    []string `json:"locations,omitempty"`
-	JobID        string   `json:"job_id,omitempty"`
-	RetryAttempt string   `json:"retry_attempt,omitempty"`
+	Action     string   `json:"action"`
+	ServerType string   `json:"server_type,omitempty"`
+	Locations  []string `json:"locations,omitempty"`
 }
 
 func executeMigrationTool(ctx context.Context, arguments string, operations MigrationToolOperations) (string, error) {
@@ -126,61 +102,22 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		return migrationToolRejected("invalid_arguments"), nil
 	}
 	if err := ctx.Err(); err != nil {
-		return migrationToolOperationFailure(err, migration.Result{}), nil
+		return `{"creation_state":"not_created","code":"request_cancelled"}`, nil
 	}
-	switch strings.ToLower(strings.TrimSpace(parsed.Action)) {
-	case "start":
-		if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled {
-			return migrationToolRejected("start_requires_interactive_private_conversation"), nil
-		}
-		if kind, _ := ctx.Value(conversationTypeKey{}).(string); kind != "private" {
-			return migrationToolRejected("start_requires_interactive_private_conversation"), nil
-		}
-		if operations.Start == nil {
-			return migrationToolCapabilityFailure(errors.New("migration start capability is unavailable")), nil
-		}
-		if parsed.JobID != "" {
-			return migrationToolRejected("start_does_not_accept_monitor_id"), nil
-		}
-		if parsed.RetryAttempt != "" && !safeMigrationMonitorID(parsed.RetryAttempt) {
-			return migrationToolRejected("invalid_retry_attempt"), nil
-		}
-		result, err := operations.Start(ctx, migration.Request{
-			ServerType:   parsed.ServerType,
-			Locations:    parsed.Locations,
-			RetryAttempt: parsed.RetryAttempt,
-		})
-		if err != nil {
-			return migrationToolOperationFailure(err, result), nil
-		}
-		return encodeMigrationToolResult(migration.NormalizeResult(result))
-	case "status":
-		if parsed.JobID != "" && !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 || parsed.RetryAttempt != "" {
-			return migrationToolRejected("status_requires_only_monitor_id"), nil
-		}
-		if operations.Status == nil {
-			return migrationToolCapabilityFailure(errors.New("migration status capability is unavailable")), nil
-		}
-		result, err := operations.Status(ctx, parsed.JobID)
-		if err != nil {
-			return migrationToolOperationFailure(err, migration.NormalizeStatusResult(result).Migration), nil
-		}
-		return encodeMigrationToolResult(migration.NormalizeStatusResult(result))
-	case "stop":
-		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 || parsed.RetryAttempt != "" {
-			return migrationToolRejected("stop_requires_only_monitor_id"), nil
-		}
-		if operations.Stop == nil {
-			return migrationToolCapabilityFailure(errors.New("migration stop capability is unavailable")), nil
-		}
-		result, err := operations.Stop(ctx, parsed.JobID)
-		if err != nil {
-			return migrationToolOperationFailure(err, result), nil
-		}
-		return encodeMigrationToolResult(migration.NormalizeResult(result))
-	default:
-		return migrationToolRejected("unsupported_action"), nil
+	if parsed.Action != "create" {
+		return migrationToolRejected("invalid_arguments"), nil
 	}
+	if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled || ConversationType(ctx) != "private" {
+		return `{"creation_state":"not_created","code":"private_conversation_required"}`, nil
+	}
+	owner, ok := ConversationID(ctx)
+	if !ok || owner <= 0 {
+		return `{"creation_state":"not_created","code":"owner_unavailable"}`, nil
+	}
+	if operations.Create == nil {
+		return `{"creation_state":"not_created","code":"capability_unavailable"}`, nil
+	}
+	return encodeMigrationToolResult(operations.Create(ctx, migration.Request{ServerType: parsed.ServerType, Locations: parsed.Locations}, owner))
 }
 
 func parseMigrationToolArguments(arguments string) (migrationToolArguments, error) {
@@ -221,7 +158,7 @@ type migrationToolErrorResponse struct {
 }
 
 func migrationToolRejected(code string) string {
-	return encodeMigrationToolError("rejected", migration.InvalidArgumentsDiagnostic())
+	return `{"creation_state":"not_created","code":"invalid_arguments"}`
 }
 
 func migrationToolOperationFailure(err error, result migration.Result) string {

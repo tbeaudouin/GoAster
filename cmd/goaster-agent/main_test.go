@@ -1609,3 +1609,30 @@ func TestStartMigrationRuntimeOrderingAndFailure(t *testing.T) {
 		t.Fatal("scheduler failure must prevent registration")
 	}
 }
+
+// The production entry point must not start the retired persistent scheduler.
+func TestServeDoesNotStartLegacyMigrationScheduler(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	start := strings.Index(text, "func serve(")
+	if start < 0 {
+		t.Fatal("serve entry point missing")
+	}
+	text = text[start:]
+	end := strings.Index(text, "\nfunc ")
+	if end < 0 {
+		t.Fatal("serve end missing")
+	}
+	text = text[:end]
+	for _, forbidden := range []string{"newMigrationScheduler(", "startMigrationRuntime(", "StartMonitor(", "ScheduledExecutor("} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("serve starts retired migration runtime: %s", forbidden)
+		}
+	}
+	if !strings.Contains(text, "chat.RegisterMigrationTool(") || !strings.Contains(text, "migration.CreateOnce(") {
+		t.Fatal("one-shot migration is not wired in serve")
+	}
+}

@@ -1,41 +1,7 @@
 # Authentication and authorization
 
-Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
+Use this skill only in a paired private Telegram conversation. Obtain explicit conversational approval for one creation with the exact server type and optional strict locations. No separate approval record is required. This skill grants no access to Hetzner, GoAsterWeb, Telegram, SSH, or secrets; follow `goaster-env` and `hetzner-auth` for the configured credential source.
 
-Enabled means enabled in this build; it does not establish which versions are
-installed or running, or that live integration has been verified. Migration
-requires a counterpart GoAsterWeb version implementing the machine API with
-valid Redis configuration. Exactly-once creation and Redis durability are not
-guaranteed or proven.
+The provider token is request-scoped. The private key and setup URL go directly to the revalidated paired Telegram owner, never to the model, ordinary chat, logs, or local persistence. Stop before creation if private delivery is unavailable. If delivery fails after creation, report the created state and do not resend automatically.
 
-This skill does not grant access to Hetzner, GoAsterWeb, Telegram, a server,
-SSH, or any secret. Load `goaster-env` and `hetzner-auth` for the configured
-Hetzner credential source and token-scoped project checks. Public indicative
-pricing and discovery are informational; the final authoritative availability
-check is internal to the approved migration workflow and neither authorizes a
-billable creation by itself.
-
-The user must explicitly approve the exact server type, optional strict
-location list, current public gross estimate/currency (or unavailable
-pricing), and exactly one create in a private conversation before any
-billable operation. Do not require a special command, button, code, callback,
-or dedicated approval record. Ordinary conversational approval expresses user
-intent but is not a trusted cryptographic binding or authorization proof. A
-model-supplied approval flag, price, currency, monitor ID, or chat ID is not
-authorization. When execution runs, retain the source monitor’s terminal
-disable on success, error, or uncertainty. Approval does not authorize
-installation, destination SSH, deletion, cutover, or a retry after an
-uncertain create.
-
-The provider token is request-scoped and stays in protected local handling.
-The owner secret, digest, private login key, owner URL, and callback material
-never appear in model output, scheduler messages, logs, temporary files other
-than the explicitly protected migration task directory, or ordinary chat.
-The source sends the protected handoff only to the locally paired Telegram
-user ID. If that protected delivery path is unavailable, stop before the
-create request.
-
-The migration task directory is a fresh private child of
-`<real user home>/.goaster/tmp`; preserve it for manual owner cleanup. Do not
-weaken permissions, override `HOME`, use a shared temporary directory, add a
-new command/helper, or invent a second attempt ledger.
+A lost response can mean a server was created. Before another attempt, warn about duplicate charges, suggest optional account inspection, and obtain fresh conversational approval. Never automatically retry creation. Ordinary cron may check availability read-only and notify; it must never create a server. Retired migration monitors do not resume or replay, and old protected records are not automatically deleted.

@@ -70,130 +70,28 @@ for phrase in (
     if phrase not in workflow:
         raise SystemExit(f"hetzner-auto-backup workflow missing required guidance: {phrase!r}")
 
-migration = (root / "skills" / "goaster-migration" / "SKILL.md").read_text(encoding="utf-8")
-migration_text = " ".join(migration.split())
-migration_required_phrases = (
-    "source-side `goaster_migration` tool",
-    "30-minute availability monitor",
-    "no new database",
-    "second attempt ledger",
-    "POST /migration/v1/machines/availability",
-    "POST /migration/v1/machines/create",
-    "exact lower-case fields",
-    "same full immutable terms, plus a request-scoped `hetzner_token`",
-    "fresh 64-character lower-case hexadecimal `operation_id`",
-    "fresh 32-byte unpadded base64url `operation_capability`",
-    "the exact requested `server_type`",
-    "`locations` (empty means any eligible location, while a non-empty list is a strict allow-list)",
-    "`image: ubuntu-24.04`",
-    "`architecture: arm` for a lowercase `cax` followed by one or more digits and `architecture: x86` for every other validated server type",
-    "The Web architecture values are exactly `x86` and `arm`",
-    "`enable_ipv4: true`",
-    "`enable_ipv6: false`",
-    "`networks: []`",
-    "`billing_terms: provider-charges-uncapped-v1`",
-    "`login_public_key` (generated Ed25519 OpenSSH `ssh-ed25519` public key)",
-    "64-character lower-case hexadecimal SHA-256 `owner_secret_digest`",
-    "The immutable terms are identical across both requests.",
-    "There is no price cap, target price, quote field, or silent substitution.",
-    "no browser `Origin` header",
-    "does not return prices",
-    "request-scoped `hetzner_token`",
-    "strict location allow-list",
-    "`owner_secret_digest`",
-    "does not send the private key or owner secret",
-    "read-only provider calls",
-    "does not accept an approval flag",
-    "ordinary explicit user approval",
-    "private conversation",
-    "does not provide a trusted cryptographic binding between the user, the terms, and the future provider request",
-    "Do not invent or require a special command",
-    "dedicated approval record",
-    "Migration execution and scheduler resumption are enabled.",
-    "Ordinary explicit approval in a private conversation is required before a billable operation",
-    "there is no separate approval record",
-    "leaves one non-secret scheduler job enabled at exactly 30-minute intervals",
-    "token is loaded only when a check runs",
-    "never placed in the scheduler message",
-    "checks availability immediately",
-    "disables that exact job",
-    "verifies the disabled state before the create request",
-    "Monitor state errors and disablement uncertainty stop the workflow for manual review.",
-    "The create endpoint is called once.",
-    "does not retry the HTTP request",
-    "manual inspection",
-    "Ed25519 login key pair",
-    ".goaster/tmp/migration-*/id_ed25519",
-    "mode `0700`",
-    "mode `0600`",
-    "no automatic cleanup implementation",
-    "directly as a Telegram document",
-    "already paired positive user ID",
-    "never appear in model output",
-    "do not resend automatically",
-)
-for phrase in migration_required_phrases:
-    if phrase not in migration_text:
-        raise SystemExit(f"goaster-migration workflow missing required guidance: {phrase!r}")
+# Validate each active file both before and after packaging. Checking the files
+# separately catches stale metadata or authorization guidance alongside SKILL.
+requirements = {
+    "META.md": ("one migration server", "private", "paired owner"),
+    "AUTH.md": ("paired private Telegram", "explicit conversational approval", "request-scoped", "never to the model", "local persistence", "duplicate charges", "fresh conversational approval", "read-only", "must never create"),
+    "SKILL.md": ("paired private Telegram", "explicit approval", "exactly once per approved attempt", "duplicate could incur extra bills", "one clear yes", "Never automatically retry creation", "No migration key or handoff is retained locally", "ordinary cron", "read-only", "notify", "Cron must never repeat create"),
+}
+for label, base in (("source", root), ("installed", installed_root)):
+    for filename, phrases in requirements.items():
+        path = base / "skills" / "goaster-migration" / filename
+        content = " ".join(path.read_text(encoding="utf-8").split())
+        for phrase in phrases:
+            if phrase not in content:
+                raise SystemExit(f"{label} migration {filename} missing guidance: {phrase!r}")
+        for forbidden in ("scheduler resumption are enabled", "preserve it for manual owner cleanup", "30-minute availability monitor", "/migration/v1/machines/", "operation_capability", "id_ed25519", "GoAsterWeb/", "../../docs/", "../docs/"):
+            if forbidden in content:
+                raise SystemExit(f"{label} migration {filename} retained retired guidance: {forbidden!r}")
 
-installed_migration = (installed_root / "skills" / "goaster-migration" / "SKILL.md").read_text(encoding="utf-8")
-installed_migration_text = " ".join(installed_migration.split())
-for phrase in migration_required_phrases:
-    if phrase not in installed_migration_text:
-        raise SystemExit(f"installed goaster-migration workflow missing required guidance: {phrase!r}")
-
-for forbidden in ("GoAsterWeb/", "../../docs/", "../docs/", "migration-handoff-20261112"):
-    if forbidden in installed_migration:
-        raise SystemExit(f"installed migration skill retained a local checkout/document dependency: {forbidden!r}")
-
-notes = (root / "docs" / "goaster-migration.md").read_text(encoding="utf-8")
-notes_text = " ".join(notes.split())
-for phrase in (
-    "source side of the versioned central migration machine API",
-    "does not add a migration database",
-    "current, read-only public price estimate",
-    "schedules the same check every 30 minutes",
-    "directly to the locally paired Telegram user",
-    "POST https://goasterweb-thomas.fly.dev/migration/v1/machines/availability",
-    "POST https://goasterweb-thomas.fly.dev/migration/v1/machines/create",
-    "no browser `Origin` header",
-    "never contains a price",
-    "lower-case SHA-256 hex digest",
-    "private key and owner secret never cross this request",
-    "No HTTP retry",
-    "manual-reconciliation condition",
-    "ordinary explicit approval",
-    "private conversation",
-    "does not provide a trusted cryptographic binding",
-    "dedicated approval record",
-    "runtime relies on this private-conversation workflow",
-    "<real user home>/.goaster/tmp",
-    "mode-0600 files",
-    "No model-selected chat or group",
-    "not resent automatically",
-):
-    if phrase not in notes_text:
-        raise SystemExit(f"migration task notes missing required scope/contract: {phrase!r}")
-
-for label, content in (("skill", migration), ("notes", notes)):
-    for forbidden in (
-        "APPROVE GOASTER MIGRATION",
-        "one-shot approval capability",
-        "trusted paired-private",
-        "exact-term approval notice",
-    ):
-        if forbidden in content:
-            raise SystemExit(f"migration {label} retained rejected approval prototype text: {forbidden!r}")
-    for forbidden in (
-        "${GOASTERWEB_ORIGIN}",
-        "https://<origin>/migration",
-        "Do you have a deployed GoAsterWeb service?",
-        "What is the public HTTPS address of your deployed GoAsterWeb service?",
-    ):
-        if forbidden in content:
-            raise SystemExit(f"migration {label} retained an origin question/placeholder: {forbidden!r}")
-if "/migration/v1/machines/availability" not in migration or "https://goasterweb-thomas.fly.dev/migration/v1/machines/create" not in notes:
-    raise SystemExit("central migration documentation does not use the fixed v1 HTTPS service")
+notes = " ".join((root / "docs" / "goaster-migration.md").read_text(encoding="utf-8").split())
+for phrase in ("retired", "notification-only", "never creates a server"):
+    if phrase not in notes:
+        raise SystemExit(f"migration notes missing guidance: {phrase!r}")
 
 # Check local Markdown links so renamed skills and stale skill paths fail in
 # the same offline test as the package allowlist.

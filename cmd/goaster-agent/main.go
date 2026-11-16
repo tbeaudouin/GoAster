@@ -344,15 +344,12 @@ func serve(store chat.CredentialStore) (serveErr error) {
 		return fmt.Errorf("start generic cron scheduler: %w", err)
 	}
 	defer cronJobs.Stop()
-	migrationOptions := pairedMigrationOptions()
-	migrationJobs, err := newMigrationScheduler(migrationOptions)
-	if err != nil {
-		return err
+	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{Create: func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
+		return migration.CreateOnce(ctx, request, pairedMigrationOptions(), owner)
+	}}); err != nil {
+		return fmt.Errorf("register migration tool: %w", err)
 	}
-	if err := startMigrationRuntime(ctx, provider, migrationOptions, migrationJobs); err != nil {
-		return err
-	}
-	defer migrationJobs.Stop()
+
 	listener, err := controltransport.Listen()
 	if err != nil {
 		return fmt.Errorf("could not start local agent listener: %w", err)

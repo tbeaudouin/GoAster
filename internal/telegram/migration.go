@@ -90,6 +90,13 @@ func prepareMigrationHandoffWith(paths Paths, client httpDoer, apiBase string) (
 	}, nil
 }
 
+// deliveryError keeps the underlying cause while indicating that Telegram owns the diagnostic.
+type deliveryError struct{ cause error }
+
+func (err deliveryError) Error() string     { return "migration handoff delivery failed" }
+func (err deliveryError) Unwrap() error     { return err.cause }
+func (err deliveryError) DiagnosticLogged() {}
+
 func sendMigrationHandoffTo(ctx context.Context, paths Paths, client httpDoer, apiBase string, userID int64, data []byte) error {
 	if len(data) == 0 || int64(len(data)) > migrationHandoffMaxBytes {
 		return errors.New("migration handoff is unavailable")
@@ -97,15 +104,15 @@ func sendMigrationHandoffTo(ctx context.Context, paths Paths, client httpDoer, a
 	token, err := readPrivate(paths.Token)
 	if err != nil {
 		diagnostics.Error("telegram.migration_delivery", err, diagnostics.Field{Key: "method", Value: "sendDocument"})
-		return errors.New("migration handoff is unavailable")
+		return deliveryError{cause: err}
 	}
 	defer clear(token)
 	if err := ValidateToken(string(token)); err != nil {
 		diagnostics.Error("telegram.migration_delivery", err, diagnostics.Field{Key: "method", Value: "sendDocument"})
-		return errors.New("migration handoff is unavailable")
+		return deliveryError{cause: err}
 	}
-	if err := sendDocument(ctx, client, apiBase, string(token), userID, migrationHandoffFilename, data); err != nil {
-		return errors.New("migration handoff delivery failed")
+	if err := sendDocument(ctx, client, apiBase, string(token), userID, migrationHandoffFilename, data, diagnostics.Field{Key: "stage", Value: "handoff"}, diagnostics.Field{Key: "creation_state", Value: "created"}, diagnostics.Field{Key: "code", Value: "handoff_failure"}); err != nil {
+		return deliveryError{cause: err}
 	}
 	return nil
 }

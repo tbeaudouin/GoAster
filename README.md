@@ -1,12 +1,8 @@
 # GoAster
 
-Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
+Migration uses a one-shot create after explicit approval in a paired private conversation. A lost response may mean creation succeeded; warn about duplicate charges and obtain fresh approval before another attempt. Private setup material is delivered to the paired owner and is not retained locally. Ordinary cron may provide read-only capacity notifications, but never creates a server. Dedicated migration monitors do not resume or replay.
 
-Enabled means enabled in this build; it does not establish which versions are
-installed or running, or that live integration has been verified. Migration
-requires a counterpart GoAsterWeb version implementing the machine API with
-valid Redis configuration. Exactly-once creation and Redis durability are not
-guaranteed or proven.
+Starter installation does not overwrite existing user-owned installed skills. Owners should review and reconcile their installed `goaster-migration` META, AUTH, and SKILL guidance with the bundled one-shot version themselves. Updating existing installations is a separate rollout; this repository change does not establish that any deployed version has been updated or live integration verified.
 
 GoAster provides an agent runtime and a Telegram adapter with a subscription-backed OpenAI provider, tools, memory, and scheduling.
 

@@ -150,11 +150,11 @@ type telegramStartupError struct {
 func (err telegramStartupError) Error() string { return err.message }
 func (err telegramStartupError) Unwrap() error { return err.cause }
 
-func telegramFailure(method string, err error, status string, errorCode int, requestID string) error {
+func telegramFailure(method string, err error, status string, errorCode int, requestID string, contextFields ...diagnostics.Field) error {
 	if err == nil {
 		return nil
 	}
-	fields := []diagnostics.Field{{Key: "method", Value: method}}
+	fields := append([]diagnostics.Field{{Key: "method", Value: method}}, contextFields...)
 	if strings.TrimSpace(status) != "" {
 		fields = append(fields, diagnostics.Field{Key: "status", Value: status})
 	}
@@ -1126,48 +1126,51 @@ func (a *adapter) sendMessage(ctx context.Context, chatID int64, text string) (i
 	return result.MessageID, err
 }
 
-func sendDocument(ctx context.Context, client httpDoer, apiBase, token string, chatID int64, filename string, data []byte) error {
+func sendDocument(ctx context.Context, client httpDoer, apiBase, token string, chatID int64, filename string, data []byte, fields ...diagnostics.Field) error {
 	if client == nil {
-		return telegramFailure("sendDocument", errors.New("Telegram client is unavailable"), "", 0, "")
+		return telegramFailure("sendDocument", errors.New("Telegram client is unavailable"), "", 0, "", fields...)
 	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
-		return telegramFailure("sendDocument", fmt.Errorf("encode chat ID: %w", err), "", 0, "")
+		return telegramFailure("sendDocument", fmt.Errorf("encode chat ID: %w", err), "", 0, "", fields...)
 	}
 	if threadID := telegramThreadID(ctx); threadID != 0 {
 		if err := writer.WriteField("message_thread_id", strconv.FormatInt(threadID, 10)); err != nil {
-			return telegramFailure("sendDocument", fmt.Errorf("encode thread ID: %w", err), "", 0, "")
+			return telegramFailure("sendDocument", fmt.Errorf("encode thread ID: %w", err), "", 0, "", fields...)
 		}
 	}
 	part, err := writer.CreateFormFile("document", filename)
 	if err != nil {
-		return telegramFailure("sendDocument", fmt.Errorf("create document part: %w", err), "", 0, "")
+		return telegramFailure("sendDocument", fmt.Errorf("create document part: %w", err), "", 0, "", fields...)
 	}
 	if _, err := part.Write(data); err != nil {
-		return telegramFailure("sendDocument", fmt.Errorf("write document part: %w", err), "", 0, "")
+		return telegramFailure("sendDocument", fmt.Errorf("write document part: %w", err), "", 0, "", fields...)
 	}
 	if err := writer.Close(); err != nil {
-		return telegramFailure("sendDocument", fmt.Errorf("close multipart request: %w", err), "", 0, "")
+		return telegramFailure("sendDocument", fmt.Errorf("close multipart request: %w", err), "", 0, "", fields...)
 	}
-	return callMultipart(ctx, client, apiBase, token, "sendDocument", writer.FormDataContentType(), body.Bytes())
+	return callMultipart(ctx, client, apiBase, token, "sendDocument", writer.FormDataContentType(), body.Bytes(), fields...)
 }
 
-func callMultipart(ctx context.Context, client httpDoer, apiBase, token, method, contentType string, body []byte) error {
+func callMultipart(ctx context.Context, client httpDoer, apiBase, token, method, contentType string, body []byte, fields ...diagnostics.Field) error {
 	if client == nil {
-		return telegramFailure(method, errors.New("Telegram client is unavailable"), "", 0, "")
+		return telegramFailure(method, errors.New("Telegram client is unavailable"), "", 0, "", fields...)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiBase+"/bot"+token+"/"+method, bytes.NewReader(body))
 	if err != nil {
-		return telegramFailure(method, fmt.Errorf("build Telegram request: %w", err), "", 0, "")
+		return telegramFailure(method, fmt.Errorf("build Telegram request: %w", err), "", 0, "", fields...)
 	}
 	req.Header.Set("Content-Type", contentType)
 	resp, err := client.Do(req)
 	if err != nil {
-		return telegramFailure(method, fmt.Errorf("Telegram transport: %w", err), "", 0, "")
+		if errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+			err = errors.Join(io.ErrUnexpectedEOF, err)
+		}
+		return telegramFailure(method, fmt.Errorf("Telegram transport: %w", err), "", 0, "", fields...)
 	}
 	if resp == nil || resp.Body == nil {
-		return telegramFailure(method, errors.New("Telegram response body is missing"), "", 0, "")
+		return telegramFailure(method, errors.New("Telegram response body is missing"), "", 0, "", fields...)
 	}
 	defer resp.Body.Close()
 	var envelope struct {
@@ -1177,20 +1180,20 @@ func callMultipart(ctx context.Context, client httpDoer, apiBase, token, method,
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if readErr != nil {
-		return telegramFailure(method, fmt.Errorf("read Telegram response: %w", readErr), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"))
+		return telegramFailure(method, fmt.Errorf("read Telegram response: %w", readErr), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
 	}
 	if len(body) > 4*1024*1024 {
-		return telegramFailure(method, errors.New("Telegram response body exceeds the limit"), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"))
+		return telegramFailure(method, errors.New("Telegram response body exceeds the limit"), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
 	}
 	decodeErr := json.Unmarshal(body, &envelope)
 	if isTelegramFormattingRejection(envelope.Description) {
-		return telegramFailure(method, telegramFormattingError{}, resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"))
+		return telegramFailure(method, telegramFormattingError{}, resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
 	}
 	if decodeErr != nil || !envelope.OK || resp.StatusCode != http.StatusOK {
 		if decodeErr != nil {
-			return telegramFailure(method, fmt.Errorf("decode Telegram response: %w", decodeErr), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"))
+			return telegramFailure(method, fmt.Errorf("decode Telegram response: %w", decodeErr), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
 		}
-		return telegramFailure(method, telegramAPIError{method: method, status: resp.Status, errorCode: envelope.ErrorCode, description: envelope.Description}, resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"))
+		return telegramFailure(method, telegramAPIError{method: method, status: resp.Status, errorCode: envelope.ErrorCode, description: envelope.Description}, resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
 	}
 	return nil
 }
