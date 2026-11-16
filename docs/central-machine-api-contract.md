@@ -165,10 +165,19 @@ key, callback secret, or owner fragment secret.
 
 A provider timeout, lost response, missing server details, ledger write failure,
 callback/bind failure, or any unexpected state returns a manual-reconciliation
-error. The operator must inspect the token-scoped Hetzner project and the owner
-status page before doing anything further. GoAsterWeb never automatically
-retries a create, adopts an untracked server, deletes a key/server, or creates
-a replacement.
+error for that operation. The same `operation_id` and capability must never be
+replayed: inspect the token-scoped Hetzner project and the owner status page
+before doing anything further on that operation, and use `status` only for
+read-only reconciliation. This same-operation check is distinct from a fresh
+source operation. After one interactive private owner confirmation using the
+duplicate/extra-charge warning, GoAster may issue a separately confirmed fresh
+source operation with a new operation ID and capability, carrying the exact
+retained prior reference through the source-only `retry_attempt`; an account or
+status-page check is optional for that fresh operation and is not a gate.
+Unavailable or corrupt retained history, an in-flight execution, an
+unconfirmed stop, or unresolved authentication remains a blocker. GoAsterWeb
+never automatically retries a create, adopts an untracked server, deletes a
+key/server, or creates a replacement.
 
 The ledger's atomic EVAL behavior is covered by local Redis fixtures. Offline
 tests cannot prove managed Redis durability, no-eviction policy, backup restore

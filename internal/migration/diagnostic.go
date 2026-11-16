@@ -89,8 +89,18 @@ const (
 	retryStatePending   = "pending"
 	retryStateExhausted = "exhausted"
 
-	availabilityRetryLimit = 3
-	retryPendingNextAction = "wait for the next 30-minute availability check; the bounded availability retry is automatic"
+	availabilityRetryLimit            = 3
+	retryPendingNextAction            = "wait for the next 30-minute availability check; the bounded availability retry is automatic"
+	retryConfirmationNextAction       = "The previous attempt may already have created a server. Trying again could create a duplicate and add charges. I recommend checking your Hetzner account for duplicate servers. Are you sure you want me to try again?"
+	legacyRetryConfirmationNextAction = "ask the owner to confirm another create for this exact prior attempt before calling start"
+	handoffFailureNextAction          = "preserve the reported handoff delivery state; retrieve a retained protected handoff only if needed; do not resend automatically"
+	legacyHandoffFailureNextAction    = "inspect the retained protected handoff manually; do not resend automatically"
+	createdDeliveryFailedNextAction   = "the server was already created and handoff delivery failed; retrieve the retained protected handoff only if needed; do not resend automatically"
+	legacyCreatedDeliveryFailedAction = "retrieve the retained protected handoff manually; do not resend automatically"
+	legacyServiceNextAction           = "inspect status and the named service before any new owner-approved attempt; do not retry an uncertain create"
+	legacyInvalidResponseNextAction   = "inspect the counterpart status and provider project before any new owner-approved attempt"
+	legacyManualReviewNextAction      = "inspect status and reconcile external state before any new attempt"
+	uncertainNextAction               = "Status and provider account checks are optional. If creation is unknown or already created, say: " + retryConfirmationNextAction + " After one yes, start exactly one fresh attempt using the exact prior monitor reference from the current retry-required result; never retry automatically. Respect retained-history, in-flight, and unconfirmed-stop blockers."
 
 	maxDiagnosticBytes      = 4 * 1024
 	maxDiagnosticTimestamp  = int64(4102444800) // 2100-01-01 UTC
@@ -859,13 +869,13 @@ func nextActionForCode(code string) string {
 	case codeRecipientChanged:
 		return "reconcile the paired recipient and inspect status; do not resend automatically"
 	case codeHandoffFailure:
-		return "inspect the retained protected handoff manually; do not resend automatically"
+		return handoffFailureNextAction
 	case codeCancelled:
 		return "inspect status before deciding whether a new owner-approved attempt is safe"
 	case codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeWebHTTPError, codeWebAuthRejected, codeProviderHTTPError, codeProviderAuthRejected, codeUpstreamUnknown:
-		return "inspect status and the named service before any new owner-approved attempt; do not retry an uncertain create"
+		return uncertainNextAction
 	case codeInvalidResponse:
-		return "inspect the counterpart status and provider project before any new owner-approved attempt"
+		return uncertainNextAction
 	case codeAvailabilityRetryExhausted:
 		return "resolve the availability service failure, then obtain fresh owner approval before a new attempt"
 	case codeMonitorState, codeMonitorNotFound, codePersistedStateInvalid:
@@ -879,15 +889,15 @@ func nextActionForCode(code string) string {
 	case codeMonitorStopped:
 		return "no automatic action will run; obtain fresh owner approval before a new attempt"
 	case codeRetryConfirmation:
-		return "ask the owner to confirm another create for this exact prior attempt before calling start"
+		return retryConfirmationNextAction
 	case codeCreated:
 		return "use the protected paired handoff and continue setup manually"
 	case codeCreatedDeliveryFailed:
-		return "retrieve the retained protected handoff manually; do not resend automatically"
+		return createdDeliveryFailedNextAction
 	case codeManualReview:
-		return "inspect status and reconcile external state before any new attempt"
+		return uncertainNextAction
 	default:
-		return "inspect status and reconcile external state before any new attempt"
+		return uncertainNextAction
 	}
 }
 
@@ -1017,6 +1027,10 @@ func loadMonitorDiagnosticEvidence(options Options, monitorID string) (monitorDi
 		if validateErr := validatePersistedDiagnostic(record.Diagnostic, monitorID); validateErr != nil {
 			return monitorDiagnosticEvidence{}, errors.Join(ErrPersistedStateInvalid, validateErr)
 		}
+		record.Diagnostic.NextAction = nextActionForCode(record.Diagnostic.Code)
+		if record.Diagnostic.RetryState == retryStatePending {
+			record.Diagnostic.NextAction = retryPendingNextAction
+		}
 		if record.Diagnostic.CreationState == creationCreated {
 			evidence.HasCreated = true
 		}
@@ -1113,10 +1127,35 @@ func validatePersistedDiagnostic(diagnostic Diagnostic, monitorID string) error 
 	if diagnostic.RetryState == retryStatePending {
 		expectedNextAction = retryPendingNextAction
 	}
-	if diagnostic.MonitorID != monitorID || !safeJobID(monitorID) || !knownStage(diagnostic.Stage) || !knownDiagnosticCode(diagnostic.Code) || !knownResultState(diagnostic.ResultState) || !knownCreationState(diagnostic.CreationState) || !knownMonitoringState(diagnostic.MonitoringState) || !retryStateValid || diagnostic.Cause != causeForCode(diagnostic.Code) || diagnostic.NextAction != expectedNextAction || diagnostic.MonitoringStopped != (diagnostic.MonitoringState == monitoringStopped) || diagnostic.HTTPStatus < 0 || diagnostic.HTTPStatus > 599 || diagnostic.HTTPStatus > 0 && diagnostic.HTTPStatus < 100 || safeProviderCode(diagnostic.ProviderCode) != diagnostic.ProviderCode || diagnostic.UpdatedAt < 0 || diagnostic.UpdatedAt > maxDiagnosticTimestamp {
+	if diagnostic.MonitorID != monitorID || !safeJobID(monitorID) || !knownStage(diagnostic.Stage) || !knownDiagnosticCode(diagnostic.Code) || !knownResultState(diagnostic.ResultState) || !knownCreationState(diagnostic.CreationState) || !knownMonitoringState(diagnostic.MonitoringState) || !retryStateValid || diagnostic.Cause != causeForCode(diagnostic.Code) || !persistedNextActionMatches(diagnostic, expectedNextAction) || diagnostic.MonitoringStopped != (diagnostic.MonitoringState == monitoringStopped) || diagnostic.HTTPStatus < 0 || diagnostic.HTTPStatus > 599 || diagnostic.HTTPStatus > 0 && diagnostic.HTTPStatus < 100 || safeProviderCode(diagnostic.ProviderCode) != diagnostic.ProviderCode || diagnostic.UpdatedAt < 0 || diagnostic.UpdatedAt > maxDiagnosticTimestamp {
 		return errors.New("migration diagnostic state failed validation")
 	}
 	return nil
+}
+
+func persistedNextActionMatches(diagnostic Diagnostic, expected string) bool {
+	if diagnostic.NextAction == expected {
+		return true
+	}
+	if diagnostic.RetryState == retryStatePending {
+		return false
+	}
+	switch diagnostic.Code {
+	case codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeWebHTTPError, codeWebAuthRejected, codeProviderHTTPError, codeProviderAuthRejected, codeUpstreamUnknown:
+		return diagnostic.NextAction == legacyServiceNextAction
+	case codeInvalidResponse:
+		return diagnostic.NextAction == legacyInvalidResponseNextAction
+	case codeManualReview, codeUnknownFailure, "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable":
+		return diagnostic.NextAction == legacyManualReviewNextAction
+	case codeRetryConfirmation:
+		return diagnostic.NextAction == legacyRetryConfirmationNextAction
+	case codeHandoffFailure:
+		return diagnostic.NextAction == legacyHandoffFailureNextAction
+	case codeCreatedDeliveryFailed:
+		return diagnostic.NextAction == legacyCreatedDeliveryFailedAction
+	default:
+		return false
+	}
 }
 
 func initialMonitorDiagnostic(monitorID string) Diagnostic {

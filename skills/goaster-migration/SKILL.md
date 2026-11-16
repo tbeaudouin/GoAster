@@ -31,7 +31,33 @@ Migration execution and scheduler resumption are enabled. Ordinary explicit appr
 If a stopped attempt has a definitively not-created result, fix the reported
 configuration and make an ordinary explicit new `start`; the runtime creates a
 fresh attempt and retains the old scheduler, operation, and diagnostic records.
-If the result says creation is unknown, do not retry automatically. Ask the owner exactly: “A previous attempt may have created a server. Creating another may add charges, even if you manually deleted that prior server. Create another anyway?” If the result says `creation_state=created`, warn that a server was already created and use the exact prior monitor status to determine the safe handoff outcome before asking the same question. When the prior handoff was delivered (`delivered:true` or safe diagnostic code `created`), remind the owner in the private conversation that the existing private handoff contains the setup continuation link and SSH details; surface that link only through the existing private handoff boundary and never put its URL, owner secret, private key, credentials, or other private material into ordinary model-visible diagnostics or public/group messages. When delivery failed, state that private delivery failed and do not claim that the owner received the link or SSH details; do not assume a protected handoff was written. If status is unavailable or does not establish delivery, say the delivery outcome is unknown and do not claim that the owner received the link or SSH details. When creation is unknown, do not claim that any link or SSH details were delivered. Only after a fresh affirmative answer, call `start` once with `retry_attempt` set to the exact prior monitor ID shown by that result. The confirmation is one-call and attempt-specific: do not reuse it for a different or newer monitor ID, and never retry automatically.
+If the result says creation is unknown, do not retry automatically. Say exactly:
+"The previous attempt may already have created a server. Trying again could create a duplicate and add charges. I recommend checking your Hetzner account for duplicate servers. Are you sure you want me to try again?" The account
+check in that warning is a recommendation, not a prerequisite: do not require
+account findings, deletion proof, or a report. If the owner declines, call no
+`start`. After one clear yes, immediately call `start` exactly once with
+`retry_attempt` set to the exact prior monitor recovered from the current
+retry-required result; do not ask the owner for a monitor ID, make another
+confirmation request, or inspect the account first. A newer unknown attempt
+requires this new warning and its own one-call confirmation.
+
+If the result says `creation_state=created`, say that a server was already
+created. Preserve the tool's truthful private handoff state: when delivery
+succeeded (`delivered:true` or safe diagnostic code `created`), say that the
+existing private handoff contains the setup continuation link and SSH details;
+when delivery failed, say that private delivery failed and do not claim that
+the owner received the link or SSH details; if delivery is not established,
+say it is unknown. Never put the link, owner secret, private key, credentials,
+or other private material into ordinary model-visible diagnostics or
+public/group messages. Handoff inspection or retrieval is optional and is not
+a prerequisite to the retry decision. If the owner still wants another
+server, use the exact warning above for the single confirmation, then the
+same one-call `retry_attempt` rule. A newer created attempt requires a new
+warning; never reuse an older confirmation and never retry automatically.
+
+Corrupt or unavailable retained history, an in-flight monitor execution, and
+an unconfirmed stop remain technical blockers. Report those blockers and do
+not turn them into an external-account check or a retry confirmation.
 
 Enabled means enabled in this build; it does not establish which versions are
 installed or running, or that live integration has been verified. Migration
@@ -214,9 +240,11 @@ Present the exact type, strict location preference, indicative currency and
 per-location estimate when available, and the fact that one provider creation
 sequence would occur. The model-facing `start` call accepts only the exact
 type and location request, plus the narrowly scoped `retry_attempt` value when
-the skill is carrying the owner’s confirmation for an uncertain prior attempt;
-it does not accept an approval flag, quoted price, currency, arbitrary monitor
-ID, chat ID, or any secret.
+the skill is carrying the owner’s single confirmation for the exact current
+created or unknown prior attempt. That value is recovered from the
+retry-required result and bound to retained history; do not ask the owner to
+supply a monitor ID. The call does not accept an approval flag, quoted price,
+currency, arbitrary monitor ID, chat ID, or any secret.
 
 If the read-only check finds no matching available location, explain that
 high-demand server types may take days to become available and ask whether the
@@ -280,8 +308,10 @@ existing callback user-data. The source does not retry the HTTP request,
 inspect provider pricing during creation, delete infrastructure, or infer
 that an absent server makes replay safe. A timeout, lost response, malformed
 response, or uncertain provider/Web state disables the monitor and requires
-manual inspection of the token-scoped Hetzner project and the GoAsterWeb
-owner/status page. A new attempt after that state is allowed only through the
+the one-warning, one-yes confirmation for a fresh attempt. Do not treat the duplicate-server warning or an
+external-account check as a substitute for reconciling corrupt or unavailable
+history, an in-flight execution, or other unconfirmed runtime state. A new
+attempt after a confirmed-created or unknown state is allowed only through the
 exact `retry_attempt` confirmation described above; there is no automatic
 uncertainty retry.
 
@@ -314,9 +344,11 @@ chat ID or group destination is accepted. The private key and setup link must
 never appear in model output; the tool returns only safe status and provider
 identity fields.
 
-If direct delivery fails, leave the protected handoff for manual inspection,
-keep the monitor stopped, and do not resend automatically. The owner removes
-the temporary migration directory after delivery or abandonment.
+If direct delivery fails, leave the protected handoff available for optional
+manual inspection or retrieval, keep the monitor stopped, and do not resend
+automatically. Do not make handoff inspection a prerequisite to reporting the
+truthful delivery state or deciding whether to retry. The owner removes the
+temporary migration directory after delivery or abandonment.
 
 ## Scope boundary
 

@@ -133,15 +133,23 @@ rollback exists. A definitively not-created terminal result can be followed by
 an ordinary explicit `start` after its configuration cause is fixed; that start
 gets a fresh operation and monitor record while retaining the old history. A
 timeout, lost response, missing details, malformed response, or
-Redis/provider binding uncertainty is a manual-reconciliation condition. After
-that review, an uncertain result may be followed only by one explicit `start`
-with `retry_attempt` equal to the exact prior monitor ID and the owner’s
-duplicate-server confirmation. A confirmed-created result uses the same
-attempt-specific confirmation: warn that the server already exists, refer the
-owner to the existing private setup handoff when delivery succeeded, and state
-delivery failure when it did not. Another server may add charges even if the
-prior server was manually deleted. The old attempt is never re-enabled, and
-the confirmation is never reused for a different or newer monitor ID.
+Redis/provider binding uncertainty is a manual-reconciliation condition for
+that operation. The same operation and capability are never replayed. After
+the retained result is available, one interactive private owner confirmation
+may authorize one separately fresh `start` with a new operation and monitor;
+the source carries the exact retained prior reference through `retry_attempt`,
+not from a user-supplied monitor ID. The duplicate/extra-charge warning is
+required, but an account or status-page check/report is optional for this
+fresh source operation and is not a gate. Unavailable or corrupt retained
+history, an in-flight execution, an unconfirmed stop, or unresolved
+authentication remains a blocker.
+
+A confirmed-created result uses the same attempt-specific confirmation: warn
+that the server already exists, refer the owner to the existing private setup
+handoff when delivery succeeded, and state delivery failure when it did not.
+Another server may add charges even if the prior server was manually deleted.
+The old attempt is never re-enabled, and the confirmation is never reused for
+a different or newer monitor ID.
 
 ## Protected handoff and ownership boundary
 

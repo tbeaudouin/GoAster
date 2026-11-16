@@ -43,6 +43,10 @@ func TestMigrationToolExposesOnlySafeMonitorActions(t *testing.T) {
 		"approved start/monitor workflow",
 		"any compatible location",
 		"non-empty",
+		migrationRetryConfirmationWarning,
+		"a decline starts none",
+		"user-supplied monitor ID",
+		"private handoff delivery state",
 	} {
 		if !strings.Contains(registrar.tool.Description, required) {
 			t.Fatalf("tool description missing %q: %s", required, registrar.tool.Description)

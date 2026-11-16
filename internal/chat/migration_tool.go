@@ -14,6 +14,8 @@ import (
 
 const migrationToolName = "goaster_migration"
 
+const migrationRetryConfirmationWarning = "The previous attempt may already have created a server. Trying again could create a duplicate and add charges. I recommend checking your Hetzner account for duplicate servers. Are you sure you want me to try again?"
+
 type conversationTypeKey struct{}
 type conversationIDKey struct{}
 type conversationThreadIDKey struct{}
@@ -76,7 +78,7 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 	}
 	return registrar.RegisterTool(Tool{
 		Name:        migrationToolName,
-		Description: "Start, inspect status, or stop the exact central migration monitor. Use the bundled goaster-migration skill for indicative public Hetzner pricing, ordinary server-type and location discovery, private-conversation approval, and the one-call retry confirmation for an uncertain prior attempt. Pricing and discovery are informational only; final authoritative availability is checked inside the approved start/monitor workflow. An omitted location list allows any compatible location; a non-empty list remains strict. No provider token, private key, owner link, chat ID, or approval field is accepted or returned here.",
+		Description: "Start, inspect status, or stop the exact central migration monitor. Use the bundled goaster-migration skill for indicative public Hetzner pricing, ordinary server-type and location discovery, private-conversation approval, and the one-call retry confirmation for a prior attempt that may have created a server. When retry confirmation is required for an interactive private goaster_migration NEW attempt, say exactly: \"" + migrationRetryConfirmationWarning + "\" A single yes starts exactly one fresh attempt with the exact prior monitor recovered from the current result; a decline starts none. The account check in that warning is a recommendation, not a prerequisite: do not require account findings, deletion proof, a user-supplied monitor ID, or repeated confirmation. A created result must say that a server was already created and preserve the reported private handoff delivery state. Pricing and discovery are informational only; final authoritative availability is checked inside the approved start/monitor workflow. An omitted location list allows any compatible location; a non-empty list remains strict. No provider token, private key, owner link, chat ID, or approval field is accepted or returned here.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -99,7 +101,7 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 				},
 				"retry_attempt": map[string]any{
 					"type":        "string",
-					"description": "Start only: exact prior monitor ID confirming one additional create after an uncertain creation; omit unless the skill has obtained the required confirmation",
+					"description": "Start only: exact prior monitor recovered from the current retry-required result; pass it once after the owner's single yes. The runtime binds it to retained history. Never ask the owner to supply a monitor ID; omit otherwise",
 				},
 			},
 			"required":             []string{"action"},

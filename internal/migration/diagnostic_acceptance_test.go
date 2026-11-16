@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,5 +109,88 @@ func TestPersistedDiagnosticRejectsInjectedText(t *testing.T) {
 	d.NextAction = "secret"
 	if validatePersistedDiagnostic(d, d.MonitorID) == nil {
 		t.Fatal("accepted injected action")
+	}
+}
+
+func TestPersistedDiagnosticAcceptsLegacyChangedNextActions(t *testing.T) {
+	cases := []struct {
+		code   string
+		legacy string
+	}{
+		{codeRetryConfirmation, legacyRetryConfirmationNextAction},
+		{codeHandoffFailure, legacyHandoffFailureNextAction},
+		{codeCreatedDeliveryFailed, legacyCreatedDeliveryFailedAction},
+		{codeTimeout, legacyServiceNextAction},
+		{codeTransportFailure, legacyServiceNextAction},
+		{codeInvalidResponse, legacyInvalidResponseNextAction},
+		{codeManualReview, legacyManualReviewNextAction},
+		{"provider_timeout", legacyManualReviewNextAction},
+	}
+	for _, tc := range cases {
+		diagnostic := diagnosticTemplate(stageMonitor, tc.code)
+		diagnostic.MonitorID = "migration-legacy-guidance"
+		diagnostic = NormalizeResult(Result{Status: diagnostic.ResultState, MonitorID: diagnostic.MonitorID, Diagnostic: diagnostic}).Diagnostic
+		diagnostic.NextAction = tc.legacy
+		if err := validatePersistedDiagnostic(diagnostic, diagnostic.MonitorID); err != nil {
+			t.Fatalf("legacy %s action rejected: %v", tc.code, err)
+		}
+		current := NormalizeResult(Result{Status: diagnostic.ResultState, MonitorID: diagnostic.MonitorID, Diagnostic: diagnostic}).Diagnostic
+		if current.NextAction != nextActionForCode(tc.code) {
+			t.Fatalf("legacy %s action was not normalized: %q", tc.code, current.NextAction)
+		}
+	}
+}
+
+func TestLegacyDiagnosticLoadAndRetryValidation(t *testing.T) {
+	options := Options{TempDirectory: t.TempDir()}
+	dir, err := operationDirectory(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := diagnosticTemplate(stageCreate, codeTimeout)
+	d.MonitorID = "migration-legacy-load"
+	d.NextAction = legacyServiceNextAction
+	record := monitorDiagnosticRecord{Version: monitorDiagnosticVersion, MonitorID: d.MonitorID, Sequence: 1, Diagnostic: d}
+	path := filepath.Join(dir, fmt.Sprintf("%s%s%s.%020d%s", d.MonitorID, diagnosticFileSeparator, d.Code, 1, diagnosticFileSuffix))
+	write := func() {
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	got, found, err := loadMonitorDiagnostic(options, d.MonitorID)
+	if err != nil || !found || got.NextAction != uncertainNextAction {
+		t.Fatalf("loaded diagnostic: %+v %v %v", got, found, err)
+	}
+	record.Diagnostic.NextAction += " injected"
+	write()
+	if _, _, err = loadMonitorDiagnostic(options, d.MonitorID); err == nil {
+		t.Fatal("accepted modified legacy action")
+	}
+	record.Diagnostic.NextAction = legacyServiceNextAction
+	record.Diagnostic.RetryState = retryStatePending
+	record.Diagnostic.RetryCount = 1
+	write()
+	if _, _, err = loadMonitorDiagnostic(options, d.MonitorID); err == nil {
+		t.Fatal("accepted legacy action for pending retry")
+	}
+	record.Diagnostic.NextAction = retryPendingNextAction
+	record.Diagnostic.RetryCount = -1
+	write()
+	if _, _, err = loadMonitorDiagnostic(options, d.MonitorID); err == nil {
+		t.Fatal("accepted invalid retry count")
+	}
+}
+
+func TestUncertainNextActionExact(t *testing.T) {
+	expected := "Status and provider account checks are optional. If creation is unknown or already created, say: The previous attempt may already have created a server. Trying again could create a duplicate and add charges. I recommend checking your Hetzner account for duplicate servers. Are you sure you want me to try again? After one yes, start exactly one fresh attempt using the exact prior monitor reference from the current retry-required result; never retry automatically. Respect retained-history, in-flight, and unconfirmed-stop blockers."
+	for _, code := range []string{codeTimeout, codeTransportFailure, codeInvalidResponse, codeManualReview, "provider_timeout"} {
+		if got := nextActionForCode(code); got != expected {
+			t.Errorf("%s: %q", code, got)
+		}
 	}
 }
