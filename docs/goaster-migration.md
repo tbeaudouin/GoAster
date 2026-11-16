@@ -128,11 +128,16 @@ and does not add a separate approval mechanism.
 The first availability request runs immediately. If its `locations` result is
 empty, the existing scheduler stores one non-secret 30-minute monitor. If a
 location becomes available, GoAster claims and verifies that exact job is
-disabled before calling creation. No HTTP retry, provider delete, automatic
-rollback, or second create exists. A timeout, lost response, missing details,
-malformed response, or Redis/provider binding uncertainty is a
-manual-reconciliation condition. Inspect the token-scoped Hetzner project and
-GoAsterWeb owner/status page before any fresh owner-approved attempt.
+disabled before calling creation. No HTTP retry, provider delete, or automatic
+rollback exists. A definitively not-created terminal result can be followed by
+an ordinary explicit `start` after its configuration cause is fixed; that start
+gets a fresh operation and monitor record while retaining the old history. A
+timeout, lost response, missing details, malformed response, or
+Redis/provider binding uncertainty is a manual-reconciliation condition. After
+that review, an uncertain result may be followed only by one explicit `start`
+with `retry_attempt` equal to the exact prior monitor ID and the owner’s
+duplicate-server confirmation. The old attempt is never re-enabled, and a
+confirmed-created result is never retryable.
 
 ## Protected handoff and ownership boundary
 

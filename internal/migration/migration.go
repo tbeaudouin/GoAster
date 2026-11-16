@@ -66,6 +66,12 @@ type Request struct {
 	// Deprecated: retained for compatibility with older scheduler messages.
 	ApprovedCurrency string `json:"approved_currency,omitempty"`
 	JobID            string `json:"job_id,omitempty"`
+	// RetryAttempt is an in-memory, one-call confirmation for a prior
+	// uncertain attempt. It is never persisted in a scheduler message.
+	RetryAttempt string `json:"-"`
+	// AttemptCreatedAt is an in-memory scheduler-message versioning value. It
+	// is used only to order retained attempts and is not model-visible.
+	AttemptCreatedAt int64 `json:"-"`
 }
 
 // AvailabilityResult contains only public availability information returned by
@@ -342,7 +348,7 @@ func createWithToken(ctx context.Context, request Request, state operationState,
 		}
 	}
 	privateKey, ownerSecret := state.PrivateKey, state.OwnerSecret
-	taskDirectory, err := migrationTaskDirectory(options.TempDirectory)
+	taskDirectory, err := migrationHandoffDirectory(options, request, state)
 	if err != nil {
 		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, fmt.Errorf("prepare migration temporary directory: %w", err)), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
@@ -606,6 +612,27 @@ func migrationTaskDirectory(configured string) (string, error) {
 	}
 	// Deliberately do not arrange automatic cleanup. The owner removes the
 	// temporary migration directory after delivery or manual abandonment.
+	return directory, nil
+}
+
+func migrationHandoffDirectory(options Options, request Request, state operationState) (string, error) {
+	if options.TempDirectory == "" || request.JobID == "" {
+		return migrationTaskDirectory(options.TempDirectory)
+	}
+	if len(state.Terms.OperationID) < 16 {
+		return "", errors.New("migration operation ID is invalid")
+	}
+	parent, err := migrationTaskDirectory(options.TempDirectory)
+	if err != nil {
+		return "", err
+	}
+	directory := filepath.Join(parent, "handoff-"+state.Terms.OperationID[:16])
+	if err := os.Mkdir(directory, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("create migration handoff directory: %w", err)
+	}
+	if !tightenPrivateDirectory(directory) {
+		return "", errors.New("migration handoff directory is not private")
+	}
 	return directory, nil
 }
 

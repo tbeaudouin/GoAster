@@ -566,6 +566,17 @@ func (s *Scheduler) Path() string {
 }
 
 func (s *Scheduler) Add(job Job) (Job, error) {
+	return s.add(job, nil)
+}
+
+// AddIf adds a job only when guard approves the current durable job history.
+// The guard runs while the scheduler's cross-process state transaction is held,
+// before the new job is persisted. A non-nil error leaves the state unchanged.
+func (s *Scheduler) AddIf(job Job, guard func([]Job) error) (Job, error) {
+	return s.add(job, guard)
+}
+
+func (s *Scheduler) add(job Job, guard func([]Job) error) (Job, error) {
 	if s == nil {
 		return Job{}, fmt.Errorf("cron scheduler is nil")
 	}
@@ -587,6 +598,15 @@ func (s *Scheduler) Add(job Job) (Job, error) {
 				break
 			}
 			job.ID = newJobID(s.now())
+		}
+	}
+	if guard != nil {
+		existing := make([]Job, 0, len(s.jobs))
+		for _, saved := range s.jobs {
+			existing = append(existing, cloneJob(saved))
+		}
+		if err := guard(existing); err != nil {
+			return Job{}, err
 		}
 	}
 	if _, exists := s.jobs[job.ID]; exists {

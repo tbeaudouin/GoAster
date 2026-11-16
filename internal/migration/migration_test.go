@@ -340,7 +340,7 @@ func TestCreateLostResponseIsOneRequestAndSchedulerDisablesMonitor(t *testing.T)
 		t.Fatalf("first singleton start: %#v %v", first, err)
 	}
 	second, err := StartMonitor(t.Context(), Request{ServerType: "other-type"}, options, singletonJobs)
-	if err != nil || !second.ManualReview || first.MonitorID != second.MonitorID || fixture.creates.Load() != 2 {
+	if !errors.Is(err, ErrRetryConfirmationRequired) || !second.ManualReview || first.MonitorID != second.MonitorID || second.ServerType != "cx22" || fixture.creates.Load() != 2 {
 		t.Fatalf("repeat: %#v %v creates=%d", second, err, fixture.creates.Load())
 	}
 

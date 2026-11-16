@@ -59,6 +59,7 @@ const (
 	codePersistedStateInvalid  = "persisted_state_invalid"
 	codeMonitorStarted         = "monitor_started"
 	codeMonitorStopped         = "monitor_stopped"
+	codeRetryConfirmation      = "retry_confirmation_required"
 	codeCreated                = "created"
 	codeCreatedDeliveryFailed  = "created_delivery_failed"
 	codeManualReview           = "manual_review"
@@ -121,6 +122,7 @@ var (
 	ErrMonitorStopUnconfirmed      = errors.New("migration monitor stop is unconfirmed")
 	ErrMonitorNotFound             = errors.New("migration monitor was not found")
 	ErrPersistedStateInvalid       = errors.New("migration persisted diagnostic state is invalid")
+	ErrRetryConfirmationRequired   = errors.New("migration retry confirmation is required")
 )
 
 type migrationFailure struct {
@@ -360,6 +362,8 @@ func classifyFailure(err error, stage string) (string, int, string) {
 		return codeMonitorNotFound, 0, ""
 	case errors.Is(err, ErrPersistedStateInvalid):
 		return codePersistedStateInvalid, 0, ""
+	case errors.Is(err, ErrRetryConfirmationRequired):
+		return codeRetryConfirmation, 0, ""
 	case errors.Is(err, context.Canceled):
 		return codeCancelled, 0, ""
 	}
@@ -552,6 +556,12 @@ func resultStateFor(result Result, fallback string) string {
 }
 
 func creationStateFor(result Result, code string) string {
+	if result.Diagnostic.CreationState == creationCreated {
+		return creationCreated
+	}
+	if result.Diagnostic.CreationState == creationUnknown && definitelyNotCreatedCode(code) {
+		return creationNotCreated
+	}
 	if knownCreationState(result.Diagnostic.CreationState) {
 		return result.Diagnostic.CreationState
 	}
@@ -577,6 +587,15 @@ func creationStateFor(result Result, code string) string {
 		return creationUnknown
 	}
 	return creationNotCreated
+}
+
+func definitelyNotCreatedCode(code string) bool {
+	switch code {
+	case codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeRecipientUnavailable, codeRecipientChanged:
+		return true
+	default:
+		return false
+	}
 }
 
 func monitoringStateFor(result Result, code string) string {
@@ -617,7 +636,7 @@ func knownStage(stage string) bool {
 
 func knownDiagnosticCode(code string) bool {
 	switch code {
-	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", codeInvalidArguments, codeCapabilityUnavailable, codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeProtectedStorage, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeCancelled, codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeInvalidResponse, codeWebAuthRejected, codeWebHTTPError, codeProviderAuthRejected, codeProviderHTTPError, codeUpstreamUnknown, codeMonitorState, codeMonitorNotFound, codeMonitorInProgress, codeMonitorStopUnconfirmed, codePersistedStateInvalid, codeMonitorStarted, codeMonitorStopped, codeCreated, codeCreatedDeliveryFailed, codeManualReview, codeUnknownFailure:
+	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", codeInvalidArguments, codeCapabilityUnavailable, codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeProtectedStorage, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeCancelled, codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeInvalidResponse, codeWebAuthRejected, codeWebHTTPError, codeProviderAuthRejected, codeProviderHTTPError, codeUpstreamUnknown, codeMonitorState, codeMonitorNotFound, codeMonitorInProgress, codeMonitorStopUnconfirmed, codePersistedStateInvalid, codeMonitorStarted, codeMonitorStopped, codeRetryConfirmation, codeCreated, codeCreatedDeliveryFailed, codeManualReview, codeUnknownFailure:
 		return true
 	default:
 		return false
@@ -657,6 +676,8 @@ func resultStateForCode(code string) string {
 		return resultMonitoring
 	case codeMonitorStopped:
 		return resultStopped
+	case codeRetryConfirmation:
+		return resultManualReview
 	case codeMonitorInProgress:
 		return resultInProgress
 	case codeCreated, codeCreatedDeliveryFailed:
@@ -691,6 +712,8 @@ func monitoringStateForCode(code string) string {
 		return monitoringRunning
 	case codeMonitorStopUnconfirmed:
 		return monitoringUnknown
+	case codeRetryConfirmation:
+		return monitoringStopped
 	default:
 		return monitoringUnknown
 	}
@@ -774,6 +797,8 @@ func causeForCode(code string) string {
 		return "the migration monitor is active"
 	case codeMonitorStopped:
 		return "the migration monitor is stopped"
+	case codeRetryConfirmation:
+		return "the previous migration attempt may have created a server"
 	case codeCreated:
 		return "the migration was created and handoff completed"
 	case codeCreatedDeliveryFailed:
@@ -821,6 +846,8 @@ func nextActionForCode(code string) string {
 		return "wait for the next 30-minute availability check"
 	case codeMonitorStopped:
 		return "no automatic action will run; obtain fresh owner approval before a new attempt"
+	case codeRetryConfirmation:
+		return "ask the owner to confirm another create for this exact prior attempt before calling start"
 	case codeCreated:
 		return "use the protected paired handoff and continue setup manually"
 	case codeCreatedDeliveryFailed:
@@ -846,6 +873,13 @@ type monitorDiagnosticRecord struct {
 	MonitorID  string     `json:"monitor_id"`
 	Sequence   int64      `json:"sequence"`
 	Diagnostic Diagnostic `json:"diagnostic"`
+}
+
+type monitorDiagnosticEvidence struct {
+	Diagnostic Diagnostic
+	Found      bool
+	HasCreated bool
+	HasUnknown bool
 }
 
 const monitorDiagnosticVersion = "v1"
@@ -901,66 +935,74 @@ func storeMonitorDiagnostic(options Options, diagnostic Diagnostic) error {
 }
 
 func loadMonitorDiagnostic(options Options, monitorID string) (Diagnostic, bool, error) {
+	evidence, err := loadMonitorDiagnosticEvidence(options, monitorID)
+	return evidence.Diagnostic, evidence.Found, err
+}
+
+func loadMonitorDiagnosticEvidence(options Options, monitorID string) (monitorDiagnosticEvidence, error) {
 	if !safeJobID(monitorID) {
-		return Diagnostic{}, false, errors.Join(ErrProtectedStorage, errors.New("migration monitor ID is invalid"))
+		return monitorDiagnosticEvidence{}, errors.Join(ErrProtectedStorage, errors.New("migration monitor ID is invalid"))
 	}
 	directory, err := operationDirectory(options)
 	if err != nil {
-		return Diagnostic{}, false, errors.Join(ErrProtectedStorage, err)
+		return monitorDiagnosticEvidence{}, errors.Join(ErrProtectedStorage, err)
 	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
-		return Diagnostic{}, false, errors.Join(ErrProtectedStorage, err)
+		return monitorDiagnosticEvidence{}, errors.Join(ErrProtectedStorage, err)
 	}
 	prefix := monitorID + diagnosticFileSeparator
-	var latest Diagnostic
-	found := false
+	evidence := monitorDiagnosticEvidence{}
 	latestName := ""
-	created := false
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
 		if entry.IsDir() || !strings.HasSuffix(name, diagnosticFileSuffix) {
-			return Diagnostic{}, false, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record path is invalid"))
+			return monitorDiagnosticEvidence{}, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record path is invalid"))
 		}
 		stem := strings.TrimSuffix(strings.TrimPrefix(name, prefix), diagnosticFileSuffix)
 		parts := strings.Split(stem, ".")
 		if len(parts) != 2 {
-			return Diagnostic{}, false, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record code is invalid"))
+			return monitorDiagnosticEvidence{}, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record code is invalid"))
 		}
 		code := parts[0]
 		sequence, parseErr := parseDiagnosticSequence(parts[1])
 		if !knownDiagnosticCode(code) || code == "" || parseErr != nil {
-			return Diagnostic{}, false, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record code is invalid"), parseErr)
+			return monitorDiagnosticEvidence{}, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record code is invalid"), parseErr)
 		}
 		content, readErr := protectedfile.Read(filepath.Join(directory, name), maxDiagnosticBytes)
 		if readErr != nil {
-			return Diagnostic{}, false, errors.Join(ErrProtectedStorage, readErr)
+			return monitorDiagnosticEvidence{}, errors.Join(ErrProtectedStorage, readErr)
 		}
 		var record monitorDiagnosticRecord
 		decodeErr := decodeExactJSON(content.Data, &record)
 		clear(content.Data)
 		if decodeErr != nil || record.Version != monitorDiagnosticVersion || record.MonitorID != monitorID || record.Sequence != sequence || record.Diagnostic.Code != code {
-			return Diagnostic{}, false, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record is invalid"), decodeErr)
+			return monitorDiagnosticEvidence{}, errors.Join(ErrPersistedStateInvalid, errors.New("migration diagnostic record is invalid"), decodeErr)
 		}
 		if validateErr := validatePersistedDiagnostic(record.Diagnostic, monitorID); validateErr != nil {
-			return Diagnostic{}, false, errors.Join(ErrPersistedStateInvalid, validateErr)
+			return monitorDiagnosticEvidence{}, errors.Join(ErrPersistedStateInvalid, validateErr)
 		}
 		if record.Diagnostic.CreationState == creationCreated {
-			created = true
+			evidence.HasCreated = true
 		}
-		if !found || record.Sequence > sequenceForDiagnostic(latestName) {
-			latest = record.Diagnostic
+		if record.Diagnostic.CreationState == creationUnknown && record.Diagnostic.Code != codeMonitorStarted {
+			evidence.HasUnknown = true
+		}
+		if !evidence.Found || record.Sequence > sequenceForDiagnostic(latestName) {
+			evidence.Diagnostic = record.Diagnostic
 			latestName = name
-			found = true
+			evidence.Found = true
 		}
 	}
-	if created {
-		latest.CreationState = creationCreated
+	if evidence.HasCreated {
+		evidence.Diagnostic.CreationState = creationCreated
+	} else if evidence.HasUnknown {
+		evidence.Diagnostic.CreationState = creationUnknown
 	}
-	return latest, found, nil
+	return evidence, nil
 }
 
 func nextDiagnosticSequence(directory, monitorID string) (int64, error) {

@@ -76,7 +76,7 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 	}
 	return registrar.RegisterTool(Tool{
 		Name:        migrationToolName,
-		Description: "Start, inspect status, or stop the exact central migration monitor. Use the bundled goaster-migration skill for indicative public Hetzner pricing, ordinary server-type and location discovery, and the private-conversation approval guidance. Pricing and discovery are informational only; final authoritative availability is checked inside the approved start/monitor workflow. An omitted location list allows any compatible location; a non-empty list remains strict. No provider token, private key, owner link, chat ID, or approval field is accepted or returned here.",
+		Description: "Start, inspect status, or stop the exact central migration monitor. Use the bundled goaster-migration skill for indicative public Hetzner pricing, ordinary server-type and location discovery, private-conversation approval, and the one-call retry confirmation for an uncertain prior attempt. Pricing and discovery are informational only; final authoritative availability is checked inside the approved start/monitor workflow. An omitted location list allows any compatible location; a non-empty list remains strict. No provider token, private key, owner link, chat ID, or approval field is accepted or returned here.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -97,6 +97,10 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 					"type":        "string",
 					"description": "Non-secret monitor ID for status or stop only; start generates its own monitor ID",
 				},
+				"retry_attempt": map[string]any{
+					"type":        "string",
+					"description": "Start only: exact prior monitor ID confirming one additional create after an uncertain creation; omit unless the skill has obtained the required confirmation",
+				},
 			},
 			"required":             []string{"action"},
 			"additionalProperties": false,
@@ -108,10 +112,11 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 }
 
 type migrationToolArguments struct {
-	Action     string   `json:"action"`
-	ServerType string   `json:"server_type,omitempty"`
-	Locations  []string `json:"locations,omitempty"`
-	JobID      string   `json:"job_id,omitempty"`
+	Action       string   `json:"action"`
+	ServerType   string   `json:"server_type,omitempty"`
+	Locations    []string `json:"locations,omitempty"`
+	JobID        string   `json:"job_id,omitempty"`
+	RetryAttempt string   `json:"retry_attempt,omitempty"`
 }
 
 func executeMigrationTool(ctx context.Context, arguments string, operations MigrationToolOperations) (string, error) {
@@ -136,16 +141,20 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		if parsed.JobID != "" {
 			return migrationToolRejected("start_does_not_accept_monitor_id"), nil
 		}
+		if parsed.RetryAttempt != "" && !safeMigrationMonitorID(parsed.RetryAttempt) {
+			return migrationToolRejected("invalid_retry_attempt"), nil
+		}
 		result, err := operations.Start(ctx, migration.Request{
-			ServerType: parsed.ServerType,
-			Locations:  parsed.Locations,
+			ServerType:   parsed.ServerType,
+			Locations:    parsed.Locations,
+			RetryAttempt: parsed.RetryAttempt,
 		})
 		if err != nil {
 			return migrationToolOperationFailure(err, result), nil
 		}
 		return encodeMigrationToolResult(migration.NormalizeResult(result))
 	case "status":
-		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 {
+		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 || parsed.RetryAttempt != "" {
 			return migrationToolRejected("status_requires_only_monitor_id"), nil
 		}
 		if operations.Status == nil {
@@ -157,7 +166,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		}
 		return encodeMigrationToolResult(migration.NormalizeStatusResult(result))
 	case "stop":
-		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 {
+		if !safeMigrationMonitorID(parsed.JobID) || parsed.ServerType != "" || len(parsed.Locations) != 0 || parsed.RetryAttempt != "" {
 			return migrationToolRejected("stop_requires_only_monitor_id"), nil
 		}
 		if operations.Stop == nil {

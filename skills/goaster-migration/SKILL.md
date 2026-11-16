@@ -28,6 +28,11 @@ uncapped. Do not start billable work without that approval.
 
 Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
 
+If a stopped attempt has a definitively not-created result, fix the reported
+configuration and make an ordinary explicit new `start`; the runtime creates a
+fresh attempt and retains the old scheduler, operation, and diagnostic records.
+If the result says creation is unknown, do not retry automatically. Ask the owner exactly: “A previous attempt may have created a server. Create another? You’ll need to delete any duplicates in Hetzner to avoid extra charges.” Only after an affirmative answer, call `start` once with `retry_attempt` set to the exact prior monitor ID shown by that result. The confirmation is one-call and attempt-specific: do not reuse it for a different or newer monitor ID. A confirmed-created result is not retryable.
+
 Enabled means enabled in this build; it does not establish which versions are
 installed or running, or that live integration has been verified. Migration
 requires a counterpart GoAsterWeb version implementing the machine API with
@@ -52,8 +57,10 @@ resumption, or provisioning; the migration flow must use
 
 Do not add a migration daemon, provider-create script, Telegram command,
 destination SSH step, or background-command workaround. There is no new
-database or second attempt ledger. The existing scheduler file is only the non-secret monitor
-schedule; it is not billing or provisioning history.
+database or second attempt ledger. The existing scheduler file retains the
+non-secret monitor records for each attempt; it is not billing or provisioning
+history. A retry never re-enables an old create attempt and never accepts a
+model-selected monitor ID to bypass retained history.
 
 ## Fixed service and v1 contract
 
@@ -94,7 +101,7 @@ fragment only and never puts it in a query string.
 
 Before asking for approval, discover the exact requested server type and
 optional locations. Follow `hetzner-auth` and `goaster-env` for authenticated
-read-only provider pricing. The credential variable is exactly
+read-only provider lookups and pricing. The credential variable is exactly
 `HCLOUD_TOKEN`; the current migration lookup checks protected
 `<real user home>/.goaster/env` first, then falls back to process
 `HCLOUD_TOKEN`. If protected settings cannot be read, stop rather than
@@ -176,8 +183,10 @@ workflow.
 Present the exact type, strict location preference, indicative currency and
 per-location estimate when available, and the fact that one provider creation
 sequence would occur. The model-facing `start` call accepts only the exact
-type and location request; it does not accept an approval flag, quoted price,
-currency, monitor ID, chat ID, or any secret.
+type and location request, plus the narrowly scoped `retry_attempt` value when
+the skill is carrying the owner’s confirmation for an uncertain prior attempt;
+it does not accept an approval flag, quoted price, currency, arbitrary monitor
+ID, chat ID, or any secret.
 
 Before any billable operation, obtain ordinary explicit user approval for the
 exact server type, strict location preference, current estimate and currency
@@ -193,7 +202,7 @@ or create a separate approval mechanism. Call `start` only after the owner has
 approved the exact terms conversationally. The source preflights the protected
 paired-Telegram delivery path before the create request.
 
-## Monitor and one create
+## Monitor and one create per attempt
 
 After the required conversational approval, the source checks availability
 immediately. If no eligible
@@ -204,14 +213,16 @@ and verifies the disabled state before the create request. Availability errors,
 monitor state errors, and disablement uncertainty stop the workflow for manual
 review.
 
-The create endpoint is called once. GoAsterWeb uses the exact server type,
+The create endpoint is called once. Each fresh attempt has its own single create request. GoAsterWeb uses the exact server type,
 strict location allow-list, Ubuntu 24.04, the generated public key, and its
 existing callback user-data. The source does not retry the HTTP request,
 inspect provider pricing during creation, delete infrastructure, or infer
 that an absent server makes replay safe. A timeout, lost response, malformed
 response, or uncertain provider/Web state disables the monitor and requires
 manual inspection of the token-scoped Hetzner project and the GoAsterWeb
-owner/status page before any new owner-approved attempt.
+owner/status page. A new attempt after that state is allowed only through the
+exact `retry_attempt` confirmation described above; there is no automatic
+uncertainty retry.
 
 ## Protected owner handoff
 

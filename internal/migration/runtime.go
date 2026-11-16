@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"goaster/internal/diagnostics"
+	"goaster/internal/protectedfile"
 	"goaster/internal/scheduler"
 )
 
@@ -21,13 +22,16 @@ type scheduledMigration struct {
 	JobID     string  `json:"job_id"`
 	Request   Request `json:"request"`
 	Recipient int64   `json:"recipient"`
+	CreatedAt int64   `json:"created_at,omitempty"`
 }
 
 // MonitorScheduler is the small existing-scheduler surface needed by the
 // migration monitor. The concrete scheduler remains owned by the agent.
 type MonitorScheduler interface {
 	Add(scheduler.Job) (scheduler.Job, error)
+	AddIf(scheduler.Job, func([]scheduler.Job) error) (scheduler.Job, error)
 	Get(string) (scheduler.Job, bool)
+	List() []scheduler.Job
 	SetEnabled(string, bool) (scheduler.Job, error)
 }
 
@@ -38,6 +42,283 @@ type MonitorScheduler interface {
 type monitorExecutionCoordinator interface {
 	ClaimExecutionMatching(context.Context, scheduler.Job) (scheduler.Job, func(error) (scheduler.Job, error), error)
 	StopIfNotRunning(string) (scheduler.Job, error)
+}
+
+var errStartNotAdded = errors.New("migration start was not added")
+
+const (
+	startOutcomeActive       = "active"
+	startOutcomeCreated      = "created"
+	startOutcomeConfirmation = "confirmation"
+)
+
+type migrationAttempt struct {
+	Job           scheduler.Job
+	Scheduled     scheduledMigration
+	CreatedAt     int64
+	Diagnostic    Diagnostic
+	CreationState string
+}
+
+type migrationStartHistory struct {
+	Attempts     []migrationAttempt
+	Latest       migrationAttempt
+	HasLatest    bool
+	Active       migrationAttempt
+	HasActive    bool
+	Created      migrationAttempt
+	HasCreated   bool
+	Unknown      migrationAttempt
+	HasUnknown   bool
+	Failure      migrationAttempt
+	FailureError error
+}
+
+type migrationStartOutcome struct {
+	Allowed bool
+	Kind    string
+	Attempt migrationAttempt
+}
+
+func monitorIDForOperation(state operationState) string {
+	return "migration-" + state.Terms.OperationID
+}
+
+func newerMigrationAttempt(candidate, current migrationAttempt) bool {
+	if candidate.CreatedAt != current.CreatedAt {
+		if current.CreatedAt == 0 {
+			return candidate.CreatedAt > 0
+		}
+		if candidate.CreatedAt == 0 {
+			return false
+		}
+		return candidate.CreatedAt > current.CreatedAt
+	}
+	return candidate.Job.ID > current.Job.ID
+}
+
+func nextAttemptCreatedAt(history migrationStartHistory, options Options) int64 {
+	createdAt := currentTime(options.Now).UnixNano()
+	if history.HasLatest && createdAt <= history.Latest.CreatedAt && history.Latest.CreatedAt < int64(^uint64(0)>>1) {
+		createdAt = history.Latest.CreatedAt + 1
+	}
+	return createdAt
+}
+
+func migrationHistoryJob(job scheduler.Job) bool {
+	return strings.HasPrefix(job.ID, "migration-") || strings.HasPrefix(job.Message, schedulerMessagePrefix)
+}
+
+func migrationAttemptHistoryError(monitorID string, cause error) error {
+	if cause == nil {
+		cause = errors.New("migration attempt evidence is unavailable")
+	}
+	if errors.Is(cause, ErrProtectedStorage) || errors.Is(cause, ErrPersistedStateInvalid) {
+		return errors.Join(cause, fmt.Errorf("inspect migration attempt %s", monitorID))
+	}
+	return errors.Join(ErrPersistedStateInvalid, fmt.Errorf("inspect migration attempt %s: %w", monitorID, cause))
+}
+
+func historyFailureDiagnostic(monitorID string) Diagnostic {
+	diagnostic := diagnosticTemplate(stageStorage, codePersistedStateInvalid)
+	diagnostic.MonitorID = monitorID
+	diagnostic.ResultState = resultManualReview
+	diagnostic.CreationState = creationUnknown
+	diagnostic.MonitoringState = monitoringStopped
+	diagnostic.MonitoringStopped = true
+	return normalizeDiagnostic(diagnostic, stageStorage, Result{MonitorID: monitorID, Status: resultManualReview, Diagnostic: diagnostic})
+}
+
+func inspectMigrationHistory(jobs []scheduler.Job, options Options) (migrationStartHistory, error) {
+	history := migrationStartHistory{}
+	operationDir := ""
+	for _, job := range jobs {
+		if !migrationHistoryJob(job) {
+			continue
+		}
+		attempt := migrationAttempt{Job: job}
+		scheduled, err := parseSchedulerMessage(job.Message)
+		if err != nil || scheduled.JobID != job.ID || job.Kind != scheduler.ScheduleEvery || job.EverySeconds != MonitorIntervalSeconds {
+			attempt.Diagnostic = historyFailureDiagnostic(job.ID)
+			history.Failure = attempt
+			history.FailureError = migrationAttemptHistoryError(job.ID, ErrPersistedStateInvalid)
+			return history, history.FailureError
+		}
+		attempt.Scheduled = scheduled
+		attempt.CreatedAt = scheduled.CreatedAt
+		history.Attempts = append(history.Attempts, attempt)
+		if !history.HasLatest || newerMigrationAttempt(attempt, history.Latest) {
+			history.Latest = attempt
+			history.HasLatest = true
+		}
+		if job.Enabled || job.Status == scheduler.StatusRunning || job.ExecutionClaim {
+			if !history.HasActive || newerMigrationAttempt(attempt, history.Active) {
+				history.Active = attempt
+				history.HasActive = true
+			}
+			continue
+		}
+		if operationDir == "" {
+			operationDir, err = operationDirectory(options)
+			if err != nil {
+				attempt.Diagnostic = historyFailureDiagnostic(job.ID)
+				history.Failure = attempt
+				history.FailureError = migrationAttemptHistoryError(job.ID, err)
+				return history, history.FailureError
+			}
+		}
+		evidence, evidenceErr := loadMonitorDiagnosticEvidence(options, job.ID)
+		if evidenceErr != nil || !evidence.Found {
+			attempt.Diagnostic = historyFailureDiagnostic(job.ID)
+			history.Failure = attempt
+			if evidenceErr == nil {
+				evidenceErr = errors.New("migration diagnostic history is missing")
+			}
+			history.FailureError = migrationAttemptHistoryError(job.ID, evidenceErr)
+			return history, history.FailureError
+		}
+		attempt.Diagnostic = evidence.Diagnostic
+		if evidence.HasCreated || evidence.Diagnostic.CreationState == creationCreated {
+			attempt.CreationState = creationCreated
+			if !history.HasCreated || newerMigrationAttempt(attempt, history.Created) {
+				history.Created = attempt
+				history.HasCreated = true
+			}
+			continue
+		}
+		if _, loadErr := loadOperation(operationDir, job.ID, scheduled.Request, scheduled.Recipient); loadErr != nil {
+			attempt.Diagnostic = historyFailureDiagnostic(job.ID)
+			history.Failure = attempt
+			history.FailureError = migrationAttemptHistoryError(job.ID, loadErr)
+			return history, history.FailureError
+		}
+		dispatching, dispatchErr := createDispatchMarkerExists(operationDir, job.ID)
+		if dispatchErr != nil {
+			attempt.Diagnostic = historyFailureDiagnostic(job.ID)
+			history.Failure = attempt
+			history.FailureError = migrationAttemptHistoryError(job.ID, dispatchErr)
+			return history, history.FailureError
+		}
+		if dispatching || evidence.HasUnknown || evidence.Diagnostic.CreationState == creationUnknown {
+			attempt.CreationState = creationUnknown
+			if !history.HasUnknown || newerMigrationAttempt(attempt, history.Unknown) {
+				history.Unknown = attempt
+				history.HasUnknown = true
+			}
+			continue
+		}
+		if evidence.Diagnostic.CreationState == creationNotCreated {
+			attempt.CreationState = creationNotCreated
+			continue
+		}
+		attempt.CreationState = creationUnknown
+		if !history.HasUnknown || newerMigrationAttempt(attempt, history.Unknown) {
+			history.Unknown = attempt
+			history.HasUnknown = true
+		}
+	}
+	legacyCount := 0
+	for _, attempt := range history.Attempts {
+		if attempt.CreatedAt == 0 {
+			legacyCount++
+		}
+	}
+	if legacyCount > 1 {
+		monitorID := ""
+		if history.HasLatest {
+			monitorID = history.Latest.Job.ID
+		}
+		history.Failure = migrationAttempt{Job: scheduler.Job{ID: monitorID}, Diagnostic: historyFailureDiagnostic(monitorID)}
+		history.FailureError = migrationAttemptHistoryError(monitorID, errors.New("migration attempt order is ambiguous"))
+		return history, history.FailureError
+	}
+	return history, nil
+}
+
+func createDispatchMarkerExists(directory, monitorID string) (bool, error) {
+	path := filepath.Join(directory, monitorID+".create_dispatching")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || info == nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		return false, errors.New("migration create dispatch marker is invalid")
+	}
+	content, err := protectedfile.Read(path, 64)
+	if err != nil {
+		return false, err
+	}
+	defer clear(content.Data)
+	if string(content.Data) != "create_dispatching\n" {
+		return false, errors.New("migration create dispatch marker is invalid")
+	}
+	return true, nil
+}
+
+func diagnosticWithDispatchEvidence(options Options, monitorID string, diagnostic Diagnostic) (Diagnostic, error) {
+	directory, err := operationDirectory(options)
+	if err != nil {
+		return diagnostic, err
+	}
+	dispatching, err := createDispatchMarkerExists(directory, monitorID)
+	if err != nil {
+		return diagnostic, errors.Join(ErrPersistedStateInvalid, err)
+	}
+	if dispatching && diagnostic.CreationState != creationCreated {
+		diagnostic = diagnosticTemplate(stageCreate, codeManualReview)
+		diagnostic.MonitorID = monitorID
+		diagnostic.CreationState = creationUnknown
+	}
+	return diagnostic, nil
+}
+
+func startHistoryOutcome(history migrationStartHistory, request Request) (migrationStartOutcome, error) {
+	if history.HasActive {
+		return migrationStartOutcome{Kind: startOutcomeActive, Attempt: history.Active}, nil
+	}
+	if history.HasCreated {
+		return migrationStartOutcome{Kind: startOutcomeCreated, Attempt: history.Created}, nil
+	}
+	if history.HasUnknown && (!history.HasLatest || !newerMigrationAttempt(history.Latest, history.Unknown)) {
+		target := history.Unknown
+		if request.RetryAttempt != target.Job.ID {
+			return migrationStartOutcome{Kind: startOutcomeConfirmation, Attempt: target}, nil
+		}
+		return migrationStartOutcome{Allowed: true}, nil
+	}
+	if request.RetryAttempt != "" {
+		return migrationStartOutcome{}, errors.New("migration retry confirmation does not match an uncertain attempt")
+	}
+	return migrationStartOutcome{Allowed: true}, nil
+}
+
+func historyFailureResult(history migrationStartHistory, err error) (Result, error) {
+	monitorID := history.Failure.Job.ID
+	diagnostic := history.Failure.Diagnostic
+	if diagnostic.MonitorID == "" {
+		diagnostic = historyFailureDiagnostic(monitorID)
+	}
+	return failureResult(stageStorage, err, Result{Status: resultManualReview, MonitorID: monitorID, ServerType: history.Failure.Scheduled.Request.ServerType, ManualReview: true, Diagnostic: diagnostic})
+}
+
+func startOutcomeResult(outcome migrationStartOutcome, jobs MonitorScheduler, options Options) (Result, error) {
+	attempt := outcome.Attempt
+	serverType := attempt.Scheduled.Request.ServerType
+	if outcome.Kind == startOutcomeConfirmation {
+		diagnostic := diagnosticTemplate(stageMonitor, codeRetryConfirmation)
+		diagnostic.MonitorID = attempt.Job.ID
+		diagnostic.MonitoringState = monitoringStopped
+		diagnostic.MonitoringStopped = true
+		return failureResult(stageMonitor, ErrRetryConfirmationRequired, Result{Status: resultManualReview, ServerType: serverType, MonitorID: attempt.Job.ID, ManualReview: true, Diagnostic: diagnostic})
+	}
+	if outcome.Kind == startOutcomeActive && (attempt.Job.Status == scheduler.StatusRunning || attempt.Job.ExecutionClaim) {
+		diagnostic := diagnosticTemplate(stageMonitor, codeMonitorInProgress)
+		diagnostic.MonitorID = attempt.Job.ID
+		return failureResult(stageMonitor, scheduler.ErrExecutionInProgress, Result{Status: resultInProgress, ServerType: serverType, MonitorID: attempt.Job.ID, Diagnostic: diagnostic})
+	}
+	status, err := MigrationStatusWithOptions(attempt.Job.ID, jobs, options)
+	status.Migration.Locations = status.Request.Locations
+	return status.Migration, err
 }
 
 // SchedulerPath returns the private scheduler file used only for migration
@@ -72,48 +353,29 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 		return failureResult(stageInput, err, Result{Status: resultRejected, ServerType: request.ServerType})
 	}
 	options = completeOptions(options)
-	if request.JobID == "" {
-		// A single durable slot makes repeated model start calls converge.
-		request.JobID = "migration-singleton"
-	}
-	if !safeJobID(request.JobID) {
+	if request.JobID != "" && !safeJobID(request.JobID) {
 		return failureResult(stageInput, errors.New("migration monitor ID is invalid"), Result{Status: resultRejected, ServerType: request.ServerType, MonitorID: request.JobID})
 	}
-	if job, exists := jobs.Get(request.JobID); exists {
-		if job.Status == scheduler.StatusRunning {
-			return failureResult(stageMonitor, scheduler.ErrExecutionInProgress, Result{Status: resultInProgress, MonitorID: request.JobID, ServerType: request.ServerType, Diagnostic: diagnosticTemplate(stageMonitor, codeMonitorInProgress)})
-		}
-		if !job.Enabled || job.ReviewRequired {
-			status, err := MigrationStatusWithOptions(request.JobID, jobs, options)
-			status.Migration.Locations = status.Request.Locations
-			return status.Migration, err
-		}
+	if request.RetryAttempt != "" && !safeJobID(request.RetryAttempt) {
+		return failureResult(stageInput, errors.New("migration retry attempt ID is invalid"), Result{Status: resultRejected, ServerType: request.ServerType})
+	}
+	history, err := inspectMigrationHistory(jobs.List(), options)
+	if err != nil {
+		return historyFailureResult(history, err)
+	}
+	outcome, err := startHistoryOutcome(history, request)
+	if err != nil {
+		return failureResult(stageInput, err, Result{Status: resultRejected, ServerType: request.ServerType})
+	}
+	if !outcome.Allowed {
+		return startOutcomeResult(outcome, jobs, options)
 	}
 	if options.MigrationRecipient == nil || options.PrepareRecipientHandoff == nil {
-		return failureResult(stageRecipient, ErrRecipientUnavailable, Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
+		return failureResult(stageRecipient, ErrRecipientUnavailable, Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	recipient, err := options.MigrationRecipient()
 	if err != nil || recipient <= 0 {
-		return failureResult(stageRecipient, errors.Join(ErrRecipientUnavailable, err), Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
-	}
-	message, err := schedulerMessage(request, recipient)
-	if err != nil {
-		return failureResult(stageMonitor, err, Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
-	}
-	job, exists := jobs.Get(request.JobID)
-	if exists {
-		if job.Status == scheduler.StatusRunning {
-			return failureResult(stageMonitor, scheduler.ErrExecutionInProgress, Result{Status: resultInProgress, MonitorID: request.JobID, ServerType: request.ServerType, Diagnostic: diagnosticTemplate(stageMonitor, codeMonitorInProgress)})
-		}
-		if !job.Enabled || job.ReviewRequired {
-			status, err := MigrationStatusWithOptions(request.JobID, jobs, options)
-			status.Migration.Locations = status.Request.Locations
-			return status.Migration, err
-		}
-		if job.Message != message || job.Kind != scheduler.ScheduleEvery || job.EverySeconds != MonitorIntervalSeconds {
-			return failureResult(stageMonitor, errors.New("migration monitor ID is already in use"), Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
-		}
-		return NormalizeResult(Result{Status: resultMonitoring, ServerType: request.ServerType, MonitorID: request.JobID, Diagnostic: initialMonitorDiagnostic(request.JobID)}), nil
+		return failureResult(stageRecipient, errors.Join(ErrRecipientUnavailable, err), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
 	}
 	if options.DeliverHandoff == nil && options.PrepareHandoff == nil {
 		return failureResult(stageHandoff, ErrHandoffFailure, Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
@@ -133,33 +395,105 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 	if err != nil {
 		return failureResult(stageStorage, err, Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
 	}
-	if err = storeOperation(dir, request.JobID, state); err != nil {
-		return failureResult(stageStorage, errors.Join(ErrProtectedStorage, fmt.Errorf("store migration operation: %w", err)), Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
+	initialID := request.JobID
+	if initialID == "" {
+		initialID = "migration-singleton"
 	}
-	if _, err := jobs.Add(scheduler.Job{
-		ID:           request.JobID,
-		Kind:         scheduler.ScheduleEvery,
-		EverySeconds: MonitorIntervalSeconds,
-		Message:      message,
-	}); err != nil {
-		return failureResult(stageMonitor, fmt.Errorf("add migration monitor: %w", err), Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: request.JobID, ManualReview: true})
+	candidateID := initialID
+	if len(history.Attempts) > 0 {
+		candidateID = monitorIDForOperation(state)
 	}
-	if job, ok := jobs.Get(request.JobID); !ok || job.Message != message || !job.Enabled || job.Kind != scheduler.ScheduleEvery || job.EverySeconds != MonitorIntervalSeconds {
+	candidateRequest := request
+	candidateRequest.JobID = candidateID
+	candidateRequest.RetryAttempt = ""
+	candidateRequest.AttemptCreatedAt = nextAttemptCreatedAt(history, options)
+	message, err := schedulerMessage(candidateRequest, recipient)
+	if err != nil {
+		clear(state.PrivateKey)
+		state.OwnerSecret = ""
+		return failureResult(stageMonitor, err, Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: candidateID, ManualReview: true})
+	}
+	jobToAdd := scheduler.Job{ID: candidateID, Kind: scheduler.ScheduleEvery, EverySeconds: MonitorIntervalSeconds, Message: message}
+	var concurrentHistory migrationStartHistory
+	var concurrentOutcome migrationStartOutcome
+	var concurrentInputErr error
+	added, err := jobs.AddIf(jobToAdd, func(saved []scheduler.Job) error {
+		current, inspectErr := inspectMigrationHistory(saved, options)
+		if inspectErr != nil {
+			concurrentHistory = current
+			return errStartNotAdded
+		}
+		currentOutcome, outcomeErr := startHistoryOutcome(current, request)
+		if outcomeErr != nil {
+			concurrentInputErr = outcomeErr
+			return errStartNotAdded
+		}
+		if !currentOutcome.Allowed {
+			concurrentHistory = current
+			concurrentOutcome = currentOutcome
+			return errStartNotAdded
+		}
+		if current.HasLatest != history.HasLatest || (current.HasLatest && current.Latest.Job.ID != history.Latest.Job.ID) {
+			concurrentInputErr = errors.New("migration attempt changed while starting")
+			return errStartNotAdded
+		}
+		return nil
+	})
+	if err != nil {
+		clear(state.PrivateKey)
+		state.OwnerSecret = ""
+		if errors.Is(err, errStartNotAdded) {
+			if concurrentInputErr != nil {
+				return failureResult(stageInput, concurrentInputErr, Result{Status: resultRejected, ServerType: request.ServerType})
+			}
+			if concurrentHistory.FailureError != nil {
+				return historyFailureResult(concurrentHistory, concurrentHistory.FailureError)
+			}
+			if !concurrentOutcome.Allowed {
+				return startOutcomeResult(concurrentOutcome, jobs, options)
+			}
+			return failureResult(stageMonitor, errors.New("migration attempt changed while starting"), Result{Status: resultManualReview, ServerType: request.ServerType, ManualReview: true})
+		}
+		return failureResult(stageMonitor, fmt.Errorf("add migration monitor: %w", err), Result{Status: resultManualReview, ServerType: request.ServerType, MonitorID: candidateID, ManualReview: true})
+	}
+	if added.ID != candidateID || added.Message != message || !added.Enabled || added.Kind != scheduler.ScheduleEvery || added.EverySeconds != MonitorIntervalSeconds {
 		verifyErr := errors.New("migration monitor could not be verified")
-		if stopErr := stopAndVerifyMonitor(coordinator, request.JobID); stopErr != nil {
-			failed := Result{Status: resultStopUnconfirmed, MonitorID: request.JobID, ServerType: request.ServerType, Diagnostic: unconfirmedStopDiagnostic(Diagnostic{}, request.JobID)}
+		if stopErr := stopAndVerifyMonitor(coordinator, candidateID); stopErr != nil {
+			failed := Result{Status: resultStopUnconfirmed, MonitorID: candidateID, ServerType: request.ServerType, Diagnostic: unconfirmedStopDiagnostic(Diagnostic{}, candidateID)}
 			return failed, failureWithDiagnostic(failed.Diagnostic, errors.Join(ErrMonitorStopUnconfirmed, verifyErr, stopErr))
 		}
-		failed := Result{Status: resultManualReview, MonitorID: request.JobID, ServerType: request.ServerType, ManualReview: true, Diagnostic: stoppedMonitorDiagnostic(initialMonitorDiagnostic(request.JobID), request.JobID)}
+		failed := Result{Status: resultManualReview, MonitorID: candidateID, ServerType: request.ServerType, ManualReview: true, Diagnostic: stoppedMonitorDiagnostic(initialMonitorDiagnostic(candidateID), candidateID)}
 		return failed, failureWithDiagnostic(failed.Diagnostic, verifyErr)
 	}
-	initial := initialMonitorDiagnostic(request.JobID)
-	if err := storeMonitorDiagnostic(options, initial); err != nil {
-		failed := Result{Status: resultManualReview, MonitorID: request.JobID, ServerType: request.ServerType, ManualReview: true, Diagnostic: diagnosticForFailure(stageStorage, err, Result{Status: resultManualReview, MonitorID: request.JobID})}
-		if stopErr := stopAndVerifyMonitor(coordinator, request.JobID); stopErr != nil {
+	if verified, ok := jobs.Get(candidateID); !ok || verified.Message != message || !verified.Enabled || verified.Kind != scheduler.ScheduleEvery || verified.EverySeconds != MonitorIntervalSeconds {
+		verifyErr := errors.New("migration monitor could not be verified")
+		if stopErr := stopAndVerifyMonitor(coordinator, candidateID); stopErr != nil {
+			failed := Result{Status: resultStopUnconfirmed, MonitorID: candidateID, ServerType: request.ServerType, Diagnostic: unconfirmedStopDiagnostic(Diagnostic{}, candidateID)}
+			return failed, failureWithDiagnostic(failed.Diagnostic, errors.Join(ErrMonitorStopUnconfirmed, verifyErr, stopErr))
+		}
+		failed := Result{Status: resultManualReview, MonitorID: candidateID, ServerType: request.ServerType, ManualReview: true, Diagnostic: stoppedMonitorDiagnostic(initialMonitorDiagnostic(candidateID), candidateID)}
+		return failed, failureWithDiagnostic(failed.Diagnostic, verifyErr)
+	}
+	if err := storeOperation(dir, candidateID, state); err != nil {
+		failed := Result{Status: resultManualReview, MonitorID: candidateID, ServerType: request.ServerType, ManualReview: true, Diagnostic: diagnosticTemplate(stageStorage, codeProtectedStorage)}
+		failed.Diagnostic.MonitorID = candidateID
+		if stopErr := stopAndVerifyMonitor(coordinator, candidateID); stopErr != nil {
 			failed.Status = resultStopUnconfirmed
 			failed.ManualReview = false
-			failed.Diagnostic = unconfirmedStopDiagnostic(failed.Diagnostic, request.JobID)
+			failed.Diagnostic = unconfirmedStopDiagnostic(failed.Diagnostic, candidateID)
+			return failed, failureWithDiagnostic(failed.Diagnostic, errors.Join(ErrMonitorStopUnconfirmed, ErrProtectedStorage, err))
+		}
+		failed.Diagnostic.MonitoringState = monitoringStopped
+		failed.Diagnostic.MonitoringStopped = true
+		return failed, failureWithDiagnostic(failed.Diagnostic, errors.Join(ErrProtectedStorage, fmt.Errorf("store migration operation: %w", err)))
+	}
+	initial := initialMonitorDiagnostic(candidateID)
+	if err := storeMonitorDiagnostic(options, initial); err != nil {
+		failed := Result{Status: resultManualReview, MonitorID: candidateID, ServerType: request.ServerType, ManualReview: true, Diagnostic: diagnosticForFailure(stageStorage, err, Result{Status: resultManualReview, MonitorID: candidateID})}
+		if stopErr := stopAndVerifyMonitor(coordinator, candidateID); stopErr != nil {
+			failed.Status = resultStopUnconfirmed
+			failed.ManualReview = false
+			failed.Diagnostic = unconfirmedStopDiagnostic(failed.Diagnostic, candidateID)
 			return failed, failureWithDiagnostic(failed.Diagnostic, errors.Join(ErrMonitorStopUnconfirmed, err, stopErr))
 		}
 		failed.Diagnostic.MonitoringState = monitoringStopped
@@ -167,14 +501,14 @@ func StartMonitor(ctx context.Context, request Request, options Options, jobs Mo
 		return failed, failureWithDiagnostic(failed.Diagnostic, err)
 	}
 
-	result, runErr := executeMonitor(ctx, request, recipient, options, coordinator, request.JobID)
-	result.MonitorID = request.JobID
+	result, runErr := executeMonitor(ctx, candidateRequest, recipient, options, coordinator, candidateID)
+	result.MonitorID = candidateID
 	if runErr == nil {
 		return NormalizeResult(result), nil
 	}
-	if err := stopAndVerifyMonitor(coordinator, request.JobID); err != nil {
+	if err := stopAndVerifyMonitor(coordinator, candidateID); err != nil {
 		result.Status = resultStopUnconfirmed
-		result.Diagnostic = unconfirmedStopDiagnostic(result.Diagnostic, request.JobID)
+		result.Diagnostic = unconfirmedStopDiagnostic(result.Diagnostic, candidateID)
 		return result, failureWithDiagnostic(result.Diagnostic, errors.Join(ErrMonitorStopUnconfirmed, runErr, err))
 	}
 	result.ManualReview = true
@@ -203,6 +537,20 @@ func executeMonitor(ctx context.Context, request Request, recipient int64, optio
 		if result.Status != resultMonitoring {
 			result.Diagnostic = DiagnosticFor(runErr, result)
 			result.Diagnostic.MonitorID = jobID
+			if result.Diagnostic.CreationState != creationCreated {
+				dir, markerErr := operationDirectory(options)
+				if markerErr == nil {
+					var dispatching bool
+					dispatching, markerErr = createDispatchMarkerExists(dir, jobID)
+					if dispatching {
+						result.Diagnostic.CreationState = creationUnknown
+					}
+				}
+				if markerErr != nil {
+					result.Diagnostic.CreationState = creationUnknown
+					runErr = errors.Join(runErr, markerErr)
+				}
+			}
 			result.Diagnostic.MonitoringState = monitoringUnknown
 			result.Diagnostic.MonitoringStopped = false
 			if err := storeMonitorDiagnostic(options, result.Diagnostic); err != nil {
@@ -379,6 +727,10 @@ func MigrationStatusWithOptions(jobID string, jobs MonitorScheduler, options Opt
 	if err != nil {
 		return fail(err, Result{Status: resultManualReview, ServerType: scheduled.Request.ServerType, MonitorID: jobID, ManualReview: true})
 	}
+	stored, err = diagnosticWithDispatchEvidence(options, jobID, stored)
+	if err != nil {
+		return fail(err, Result{Status: resultManualReview, ServerType: scheduled.Request.ServerType, MonitorID: jobID, ManualReview: true, Diagnostic: historyFailureDiagnostic(jobID)})
+	}
 	diagnostic := statusDiagnosticForJob(job.ID, job.Status, job.Enabled, job.ReviewRequired, stored, found)
 	migrationResult := NormalizeResult(Result{Status: statusFromJob(job), ServerType: scheduled.Request.ServerType, MonitorID: job.ID, ManualReview: job.ReviewRequired, Diagnostic: diagnostic})
 	result = NormalizeStatusResult(StatusResult{
@@ -441,6 +793,10 @@ func StopMonitorWithOptions(jobID string, jobs MonitorScheduler, options Options
 	if !found {
 		stored = initialMonitorDiagnostic(jobID)
 	}
+	stored, historyErr = diagnosticWithDispatchEvidence(options, jobID, stored)
+	if historyErr != nil {
+		return failureResult(stageStorage, historyErr, Result{Status: resultManualReview, ServerType: scheduled.Request.ServerType, MonitorID: jobID, ManualReview: true, Diagnostic: historyFailureDiagnostic(jobID)})
+	}
 	stopped := stoppedMonitorDiagnostic(stored, jobID)
 	stoppedResult := NormalizeResult(Result{Status: resultStopped, ServerType: scheduled.Request.ServerType, MonitorID: jobID, Diagnostic: stopped})
 	if stored.Code == codeMonitorStopped && stored.MonitoringStopped && stored.CreationState == stoppedResult.Diagnostic.CreationState {
@@ -457,7 +813,7 @@ func schedulerMessage(request Request, recipient ...int64) (string, error) {
 	if len(recipient) > 0 {
 		id = recipient[0]
 	}
-	data, err := json.Marshal(scheduledMigration{Version: "v1", JobID: request.JobID, Request: request, Recipient: id})
+	data, err := json.Marshal(scheduledMigration{Version: "v1", JobID: request.JobID, Request: request, Recipient: id, CreatedAt: request.AttemptCreatedAt})
 	if err != nil {
 		return "", fmt.Errorf("encode migration monitor message: %w", err)
 	}
@@ -478,12 +834,13 @@ func parseSchedulerMessage(message string) (scheduledMigration, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return scheduledMigration{}, errors.New("migration scheduler message contains trailing data")
 	}
-	if scheduled.Version != "v1" || scheduled.Recipient <= 0 || !safeJobID(scheduled.JobID) || scheduled.Request.JobID != scheduled.JobID || validateMachineRequest(scheduled.Request.ServerType, scheduled.Request.Locations) != nil {
+	if scheduled.Version != "v1" || scheduled.Recipient <= 0 || scheduled.CreatedAt < 0 || !safeJobID(scheduled.JobID) || scheduled.Request.JobID != scheduled.JobID || validateMachineRequest(scheduled.Request.ServerType, scheduled.Request.Locations) != nil {
 		return scheduledMigration{}, errors.New("migration scheduler message is invalid")
 	}
 	if err := rejectLegacyPriceApproval(scheduled.Request); err != nil {
 		return scheduledMigration{}, err
 	}
+	scheduled.Request.AttemptCreatedAt = scheduled.CreatedAt
 	return scheduled, nil
 }
 

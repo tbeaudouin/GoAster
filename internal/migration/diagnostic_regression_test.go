@@ -39,7 +39,7 @@ func (s diagnosticHookScheduler) ClaimExecutionMatching(ctx context.Context, job
 	return claimed, complete, err
 }
 
-func TestTerminalPublishedBeforeClaimReleaseAndRetainedOnStart(t *testing.T) {
+func TestTerminalPublishedBeforeClaimReleaseAndAllowsFreshStart(t *testing.T) {
 	jobs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestTerminalPublishedBeforeClaimReleaseAndRetainedOnStart(t *testing.T) {
 		t.Fatalf("first: %+v %v", first, err)
 	}
 	again, err := StartMonitor(t.Context(), Request{ServerType: "cx32"}, options, jobs)
-	if err != nil || again.ServerType != "cx22" || len(again.Locations) != 1 || again.Locations[0] != "fsn1" || again.Diagnostic.Code != codeMissingToken {
+	if !errors.Is(err, ErrHetznerTokenMissing) || again.MonitorID == first.MonitorID || again.ServerType != "cx32" || len(again.Locations) != 0 || again.Diagnostic.Code != codeMissingToken {
 		t.Fatalf("again: %+v %v", again, err)
 	}
 }

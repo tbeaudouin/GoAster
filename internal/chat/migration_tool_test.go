@@ -68,6 +68,7 @@ func TestMigrationToolExposesOnlySafeMonitorActions(t *testing.T) {
 		`{"action":"start","server_type":"cx22","approved":true}`,
 		`{"action":"start","server_type":"cx22","hetzner_token":"secret"}`,
 		`{"action":"start","server_type":"cx22","job_id":"migration-forged"}`,
+		`{"action":"start","server_type":"cx22","retry_attempt":"/tmp/not-a-monitor"}`,
 		`{"action":"availability","server_type":"cx22"}`,
 	} {
 		result, err := registrar.tool.Handler(WithConversationType(context.Background(), "private"), arguments)
@@ -87,6 +88,15 @@ func TestMigrationToolExposesOnlySafeMonitorActions(t *testing.T) {
 	if received.ServerType != "cx22" || received.ApprovedHourlyGross != "" || received.ApprovedCurrency != "" || received.JobID != "" {
 		t.Fatalf("model-controlled approval fields reached start operation: %#v", received)
 	}
+	result, err = registrar.tool.Handler(WithConversationType(context.Background(), "private"), `{"action":"start","server_type":"cx22","retry_attempt":"migration-prior-attempt"}`)
+	if err != nil || !strings.Contains(result, `"status":"created"`) || starts.Load() != 2 || received.RetryAttempt != "migration-prior-attempt" {
+		t.Fatalf("scoped retry delegation = %q, %v; starts=%d request=%#v", result, err, starts.Load(), received)
+	}
+	scheduledRetry := context.WithValue(WithConversationType(context.Background(), "private"), scheduledTurnKey{}, true)
+	result, err = registrar.tool.Handler(scheduledRetry, `{"action":"start","server_type":"cx22","retry_attempt":"migration-prior-attempt"}`)
+	if err != nil || !strings.Contains(result, `"status":"rejected"`) || starts.Load() != 2 {
+		t.Fatalf("scheduled retry = %q, %v; starts=%d", result, err, starts.Load())
+	}
 
 	var actions []string
 	ops := MigrationToolOperations{
@@ -103,9 +113,17 @@ func TestMigrationToolExposesOnlySafeMonitorActions(t *testing.T) {
 	if err != nil || !strings.Contains(result, `"monitor_id":"migration-safe"`) || len(actions) != 1 {
 		t.Fatalf("status action = %q, %v actions=%v", result, err, actions)
 	}
+	result, err = executeMigrationTool(context.Background(), `{"action":"status","job_id":"migration-safe","retry_attempt":"migration-prior-attempt"}`, ops)
+	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 1 {
+		t.Fatalf("status retry bypass = %q, %v actions=%v", result, err, actions)
+	}
 	result, err = executeMigrationTool(context.Background(), `{"action":"stop","job_id":"migration-safe"}`, ops)
 	if err != nil || !strings.Contains(result, `"status":"stopped"`) || len(actions) != 2 {
 		t.Fatalf("stop action = %q, %v actions=%v", result, err, actions)
+	}
+	result, err = executeMigrationTool(context.Background(), `{"action":"stop","job_id":"migration-safe","retry_attempt":"migration-prior-attempt"}`, ops)
+	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 2 {
+		t.Fatalf("stop retry bypass = %q, %v actions=%v", result, err, actions)
 	}
 	result, err = executeMigrationTool(context.Background(), `{"action":"status","job_id":"/tmp/private"}`, ops)
 	if err != nil || !strings.Contains(result, `"status":"rejected"`) || len(actions) != 2 {
