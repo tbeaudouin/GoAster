@@ -1635,4 +1635,9 @@ func TestServeDoesNotStartLegacyMigrationScheduler(t *testing.T) {
 	if !strings.Contains(text, "chat.RegisterMigrationTool(") || !strings.Contains(text, "migration.CreateOnce(") {
 		t.Fatal("one-shot migration is not wired in serve")
 	}
+	migrationRegistration := strings.Index(text, "chat.RegisterMigrationTool(")
+	schedulerStart := strings.Index(text, "cronJobs.Start(ctx)")
+	if migrationRegistration < 0 || schedulerStart < 0 || migrationRegistration > schedulerStart {
+		t.Fatal("migration tool must be registered before the generic cron scheduler starts")
+	}
 }

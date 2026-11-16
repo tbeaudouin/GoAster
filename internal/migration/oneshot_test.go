@@ -23,7 +23,8 @@ func TestOneShotOffline(t *testing.T) {
 	for _, locations := range [][]string{nil, {}, {"fsn1"}} {
 		t.Run(fmt.Sprint(locations), func(t *testing.T) {
 			calls := 0
-			delivered := ""
+			setupURL := ""
+			privateKey := []byte{}
 			public := ""
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
@@ -55,11 +56,15 @@ func TestOneShotOffline(t *testing.T) {
 			opts.HTTPClient = server.Client()
 			opts.LoadHetznerToken = func() (string, error) { return "test-token", nil }
 			opts.MigrationRecipient = func() (int64, error) { return 7, nil }
-			opts.PrepareRecipientHandoff = func(id int64) (func(context.Context, []byte) error, error) {
-				return func(_ context.Context, b []byte) error { delivered = string(b); return nil }, nil
+			opts.PrepareRecipientHandoffParts = func(id int64) (func(context.Context, string, []byte) error, error) {
+				return func(_ context.Context, url string, key []byte) error {
+					setupURL = url
+					privateKey = append([]byte{}, key...)
+					return nil
+				}, nil
 			}
 			result := CreateOnce(context.Background(), Request{ServerType: "cx22", Locations: locations}, opts, 7)
-			block, _ := pem.Decode([]byte(delivered[strings.Index(delivered, "-----BEGIN"):]))
+			block, _ := pem.Decode(privateKey)
 			if block == nil {
 				t.Fatal("missing private key")
 			}
@@ -75,17 +80,38 @@ func TestOneShotOffline(t *testing.T) {
 				t.Fatal("handoff key does not match request")
 			}
 			encoded, _ := json.Marshal(result)
-			if calls != 1 || result.CreationState != "created" || result.Handoff != "delivered" || !strings.Contains(delivered, "PRIVATE KEY") || strings.Contains(string(encoded), "PRIVATE KEY") || strings.Contains(string(encoded), "setup_url") {
-				t.Fatalf("result %s calls %d", encoded, calls)
+			if calls != 1 || result.CreationState != "created" || result.Handoff != "delivered" || !strings.Contains(setupURL, "/setup#owner=") || !strings.Contains(string(privateKey), "PRIVATE KEY") || strings.Contains(string(encoded), "PRIVATE KEY") || strings.Contains(string(encoded), "setup_url") || strings.Contains(string(encoded), setupURL) {
+				t.Fatalf("result %s calls %d setup=%q key=%q", encoded, calls, setupURL, privateKey)
 			}
 		})
 	}
 }
 func TestOneShotOfflineFailures(t *testing.T) {
 	calls := 0
+	targetExists := false
+	lookupFailure := false
+	const targetName = "goaster-migration-0123456789abcdef"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		io.Copy(io.Discard, r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if targetExists {
+			var fields map[string]any
+			if err := json.Unmarshal(body, &fields); err != nil || fields["server_name"] != targetName {
+				t.Fatalf("named request body = %s", body)
+			}
+			secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if lookupFailure {
+				w.WriteHeader(http.StatusBadGateway)
+				fmt.Fprint(w, `{"creation_state":"not_created","error":{"code":"provider_lookup_failure","stage":"provider","http_status":502}}`)
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"creation_state":"not_created","server_id":42,"server_label":%q,"setup_url":"https://private.invalid/setup#owner=%s","error":{"code":"target_exists","stage":"provider","http_status":409}}`, targetName, secret)
+			return
+		}
 		w.WriteHeader(503)
 		fmt.Fprint(w, `{"creation_state":"unknown","error":{"code":"unavailable","stage":"provider","http_status":503}}`)
 	}))
@@ -102,8 +128,22 @@ func TestOneShotOfflineFailures(t *testing.T) {
 	if got := CreateOnce(context.Background(), Request{ServerType: "cx22", Locations: []string{"fsn1", "fsn1"}}, opts, 7); got.CreationState != "not_created" || calls != 0 {
 		t.Fatal(got, calls)
 	}
+	if got := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: "goaster-migration-0123456789abcde"}, opts, 7); got.CreationState != "not_created" || got.ServerName != "" || calls != 0 {
+		t.Fatalf("invalid target name result = %+v calls=%d", got, calls)
+	}
 	if got := CreateOnce(context.Background(), Request{ServerType: "cax22"}, opts, 7); got.CreationState != "unknown" || calls != 1 {
 		t.Fatal(got, calls)
+	}
+	targetExists = true
+	result := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: targetName}, opts, 7)
+	encoded, _ := json.Marshal(result)
+	if result.CreationState != "not_created" || result.Code != "target_exists" || result.Stage != "provider" || result.HTTPStatus != http.StatusConflict || result.ServerID != 42 || result.ServerLabel != targetName || result.ServerName != targetName || result.Handoff != "" || strings.Contains(string(encoded), "setup_url") || strings.Contains(string(encoded), "private.invalid") {
+		t.Fatalf("existing target result = %+v encoded=%s", result, encoded)
+	}
+	lookupFailure = true
+	result = CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: targetName}, opts, 7)
+	if result.CreationState != "not_created" || result.Code != "provider_lookup_failure" || result.Stage != "provider" || result.HTTPStatus != http.StatusBadGateway || calls != 3 {
+		t.Fatalf("lookup failure result = %+v calls=%d", result, calls)
 	}
 }
 

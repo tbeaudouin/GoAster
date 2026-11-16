@@ -133,3 +133,11 @@ func TestMigrationDiagnosticMetadataAllowlist(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrationTargetCodesAreAllowlisted(t *testing.T) {
+	for _, code := range []string{"target_exists", "provider_lookup_failure"} {
+		if got := MigrationCode(code); got != code {
+			t.Fatalf("MigrationCode(%q) = %q", code, got)
+		}
+	}
+}

@@ -1617,7 +1617,7 @@ func toolInstructions(ctx context.Context) (string, error) {
 	if kind == "" {
 		kind = "unknown"
 	}
-	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation."
+	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation. Scheduled migration turns follow their exact cron instructions and cannot schedule another job."
 	if metadata == "" {
 		instructions += "\n\nNo runtime skills are available. Do not perform a skill-dependent workflow; tell the user starter skills are missing."
 	} else {

@@ -296,11 +296,25 @@ func startMigrationRuntime(ctx context.Context, registrar chat.ToolRegistrar, op
 	return nil
 }
 
+func reportScheduledMigrationOutcome(ctx context.Context, owner int64, result migration.OneShotResult, report func(context.Context, int64, migration.OneShotResult) error) migration.OneShotResult {
+	if report != nil {
+		if err := report(ctx, owner, result); err != nil {
+			if _, logged := err.(interface{ DiagnosticLogged() }); !logged {
+				diagnostics.Error("agent.cron.migration_outcome", err)
+			}
+			result.Code = "outcome_failed"
+		}
+	}
+	return result
+}
+
 func pairedMigrationOptions() migration.Options {
 	options := migration.DefaultOptions()
 	options.PrepareHandoff = telegram.PrepareMigrationHandoff
 	options.MigrationRecipient = telegram.MigrationRecipient
 	options.PrepareRecipientHandoff = telegram.PrepareRecipientMigrationHandoff
+	options.PrepareRecipientHandoffParts = telegram.PrepareRecipientMigrationHandoffParts
+	options.ReportOutcome = telegram.ReportMigrationOutcome
 	return options
 }
 
@@ -323,12 +337,16 @@ func serve(store chat.CredentialStore) (serveErr error) {
 	sessionFor := newAgentSessionFactory(func(chatID int64) agentSession {
 		return newAgentSession(provider, setup.memory, setup.registry, chatID)
 	})
+	migrationOptions := pairedMigrationOptions()
 	var deliveryQueue cronDeliveryQueue
-	cronJobs, err := newCronScheduler(sessionFor, func(job scheduler.Job, reply string) error {
+	cronJobs, err := newCronSchedulerWithMigration(sessionFor, func(job scheduler.Job, reply string) error {
 		if deliveryQueue.Enqueue == nil {
 			return errors.New("generic cron delivery queue is unavailable")
 		}
 		return deliveryQueue.Enqueue(job, reply)
+	}, func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
+		result := migration.CreateOnce(ctx, request, migrationOptions, owner)
+		return reportScheduledMigrationOutcome(ctx, owner, result, migrationOptions.ReportOutcome)
 	})
 	if err != nil {
 		return err
@@ -340,15 +358,17 @@ func serve(store chat.CredentialStore) (serveErr error) {
 	if err := chat.RegisterCronTool(provider, cronJobs); err != nil {
 		return fmt.Errorf("register cron tool: %w", err)
 	}
+	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{
+		Create: func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
+			return migration.CreateOnce(ctx, request, migrationOptions, owner)
+		},
+	}); err != nil {
+		return fmt.Errorf("register migration tool: %w", err)
+	}
 	if err := cronJobs.Start(ctx); err != nil {
 		return fmt.Errorf("start generic cron scheduler: %w", err)
 	}
 	defer cronJobs.Stop()
-	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{Create: func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
-		return migration.CreateOnce(ctx, request, pairedMigrationOptions(), owner)
-	}}); err != nil {
-		return fmt.Errorf("register migration tool: %w", err)
-	}
 
 	listener, err := controltransport.Listen()
 	if err != nil {

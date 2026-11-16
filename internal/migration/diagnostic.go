@@ -63,6 +63,9 @@ const (
 	codeCreated                    = "created"
 	codeCreatedDeliveryFailed      = "created_delivery_failed"
 	codeAvailabilityRetryExhausted = "availability_retry_exhausted"
+	codeNoCapacity                 = "no_capacity"
+	codeTargetExists               = "target_exists"
+	codeProviderLookupFailure      = "provider_lookup_failure"
 	codeManualReview               = "manual_review"
 	codeUnknownFailure             = "unknown_failure"
 
@@ -714,7 +717,7 @@ func knownStage(stage string) bool {
 
 func knownDiagnosticCode(code string) bool {
 	switch code {
-	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", codeInvalidArguments, codeCapabilityUnavailable, codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeProtectedStorage, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeCancelled, codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeInvalidResponse, codeWebAuthRejected, codeWebHTTPError, codeProviderAuthRejected, codeProviderHTTPError, codeUpstreamUnknown, codeMonitorState, codeMonitorNotFound, codeMonitorInProgress, codeMonitorStopUnconfirmed, codePersistedStateInvalid, codeMonitorStarted, codeMonitorStopped, codeRetryConfirmation, codeCreated, codeCreatedDeliveryFailed, codeAvailabilityRetryExhausted, codeManualReview, codeUnknownFailure:
+	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", codeNoCapacity, codeTargetExists, codeProviderLookupFailure, codeInvalidArguments, codeCapabilityUnavailable, codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeProtectedStorage, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeCancelled, codeTimeout, codeDNSFailure, codeTLSFailure, codeTransportFailure, codeInvalidResponse, codeWebAuthRejected, codeWebHTTPError, codeProviderAuthRejected, codeProviderHTTPError, codeUpstreamUnknown, codeMonitorState, codeMonitorNotFound, codeMonitorInProgress, codeMonitorStopUnconfirmed, codePersistedStateInvalid, codeMonitorStarted, codeMonitorStopped, codeRetryConfirmation, codeCreated, codeCreatedDeliveryFailed, codeAvailabilityRetryExhausted, codeManualReview, codeUnknownFailure:
 		return true
 	default:
 		return false
@@ -750,6 +753,8 @@ func knownMonitoringState(state string) bool {
 
 func resultStateForCode(code string) string {
 	switch code {
+	case codeTargetExists:
+		return resultStopped
 	case codeMonitorStarted:
 		return resultMonitoring
 	case codeMonitorStopped:
@@ -775,7 +780,7 @@ func creationStateForCode(code string) string {
 	switch code {
 	case codeCreated, codeCreatedDeliveryFailed:
 		return creationCreated
-	case codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeProtectedStorage, codeInvalidArguments, codeCapabilityUnavailable, codeProviderAuthRejected, codeProviderHTTPError, codeAvailabilityRetryExhausted:
+	case codeNoCapacity, codeTargetExists, codeProviderLookupFailure, codeMissingToken, codeCredentialUnreadable, codeInvalidToken, codeRecipientUnavailable, codeRecipientChanged, codeHandoffFailure, codeProtectedStorage, codeInvalidArguments, codeCapabilityUnavailable, codeProviderAuthRejected, codeProviderHTTPError, codeAvailabilityRetryExhausted:
 		return creationNotCreated
 	default:
 		return creationUnknown
@@ -793,6 +798,8 @@ func monitoringStateForCode(code string) string {
 	case codeMonitorStopUnconfirmed:
 		return monitoringUnknown
 	case codeRetryConfirmation:
+		return monitoringStopped
+	case codeTargetExists:
 		return monitoringStopped
 	default:
 		return monitoringUnknown
@@ -823,6 +830,12 @@ func causeForCode(code string) string {
 		return "the service rejected authorization"
 	case "unavailable":
 		return "the service is unavailable"
+	case codeNoCapacity:
+		return "the requested migration target has no provider capacity yet"
+	case codeTargetExists:
+		return "the exact requested migration server already exists"
+	case codeProviderLookupFailure:
+		return "the provider could not complete the exact-name lookup"
 	case codeInvalidArguments:
 		return "the migration arguments were rejected"
 	case codeCapabilityUnavailable:
@@ -898,6 +911,12 @@ func nextActionForCode(code string) string {
 		return "correct the migration action arguments and retry the read-only control call"
 	case codeCapabilityUnavailable:
 		return "inspect the local migration configuration and retry status later"
+	case codeNoCapacity:
+		return "wait for the next scheduled capacity attempt"
+	case codeTargetExists:
+		return "use the existing server manually; setup or SSH key recovery is not implied"
+	case codeProviderLookupFailure:
+		return "reconcile the provider lookup failure before any new owner-approved attempt"
 	case codeMissingToken:
 		return "configure HCLOUD_TOKEN with /env, then inspect status; do not retry a create"
 	case codeCredentialUnreadable:

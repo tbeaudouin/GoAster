@@ -73,9 +73,9 @@ for phrase in (
 # Validate each active file both before and after packaging. Checking the files
 # separately catches stale metadata or authorization guidance alongside SKILL.
 requirements = {
-    "META.md": ("one migration server", "private", "paired owner"),
-    "AUTH.md": ("paired private Telegram", "explicit conversational approval", "request-scoped", "never to the model", "local persistence", "duplicate charges", "fresh conversational approval", "read-only", "must never create"),
-    "SKILL.md": ("paired private Telegram", "explicit approval", "exactly once per approved attempt", "duplicate could incur extra bills", "one clear yes", "Never automatically retry creation", "No migration key or handoff is retained locally", "ordinary cron", "read-only", "notify", "Cron must never repeat create"),
+    "META.md": ("one exact migration server", "private", "paired owner"),
+    "AUTH.md": ("public admission and rate bookkeeping first", "read-only exact-name lookup before capacity", "paired private Telegram", "explicit conversational approval", "request-scoped", "never to the model", "local persistence", "duplicate charges", "fresh conversational approval", "server_name", "target_exists", "no_capacity", "1800", "one create call"),
+    "SKILL.md": ("public admission and rate bookkeeping first", "read-only exact-name lookup before capacity", "paired private Telegram", "explicit conversational approval", "eventual exact request", "protected one-shot", "server_name", "target_exists", "1800 seconds", "no_capacity", "do not replay", "Never expose the URL", "separate", "SSH private key", "one scheduled create call"),
 }
 for label, base in (("source", root), ("installed", installed_root)):
     for filename, phrases in requirements.items():
@@ -84,12 +84,12 @@ for label, base in (("source", root), ("installed", installed_root)):
         for phrase in phrases:
             if phrase not in content:
                 raise SystemExit(f"{label} migration {filename} missing guidance: {phrase!r}")
-        for forbidden in ("scheduler resumption are enabled", "preserve it for manual owner cleanup", "30-minute availability monitor", "/migration/v1/machines/", "operation_capability", "id_ed25519", "GoAsterWeb/", "../../docs/", "../docs/"):
+        for forbidden in ("scheduler resumption are enabled", "preserve it for manual owner cleanup", "30-minute availability monitor", "/migration/v1/machines/", "operation_capability", "GoAsterWeb/", "../../docs/", "../docs/"):
             if forbidden in content:
                 raise SystemExit(f"{label} migration {filename} retained retired guidance: {forbidden!r}")
 
 notes = " ".join((root / "docs" / "goaster-migration.md").read_text(encoding="utf-8").split())
-for phrase in ("retired", "notification-only", "never creates a server"):
+for phrase in ("retired", "protected one-shot", "server_name", "target_exists", "no secret local persistence"):
     if phrase not in notes:
         raise SystemExit(f"migration notes missing guidance: {phrase!r}")
 

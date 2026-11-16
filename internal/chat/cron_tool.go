@@ -119,7 +119,11 @@ func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) 
 	if err != nil {
 		return "", err
 	}
-	switch strings.ToLower(strings.TrimSpace(parsed.Action)) {
+	action := strings.ToLower(strings.TrimSpace(parsed.Action))
+	if started, ok := ctx.Value(scheduledMigrationStartedKey{}).(func() bool); ok && started() && action != "list" && action != "get" {
+		return "", fmt.Errorf("scheduled migration cannot change cron jobs after an attempt")
+	}
+	switch action {
 	case "add":
 		return cronToolAdd(parsed, jobs, origin, scoped)
 	case "list":

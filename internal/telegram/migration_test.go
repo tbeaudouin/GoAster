@@ -27,6 +27,10 @@ func TestMigrationHandoffUsesOnlyStoredPairedUser(t *testing.T) {
 	}
 	var requestPath string
 	var requestBody []byte
+	var requestPaths []string
+	var requestBodies []string
+	changeAfterMessage := false
+	var switchErr error
 	client := doerFunc(func(request *http.Request) (*http.Response, error) {
 		requestPath = request.URL.Path
 		var err error
@@ -34,10 +38,15 @@ func TestMigrationHandoffUsesOnlyStoredPairedUser(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
+		requestPaths = append(requestPaths, request.URL.Path)
+		requestBodies = append(requestBodies, string(requestBody))
+		if changeAfterMessage && strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			switchErr = os.WriteFile(paths.UserID, []byte("99"), 0600)
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"result":{"message_id":1}}`)),
 		}, nil
 	})
 	data := []byte("GoAster migration setup: https://web.example/migration#attempt=abc&owner=secret\nprivate key material")
@@ -45,7 +54,24 @@ func TestMigrationHandoffUsesOnlyStoredPairedUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(paths.UserID, []byte("99"), 0600); err != nil {
+	parts, err := prepareMigrationHandoffPartsWith(paths, client, "https://telegram.synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := parts(t.Context(), "https://web.example/migration#attempt=abc&owner=secret", []byte("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n")); err != nil {
+		t.Fatal(err)
+	}
+	if len(requestPaths) != 2 || !strings.HasSuffix(requestPaths[0], "/sendMessage") || !strings.HasSuffix(requestPaths[1], "/sendDocument") || !strings.Contains(requestBodies[0], "https://web.example/migration#attempt=abc") || !strings.Contains(requestBodies[0], "owner=secret") || !strings.Contains(requestBodies[1], "BEGIN PRIVATE KEY") {
+		t.Fatalf("split handoff requests = %q / %q", requestPaths, requestBodies)
+	}
+	if err := os.WriteFile(paths.UserID, []byte("42"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changeAfterMessage = true
+	if err := parts(t.Context(), "https://web.example/migration#attempt=partial&owner=secret", []byte("-----BEGIN PRIVATE KEY-----\npartial\n-----END PRIVATE KEY-----\n")); err == nil || switchErr != nil || len(requestPaths) != 3 || !strings.HasSuffix(requestPaths[2], "/sendMessage") {
+		t.Fatalf("owner change after link was accepted: err=%v switch=%v paths=%q", err, switchErr, requestPaths)
+	}
+	if err := os.WriteFile(paths.UserID, []byte("42"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := deliver(t.Context(), data); err != nil {
@@ -55,11 +81,24 @@ func TestMigrationHandoffUsesOnlyStoredPairedUser(t *testing.T) {
 		t.Fatalf("Telegram endpoint = %q", requestPath)
 	}
 	bodyText := string(requestBody)
-	if !strings.Contains(bodyText, "name=\"chat_id\"") || !strings.Contains(bodyText, "42") || !strings.Contains(bodyText, "private key material") {
+	if !strings.Contains(bodyText, "name=\"chat_id\"\r\n\r\n42\r\n") || !strings.Contains(bodyText, "private key material") {
 		t.Fatalf("paired-user document body = %q", bodyText)
 	}
-	if strings.Contains(bodyText, "\r\n\r\n99\r\n") || strings.Contains(bodyText, "-100") || strings.Contains(bodyText, "model-supplied") {
+	if strings.Contains(bodyText, "name=\"chat_id\"\r\n\r\n99\r\n") || strings.Contains(bodyText, "model-supplied") {
 		t.Fatalf("document delivery leaked a group or model destination: %q", bodyText)
+	}
+}
+
+func TestMigrationOutcomeTextForExistingTargetIsHonest(t *testing.T) {
+	text := migrationOutcomeText(migration.OneShotResult{
+		CreationState: "not_created",
+		Code:          "target_exists",
+		ServerName:    "goaster-migration-0123456789abcdef",
+	})
+	for _, phrase := range []string{"Existing GoAster server found", "No new server was created", "does not mean setup or SSH private-key material was recovered"} {
+		if !strings.Contains(text, phrase) {
+			t.Fatalf("existing-target outcome missing %q: %s", phrase, text)
+		}
 	}
 }
 
@@ -131,13 +170,19 @@ func TestMigrationTransportEOFThroughCreateOnce(t *testing.T) {
 	if err := writePrivate(paths.UserID, []byte("42")); err != nil {
 		t.Fatal(err)
 	}
-	var uploads, creates atomic.Int32
+	var uploads, messages, creates atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/migration/create" {
 			creates.Add(1)
 			secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"server1","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, r.Host, secret)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			messages.Add(1)
+			io.Copy(io.Discard, r.Body)
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
 			return
 		}
 		uploads.Add(1)
@@ -157,19 +202,22 @@ func TestMigrationTransportEOFThroughCreateOnce(t *testing.T) {
 	opts.LoadHetznerToken = func() (string, error) { return "private-provider-token", nil }
 	opts.MigrationRecipient = func() (int64, error) { return migrationRecipient(paths) }
 	var deliveryCause error
-	opts.PrepareRecipientHandoff = func(id int64) (func(context.Context, []byte) error, error) {
-		deliver, err := prepareRecipientMigrationHandoffWith(paths, server.Client(), server.URL, id)
+	opts.PrepareRecipientHandoffParts = func(id int64) (func(context.Context, string, []byte) error, error) {
+		deliver, err := PrepareRecipientMigrationHandoffPartsWith(paths, server.Client(), server.URL, id)
 		if err != nil {
 			return nil, err
 		}
-		return func(ctx context.Context, data []byte) error { deliveryCause = deliver(ctx, data); return deliveryCause }, nil
+		return func(ctx context.Context, setupURL string, privateKey []byte) error {
+			deliveryCause = deliver(ctx, setupURL, privateKey)
+			return deliveryCause
+		}, nil
 	}
 	var logs strings.Builder
 	restore := diagnostics.SetOutput(&logs)
 	result := migration.CreateOnce(t.Context(), migration.Request{ServerType: "cx22"}, opts, 42)
 	restore()
-	if result.CreationState != "created" || result.Handoff != "failed" || result.Code != "handoff_failed" || creates.Load() != 1 || uploads.Load() != 1 {
-		t.Fatalf("result=%+v creates=%d uploads=%d", result, creates.Load(), uploads.Load())
+	if result.CreationState != "created" || result.Handoff != "failed" || result.Code != "handoff_failed" || creates.Load() != 1 || uploads.Load() != 1 || messages.Load() != 1 {
+		t.Fatalf("result=%+v creates=%d messages=%d uploads=%d", result, creates.Load(), messages.Load(), uploads.Load())
 	}
 	if !errors.Is(deliveryCause, io.EOF) || !errors.Is(deliveryCause, io.ErrUnexpectedEOF) {
 		t.Fatalf("missing EOF causes: %v", deliveryCause)
@@ -198,5 +246,12 @@ func TestMultipartCancellationWithEOFRemainsExpected(t *testing.T) {
 	restore()
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || logs.Len() != 0 {
 		t.Fatalf("cancellation: %v logs=%s", err, logs.String())
+	}
+}
+
+func TestNoCapacityOutcomeMakesNoRetryPromise(t *testing.T) {
+	message := migrationOutcomeText(migration.OneShotResult{CreationState: "not_created", Code: "no_capacity", ServerName: "example"})
+	if strings.Contains(strings.ToLower(message), "retr") || !strings.Contains(message, "No server was created") {
+		t.Fatalf("no-capacity notice: %q", message)
 	}
 }

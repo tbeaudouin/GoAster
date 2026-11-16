@@ -530,3 +530,29 @@ func TestCronInterruptedClaimRemainsInReviewThroughLimitEdits(t *testing.T) {
 		})
 	}
 }
+
+func TestScheduledCronManagementAndMigrationGate(t *testing.T) {
+	jobs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), scheduledTurnKey{}, true)
+	result, err := executeCronTool(ctx, `{"action":"add","every_seconds":60,"message":"ordinary"}`, jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job scheduler.Job
+	if err := json.Unmarshal([]byte(result), &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeCronTool(ctx, `{"action":"disable","id":"`+job.ID+`"}`, jobs); err != nil {
+		t.Fatal(err)
+	}
+	ctx = WithScheduledMigrationStarted(ctx, func() bool { return true })
+	if _, err := executeCronTool(ctx, `{"action":"enable","id":"`+job.ID+`"}`, jobs); err == nil {
+		t.Fatal("migration rearmed cron")
+	}
+	if _, err := executeCronTool(ctx, `{"action":"list"}`, jobs); err != nil {
+		t.Fatal(err)
+	}
+}

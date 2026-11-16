@@ -948,7 +948,7 @@ func (s *Scheduler) claimExecution(ctx context.Context, id string, expected Job,
 	if !ok {
 		return Job{}, nil, fmt.Errorf("%w: %s", ErrJobNotFound, id)
 	}
-	if job.ReviewRequired || !job.Enabled || (match && (job.Message != expected.Message || !sameSchedule(job, expected))) || (!scheduled && job.Status != StatusScheduled) || (scheduled && job.Status != StatusRunning) {
+	if job.ReviewRequired || !job.Enabled || (match && (job.Message != expected.Message || !sameSchedule(job, expected) || job.OriginChatID != expected.OriginChatID || job.OriginChatType != expected.OriginChatType || job.OriginThreadID != expected.OriginThreadID || job.MaxRuns != expected.MaxRuns)) || (!scheduled && job.Status != StatusScheduled) || (scheduled && job.Status != StatusRunning) {
 		return Job{}, nil, ErrExecutionClaimUnavailable
 	}
 	previous := job

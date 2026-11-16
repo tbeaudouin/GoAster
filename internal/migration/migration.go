@@ -60,6 +60,7 @@ var (
 // Current pricing is informational and is not a provider-create input.
 type Request struct {
 	ServerType string   `json:"server_type"`
+	ServerName string   `json:"server_name,omitempty"`
 	Locations  []string `json:"locations,omitempty"`
 	// Deprecated: retained for compatibility with older scheduler messages.
 	ApprovedHourlyGross string `json:"approved_hourly_gross,omitempty"`
@@ -164,26 +165,28 @@ type availabilityResponse struct {
 	Locations  []string `json:"locations"`
 }
 
-// Options contains test seams, the protected handoff delivery callback, and an
-// optional local preflight for that delivery path. Production callers should
-// use DefaultOptions and provide both callbacks from the paired Telegram
-// implementation. TempDirectory is a pre-created private task directory for
-// tests; production leaves it empty so the GoAster temporary policy is
-// resolved here.
+// Options contains test seams, the split protected handoff delivery callback,
+// safe scheduled outcome reporting, and compatibility hooks for legacy
+// monitor callers. Production callers should use DefaultOptions and provide
+// the paired Telegram callbacks. TempDirectory is a pre-created private task
+// directory for tests; production leaves it empty so the GoAster temporary
+// policy is resolved here.
 type Options struct {
-	WebOrigin               string
-	ProviderEndpoint        string
-	HTTPClient              httpDoer
-	Now                     func() time.Time
-	LoadHetznerToken        func() (string, error)
-	MigrationRecipient      func() (int64, error)
-	PrepareRecipientHandoff func(int64) (func(context.Context, []byte) error, error)
-	PrepareHandoff          func() (func(context.Context, []byte) error, error)
-	CheckHandoffDelivery    func() error
-	DeliverHandoff          func(context.Context, []byte) error
-	DisableMonitor          func() error
-	TempDirectory           string
-	AllowInsecureHTTP       bool
+	WebOrigin                    string
+	ProviderEndpoint             string
+	HTTPClient                   httpDoer
+	Now                          func() time.Time
+	LoadHetznerToken             func() (string, error)
+	MigrationRecipient           func() (int64, error)
+	PrepareRecipientHandoff      func(int64) (func(context.Context, []byte) error, error)
+	PrepareRecipientHandoffParts func(int64) (func(context.Context, string, []byte) error, error)
+	PrepareHandoff               func() (func(context.Context, []byte) error, error)
+	CheckHandoffDelivery         func() error
+	DeliverHandoff               func(context.Context, []byte) error
+	ReportOutcome                func(context.Context, int64, OneShotResult) error
+	DisableMonitor               func() error
+	TempDirectory                string
+	AllowInsecureHTTP            bool
 }
 
 // DefaultOptions returns fixed HTTPS endpoints and a client that neither uses
@@ -450,7 +453,23 @@ func validateBillableRequest(request Request) error {
 	if err := validateMachineRequest(request.ServerType, request.Locations); err != nil {
 		return err
 	}
+	if request.ServerName != "" && !validMigrationServerName(request.ServerName) {
+		return errInvalidRequest
+	}
 	return rejectLegacyPriceApproval(request)
+}
+
+func validMigrationServerName(value string) bool {
+	const prefix = "goaster-migration-"
+	if len(value) != len(prefix)+16 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func rejectLegacyPriceApproval(request Request) error {
@@ -899,7 +918,7 @@ func decodeWebError(data []byte, status int) webHTTPError {
 		return fallback
 	}
 	switch detail.Code {
-	case "provider_auth_rejected", "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", "unknown_failure":
+	case "provider_auth_rejected", "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable", "no_capacity", "target_exists", "provider_lookup_failure", "unknown_failure":
 	default:
 		return fallback
 	}

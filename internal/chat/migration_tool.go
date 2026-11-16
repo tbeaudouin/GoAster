@@ -59,6 +59,19 @@ func ConversationType(ctx context.Context) string {
 	return kind
 }
 
+type scheduledMigrationKey struct{}
+type scheduledMigrationStartedKey struct{}
+
+// WithScheduledMigrationStarted guards cron mutations after a migration begins.
+func WithScheduledMigrationStarted(ctx context.Context, started func() bool) context.Context {
+	return context.WithValue(ctx, scheduledMigrationStartedKey{}, started)
+}
+
+// WithScheduledMigration is set by the claimed transport cron executor, never by tool arguments.
+func WithScheduledMigration(ctx context.Context, create func(context.Context, migration.Request, string) migration.OneShotResult) context.Context {
+	return context.WithValue(ctx, scheduledMigrationKey{}, create)
+}
+
 // MigrationToolOperations keeps the model-facing control plane separate from
 // the privileged migration executor. No operation accepts a token, key,
 // owner URL, chat ID, or callback secret.
@@ -78,10 +91,11 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 	}
 	return registrar.RegisterTool(Tool{
 		Name:        migrationToolName,
-		Description: "Create one server with the exact type and optional strict locations after owner approval in a private chat. Never schedule creation or automatically retry. A lost response may mean a server was created. The private setup handoff is sent directly to the paired owner.",
+		Description: "Create one server after owner approval in a private chat. A scheduled attempt must use its exact server_name; the Web API checks that name after public admission. Private handoff is sent directly to the owner.",
 		Parameters: map[string]any{"type": "object", "properties": map[string]any{
 			"action":      map[string]any{"type": "string", "enum": []string{"create"}},
 			"server_type": map[string]any{"type": "string"},
+			"server_name": map[string]any{"type": "string"},
 			"locations":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		}, "required": []string{"action", "server_type"}, "additionalProperties": false},
 		Handler: func(ctx context.Context, arguments string) (string, error) {
@@ -93,31 +107,46 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 type migrationToolArguments struct {
 	Action     string   `json:"action"`
 	ServerType string   `json:"server_type,omitempty"`
+	ServerName string   `json:"server_name,omitempty"`
 	Locations  []string `json:"locations,omitempty"`
 }
 
 func executeMigrationTool(ctx context.Context, arguments string, operations MigrationToolOperations) (string, error) {
+	reject := func(code string) (string, error) {
+		if create, ok := ctx.Value(scheduledMigrationKey{}).(func(context.Context, migration.Request, string) migration.OneShotResult); ok {
+			create(ctx, migration.Request{}, code)
+		}
+		return `{"creation_state":"not_created","code":"` + code + `"}`, nil
+	}
 	parsed, err := parseMigrationToolArguments(arguments)
 	if err != nil {
-		return migrationToolRejected("invalid_arguments"), nil
+		return reject("invalid_arguments")
 	}
 	if err := ctx.Err(); err != nil {
-		return `{"creation_state":"not_created","code":"request_cancelled"}`, nil
+		return reject("request_cancelled")
 	}
 	if parsed.Action != "create" {
-		return migrationToolRejected("invalid_arguments"), nil
+		return reject("invalid_arguments")
 	}
-	if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled || ConversationType(ctx) != "private" {
-		return `{"creation_state":"not_created","code":"private_conversation_required"}`, nil
+	if ConversationType(ctx) != "private" {
+		return reject("private_conversation_required")
 	}
 	owner, ok := ConversationID(ctx)
 	if !ok || owner <= 0 {
-		return `{"creation_state":"not_created","code":"owner_unavailable"}`, nil
+		return reject("owner_unavailable")
+	}
+	request := migration.Request{ServerType: parsed.ServerType, ServerName: parsed.ServerName, Locations: parsed.Locations}
+	if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled {
+		create, ok := ctx.Value(scheduledMigrationKey{}).(func(context.Context, migration.Request, string) migration.OneShotResult)
+		if !ok {
+			return reject("capability_unavailable")
+		}
+		return encodeMigrationToolResult(create(ctx, request, ""))
 	}
 	if operations.Create == nil {
-		return `{"creation_state":"not_created","code":"capability_unavailable"}`, nil
+		return reject("capability_unavailable")
 	}
-	return encodeMigrationToolResult(operations.Create(ctx, migration.Request{ServerType: parsed.ServerType, Locations: parsed.Locations}, owner))
+	return encodeMigrationToolResult(operations.Create(ctx, request, owner))
 }
 
 func parseMigrationToolArguments(arguments string) (migrationToolArguments, error) {
