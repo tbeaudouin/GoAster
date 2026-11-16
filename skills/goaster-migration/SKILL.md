@@ -1,5 +1,31 @@
 # GoAster central migration
 
+## Scope and first response
+
+This bundled skill supports only creating one **new Hetzner Cloud destination**
+through the existing source-side `goaster_migration` workflow and its
+GoAsterWeb counterpart. The destination must be newly created by that
+workflow; a pre-existing Hetzner server or a destination at any other provider
+is outside scope. This restriction concerns the destination; discovering the
+source provider is not a prerequisite.
+
+For a request to start a new migration, establish the requested new Hetzner
+server type/size and optional locations. If the request is ambiguous, ask for
+the requested type/size and any location preference; no location preference
+is valid and means any eligible location. These questions do not apply to
+status or stop requests for an existing monitor. Never offer an existing-server
+versus new-server choice or ask for an existing destination's IP or SSH
+credentials. If the user wants a pre-existing or non-Hetzner destination,
+politely explain that this bundled skill cannot do it and that they must design
+their own separate skill. Do not attempt a manual SSH fallback or adapt this
+workflow.
+
+Before any billable work, present indicative pricing when available and obtain
+explicit approval in a private conversation for the exact type, location
+policy, estimate/currency (or pricing unavailability), and one create. A public
+estimate is informational, not a quote or price cap; provider charges are
+uncapped. Do not start billable work without that approval.
+
 Migration execution and scheduler resumption are enabled. Ordinary explicit approval in a private conversation is required before a billable operation; there is no separate approval record.
 
 Enabled means enabled in this build; it does not establish which versions are
