@@ -461,6 +461,42 @@ func TestAcceptedUnknownDoesNotBlockAfterLaterNotCreated(t *testing.T) {
 	}
 }
 
+func TestEqualNewestMigrationAttemptsFailClosedWithoutIDTieBreak(t *testing.T) {
+	jobs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const createdAt int64 = 123
+	for _, id := range []string{"migration-z-attempt", "migration-a-attempt"} {
+		message, messageErr := schedulerMessage(Request{ServerType: "cx22", JobID: id, AttemptCreatedAt: createdAt}, 42)
+		if messageErr != nil {
+			t.Fatal(messageErr)
+		}
+		if _, addErr := jobs.Add(scheduler.Job{ID: id, Kind: scheduler.ScheduleEvery, EverySeconds: MonitorIntervalSeconds, Message: message}); addErr != nil {
+			t.Fatal(addErr)
+		}
+	}
+
+	history, inspectErr := inspectMigrationHistory(jobs.List(), Options{})
+	if inspectErr == nil || !errors.Is(inspectErr, ErrPersistedStateInvalid) || history.Failure.Job.ID != "" {
+		t.Fatalf("equal newest attempts were not rejected without selecting an ID: history=%+v err=%v", history, inspectErr)
+	}
+	if newerMigrationAttempt(
+		migrationAttempt{Job: scheduler.Job{ID: "migration-z-attempt"}, CreatedAt: createdAt},
+		migrationAttempt{Job: scheduler.Job{ID: "migration-a-attempt"}, CreatedAt: createdAt},
+	) || newerMigrationAttempt(
+		migrationAttempt{Job: scheduler.Job{ID: "migration-a-attempt"}, CreatedAt: createdAt},
+		migrationAttempt{Job: scheduler.Job{ID: "migration-z-attempt"}, CreatedAt: createdAt},
+	) {
+		t.Fatal("equal creation timestamps used a monitor ID tie-break")
+	}
+
+	result, startErr := StartMonitor(t.Context(), Request{ServerType: "cx22"}, Options{}, jobs)
+	if !errors.Is(startErr, ErrPersistedStateInvalid) || result.Status != resultManualReview || result.MonitorID != "" || len(jobs.List()) != 2 {
+		t.Fatalf("equal newest attempts did not fail closed: result=%+v err=%v jobs=%d", result, startErr, len(jobs.List()))
+	}
+}
+
 func TestDispatchMarkerMakesStatusAndStopUncertain(t *testing.T) {
 	fixture := newMachineFixture(t)
 	jobs, options := retryTestOptions(t, fixture, filepath.Join(t.TempDir(), "jobs.json"), t.TempDir())

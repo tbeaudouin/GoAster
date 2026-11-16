@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"goaster/internal/diagnostics"
 	"goaster/internal/scheduler"
 )
 
@@ -204,5 +206,42 @@ func TestStatusWithoutIDDoesNotCrossPairedOwner(t *testing.T) {
 	status, err := MigrationStatusWithOptions("", jbs, options)
 	if !errors.Is(err, ErrMonitorNotFound) || status.MonitorID != "" || status.Migration.MonitorID != "" {
 		t.Fatalf("cross-owner status without ID = %+v, %v", status, err)
+	}
+}
+
+func TestStatusHistoryFailureRetainsValidMonitorIDInResultAndLog(t *testing.T) {
+	const monitorID = "migration-history-error"
+	jbs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jbs.Add(scheduler.Job{
+		ID:           monitorID,
+		Message:      schedulerMessagePrefix + `{"private":"history-secret"}`,
+		Kind:         scheduler.ScheduleEvery,
+		EverySeconds: MonitorIntervalSeconds,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	restore := diagnostics.SetOutput(&output)
+	defer restore()
+	status, err := MigrationStatusWithOptions("", jbs, Options{})
+	if !errors.Is(err, ErrPersistedStateInvalid) {
+		t.Fatalf("history failure error = %v", err)
+	}
+	if status.MonitorID != monitorID || status.Migration.MonitorID != monitorID || status.Migration.Diagnostic.MonitorID != monitorID || status.Diagnostic.MonitorID != monitorID {
+		t.Fatalf("history failure monitor ID was not retained: %+v", status)
+	}
+	if status.Migration.Status != resultManualReview || status.Migration.Diagnostic.Code != codePersistedStateInvalid {
+		t.Fatalf("history failure result = %+v", status.Migration)
+	}
+	log := output.String()
+	if !strings.Contains(log, `monitor_id="`+monitorID+`"`) {
+		t.Fatalf("history failure log omitted monitor ID: %q", log)
+	}
+	if strings.Contains(log, "history-secret") {
+		t.Fatalf("history failure log leaked scheduler content: %q", log)
 	}
 }

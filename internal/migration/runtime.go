@@ -95,7 +95,30 @@ func newerMigrationAttempt(candidate, current migrationAttempt) bool {
 		}
 		return candidate.CreatedAt > current.CreatedAt
 	}
-	return candidate.Job.ID > current.Job.ID
+	return false
+}
+
+func ambiguousNewestMigrationAttempts(attempts []migrationAttempt) bool {
+	newest := int64(0)
+	count := 0
+	for _, attempt := range attempts {
+		if attempt.CreatedAt <= 0 {
+			continue
+		}
+		if attempt.CreatedAt > newest {
+			newest = attempt.CreatedAt
+			count = 1
+			continue
+		}
+		if attempt.CreatedAt == newest {
+			count++
+		}
+	}
+	return count > 1
+}
+
+func migrationHistoryOrderAmbiguousError() error {
+	return errors.Join(ErrPersistedStateInvalid, errors.New("migration attempt order is ambiguous"))
 }
 
 func nextAttemptCreatedAt(history migrationStartHistory, options Options) int64 {
@@ -218,6 +241,11 @@ func inspectMigrationHistory(jobs []scheduler.Job, options Options) (migrationSt
 			history.HasUnknown = true
 		}
 	}
+	if ambiguousNewestMigrationAttempts(history.Attempts) {
+		history.Failure = migrationAttempt{Diagnostic: historyFailureDiagnostic("")}
+		history.FailureError = migrationHistoryOrderAmbiguousError()
+		return history, history.FailureError
+	}
 	legacyCount := 0
 	for _, attempt := range history.Attempts {
 		if attempt.CreatedAt == 0 {
@@ -225,12 +253,8 @@ func inspectMigrationHistory(jobs []scheduler.Job, options Options) (migrationSt
 		}
 	}
 	if legacyCount > 1 {
-		monitorID := ""
-		if history.HasLatest {
-			monitorID = history.Latest.Job.ID
-		}
-		history.Failure = migrationAttempt{Job: scheduler.Job{ID: monitorID}, Diagnostic: historyFailureDiagnostic(monitorID)}
-		history.FailureError = migrationAttemptHistoryError(monitorID, errors.New("migration attempt order is ambiguous"))
+		history.Failure = migrationAttempt{Diagnostic: historyFailureDiagnostic("")}
+		history.FailureError = migrationHistoryOrderAmbiguousError()
 		return history, history.FailureError
 	}
 	return history, nil
@@ -299,8 +323,11 @@ func startHistoryOutcome(history migrationStartHistory, request Request) (migrat
 
 func historyFailureResult(history migrationStartHistory, err error) (Result, error) {
 	monitorID := history.Failure.Job.ID
+	if !safeJobID(monitorID) {
+		monitorID = ""
+	}
 	diagnostic := history.Failure.Diagnostic
-	if diagnostic.MonitorID == "" {
+	if diagnostic.MonitorID != monitorID {
 		diagnostic = historyFailureDiagnostic(monitorID)
 	}
 	return failureResult(stageStorage, err, Result{Status: resultManualReview, MonitorID: monitorID, ServerType: history.Failure.Scheduled.Request.ServerType, ManualReview: true, Diagnostic: diagnostic})
@@ -955,7 +982,11 @@ func MigrationStatusWithOptions(jobID string, jobs MonitorScheduler, options Opt
 	if jobID == "" {
 		history, historyErr := inspectMigrationHistory(jobs.List(), options)
 		if historyErr != nil {
-			return fail(historyErr, Result{Status: resultManualReview, ManualReview: true})
+			failed, failureErr := historyFailureResult(history, historyErr)
+			result.Migration = failed
+			result.Diagnostic = failed.Diagnostic
+			result.MonitorID = failed.MonitorID
+			return result, failureErr
 		}
 		ownerMonitorID, ownerErr := currentOwnerMigrationMonitorID(history, options)
 		if ownerErr != nil {

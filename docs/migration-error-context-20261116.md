@@ -14,12 +14,18 @@ diagnostic, including the status-error path used by the chat tool.
 Status may omit `job_id`. The local authenticated runtime resolves the latest
 validated retained attempt for the current protected paired recipient using
 existing scheduler/history records. Missing pairing, another recipient,
-corrupt history, and ambiguous history fail closed. No provider or paid call,
-automatic retry, new state store, secret exposure, or create path is involved.
+corrupt history, and ambiguous history fail closed. Recovery ordering uses
+only the nonzero retained creation timestamp; when the two newest valid
+attempts share that timestamp, recovery stops and never uses a monitor ID as a
+tie-break. A valid `history.Failure` monitor ID is retained in an omitted-ID
+status error's top-level result, nested diagnostic, and bounded log; invalid
+IDs are dropped. No provider or paid call, automatic retry, new state store,
+secret exposure, or create path is involved.
 
 Focused offline regressions cover HTTP 422 diagnostics/log metadata, malformed
 envelopes, shared metadata redaction, nested ID recovery, chat status errors,
-omitted-ID recovery, and cross-owner rejection.
+omitted-ID recovery, cross-owner rejection, equal-newest-timestamp fail-closed
+recovery, and history-error monitor-ID retention in the status result/log.
 
 Validation commands and results:
 
@@ -28,6 +34,9 @@ Validation commands and results:
 - `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go test ./... -count=1 -timeout 180s` — passed.
 - `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go test -race -count=1 ./internal/diagnostics ./internal/migration ./internal/chat` — passed.
 - `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go vet ./...` — passed.
+- `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go test ./internal/migration ./internal/chat -count=1 -run 'Test(EqualNewestMigrationAttemptsFailClosedWithoutIDTieBreak|StatusHistoryFailureRetainsValidMonitorIDInResultAndLog|StatusRecoversCurrentMonitorWithoutUserID|StatusWithoutIDDoesNotCrossPairedOwner|MigrationToolStatusErrorUsesNormalizedMonitorID)'` — passed.
+- `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go test -race -count=1 ./internal/migration ./internal/chat ./internal/scheduler` — passed.
+- `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go vet ./internal/migration ./internal/chat ./internal/scheduler` — passed.
 - `bash packaging/test-skill-assets.sh` — passed offline.
 - `git diff --check` — passed.
 
