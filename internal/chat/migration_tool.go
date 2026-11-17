@@ -136,12 +136,12 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		if !ok {
 			return reject("capability_unavailable")
 		}
-		return encodeMigrationToolResult(create(ctx, request, ""))
+		return encodeMigrationToolResult(migration.SanitizeOneShotResult(create(ctx, request, "")))
 	}
 	if operations.Create == nil {
 		return reject("capability_unavailable")
 	}
-	return encodeMigrationToolResult(operations.Create(ctx, request, owner))
+	return encodeMigrationToolResult(migration.SanitizeOneShotResult(operations.Create(ctx, request, owner)))
 }
 
 func parseMigrationToolArguments(arguments string) (migrationToolArguments, error) {

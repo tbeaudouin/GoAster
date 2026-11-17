@@ -154,6 +154,8 @@ var ErrSessionBusy = errors.New("conversation is busy")
 // missing or quarantined conversation can be replaced by an interactive turn.
 var ErrConversationRecovery = errors.New("The saved conversation is missing or invalid and may have been moved aside. Check the saved or quarantined file and whether any actions already completed. Use /clear to start a new conversation.")
 
+var errMigrationDiagnosticsPending = errors.New("pending migration diagnostic evidence requires manual reconciliation before continuing")
+
 // ModelRequestError reports the exact model that returned a provider error.
 // The caller must not retry the request with another model.
 type ModelRequestError struct {
@@ -441,21 +443,23 @@ type conversationSummarizer interface {
 }
 
 type Session struct {
-	mu                    sync.Mutex
-	provider              Provider
-	registry              ModelRegistry
-	chatID                int64
-	active                string
-	history               []ChatMessage
-	summary               string
-	selectedSkills        []selectedSkill
-	skillCheckpointFailed bool
-	recoveryPending       bool
-	store                 *SessionStore
-	storeVersion          [sha256.Size]byte // Expected persisted version for this session.
-	memory                *MemoryStore
-	startupNotice         string
-	contextNotice         string
+	mu                          sync.Mutex
+	provider                    Provider
+	registry                    ModelRegistry
+	chatID                      int64
+	active                      string
+	history                     []ChatMessage
+	summary                     string
+	migrationDiagnostics        []MigrationDiagnostic
+	migrationDiagnosticsPending bool
+	selectedSkills              []selectedSkill
+	skillCheckpointFailed       bool
+	recoveryPending             bool
+	store                       *SessionStore
+	storeVersion                [sha256.Size]byte // Expected persisted version for this session.
+	memory                      *MemoryStore
+	startupNotice               string
+	contextNotice               string
 }
 
 type ToolCallObserver func(name, arguments string)
@@ -595,7 +599,20 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			return "", fatalRequestError(err)
 		}
 		changed := current != s.storeVersion
+		if s.store.hasPendingMigrationDiagnostics() && !s.migrationDiagnosticsPending {
+			if scheduled {
+				return "", errors.Join(ErrSessionBusy, errMigrationDiagnosticsPending)
+			}
+			return "", fatalRequestError(errMigrationDiagnosticsPending)
+		}
 		if changed || (scheduled && current == [sha256.Size]byte{}) {
+			if s.migrationDiagnosticsPending {
+				conflict := errors.Join(errConversationStateChanged, errMigrationDiagnosticsPending)
+				if scheduled {
+					return "", errors.Join(ErrSessionBusy, conflict)
+				}
+				return "", fatalRequestError(conflict)
+			}
 			if !scheduled {
 				return "", fatalRequestError(errConversationStateChanged)
 			}
@@ -615,6 +632,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			} else if changed {
 				s.history = cloneChatMessages(loaded.Messages)
 				s.summary = loaded.Summary
+				s.migrationDiagnostics = cloneMigrationDiagnostics(loaded.MigrationDiagnostics)
 				s.selectedSkills = append([]selectedSkill(nil), loaded.selectedSkills...)
 				s.skillCheckpointFailed = false
 				s.recoveryPending = false
@@ -628,8 +646,11 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		if strings.TrimSpace(message) != "/clear" || len(attachments) != 0 {
 			return "Usage: /clear", nil
 		}
+		if s.migrationDiagnosticsPending {
+			return "", fatalRequestError(errors.Join(errConversationStateChanged, errMigrationDiagnosticsPending))
+		}
 		if s.store != nil {
-			version, err := s.store.saveStateWithVersion("", nil, nil, s.storeVersion, true)
+			version, err := s.store.saveStateWithVersionAndDiagnostics("", nil, nil, s.storeVersion, true, nil, true)
 			if err != nil {
 				return "", fatalRequestError(conversationSaveError{operation: "save cleared conversation state", cause: err})
 			}
@@ -637,6 +658,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		}
 		s.history = nil
 		s.summary = ""
+		s.migrationDiagnostics = nil
 		s.selectedSkills = nil
 		s.skillCheckpointFailed = false
 		s.recoveryPending = false
@@ -743,6 +765,9 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 					return "", fatalRequestError(conversationSaveError{operation: "save conversation state", cause: saveErr})
 				}
 				s.storeVersion = version
+				if s.migrationDiagnosticsPending {
+					s.migrationDiagnosticsPending = false
+				}
 			}
 			s.summary, s.history = summary, previousTurns
 		} else {
@@ -762,6 +787,12 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		budget -= estimateMessageTokens(modelNotice)
 		maxMessages--
 	}
+	diagnosticNotice := migrationDiagnosticsMessage(s.migrationDiagnostics)
+	modelDiagnosticNotice := ChatMessage{Role: "system", Content: diagnosticNotice}
+	if diagnosticNotice != "" {
+		budget -= estimateMessageTokens(modelDiagnosticNotice)
+		maxMessages--
+	}
 	bounded, budgetTrimmed := boundSessionMessages(summary, candidate, trimmed, budget, maxMessages)
 	trimmed = trimmed || budgetTrimmed
 	if trimmed {
@@ -771,6 +802,9 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	requestHistory := make([]ChatMessage, 0, len(bounded)+2)
 	if summary != "" {
 		requestHistory = append(requestHistory, summaryMessage(summary))
+	}
+	if diagnosticNotice != "" {
+		requestHistory = append(requestHistory, modelDiagnosticNotice)
 	}
 	if trimmed {
 		requestHistory = append(requestHistory, ChatMessage{Role: "system", Content: contextTrimNotice})
@@ -821,6 +855,9 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 					return fatalRequestError(skillRecovery(fmt.Errorf("save selected skill: %w", err), skillSaveMessage))
 				}
 				s.storeVersion = version
+				if s.migrationDiagnosticsPending {
+					s.migrationDiagnosticsPending = false
+				}
 			}
 			s.selectedSkills = selected
 			if len(selected) > maxSessionSkills {
@@ -833,6 +870,39 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	if scheduled && tracksTools {
 		replyContext = context.WithValue(replyContext, toolActionStartedKey{}, func() { actionStarted = true })
 	}
+	turnMigrationDiagnostics := cloneMigrationDiagnostics(s.migrationDiagnostics)
+	checkpointMigrationDiagnostics := func(values []MigrationDiagnostic) error {
+		safe, _ := normalizeMigrationDiagnostics(values)
+		s.migrationDiagnostics = cloneMigrationDiagnostics(safe)
+		if s.store != nil {
+			s.migrationDiagnosticsPending = true
+			s.store.setPendingMigrationDiagnostics(safe)
+			version, err := s.store.saveStateWithVersionAndDiagnostics(s.summary, s.history, s.selectedSkills, s.storeVersion, true, safe, true)
+			if err != nil {
+				return conversationSaveError{operation: "save migration diagnostic checkpoint", cause: err}
+			}
+			s.storeVersion = version
+			s.migrationDiagnosticsPending = false
+		} else {
+			s.migrationDiagnosticsPending = false
+		}
+		return nil
+	}
+	replyContext = WithMigrationDiagnosticObserver(replyContext, func(output string) error {
+		diagnostic, ok := migrationDiagnosticFromToolOutput(output)
+		if !ok {
+			return nil
+		}
+		next := appendMigrationDiagnostic(turnMigrationDiagnostics, diagnostic)
+		if migrationDiagnosticsEqual(turnMigrationDiagnostics, next) {
+			return nil
+		}
+		turnMigrationDiagnostics = cloneMigrationDiagnostics(next)
+		if err := checkpointMigrationDiagnostics(next); err != nil {
+			return err
+		}
+		return nil
+	})
 	reply, err = s.replyWithHistory(replyContext, requestMessage, requestHistory)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -898,7 +968,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		s.contextNotice = contextTrimNotice
 	}
 	if s.store != nil {
-		version, saveErr := s.store.saveStateWithVersion(summary, completed, s.selectedSkills, s.storeVersion, true)
+		version, saveErr := s.store.saveStateWithVersionAndDiagnostics(summary, completed, s.selectedSkills, s.storeVersion, true, turnMigrationDiagnostics, true)
 		if saveErr != nil {
 			return "", fatalRequestError(conversationSaveError{operation: "save conversation state", cause: saveErr})
 		}
@@ -906,6 +976,8 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	}
 	s.history = completed
 	s.summary = summary
+	s.migrationDiagnostics = cloneMigrationDiagnostics(turnMigrationDiagnostics)
+	s.migrationDiagnosticsPending = false
 	s.recoveryPending = false
 	return historyReply, nil
 }

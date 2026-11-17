@@ -89,27 +89,44 @@ func (err conversationLockBusyError) Is(target error) bool { return target == er
 type SessionStore struct {
 	Path string
 
-	mu             sync.Mutex
-	version        [sha256.Size]byte // Zero means the file was absent at the last load.
-	selectedSkills []selectedSkill
-	syncDirectory  func(string) error // Optional per-store seam for filesystem failures.
+	mu                          sync.Mutex
+	version                     [sha256.Size]byte // Zero means the file was absent at the last load.
+	selectedSkills              []selectedSkill
+	migrationDiagnostics        []MigrationDiagnostic
+	migrationDiagnosticsPending bool
+	syncDirectory               func(string) error // Optional per-store seam for filesystem failures.
+}
+
+func (s *SessionStore) setPendingMigrationDiagnostics(values []MigrationDiagnostic) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.migrationDiagnostics = cloneMigrationDiagnostics(values)
+	s.migrationDiagnosticsPending = true
+}
+
+func (s *SessionStore) hasPendingMigrationDiagnostics() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.migrationDiagnosticsPending
 }
 
 // SessionLoadResult describes a safely loaded conversation. Recovered means
 // an invalid file was moved aside without exposing its contents.
 type SessionLoadResult struct {
-	Messages       []ChatMessage
-	Summary        string
-	Recovered      bool
-	Trimmed        bool
-	selectedSkills []selectedSkill
+	Messages             []ChatMessage
+	Summary              string
+	MigrationDiagnostics []MigrationDiagnostic
+	Recovered            bool
+	Trimmed              bool
+	selectedSkills       []selectedSkill
 }
 
 type sessionFile struct {
-	Version        int             `json:"version"`
-	Summary        string          `json:"summary,omitempty"`
-	Messages       []ChatMessage   `json:"messages"`
-	SelectedSkills []selectedSkill `json:"selected_skills"`
+	Version              int                   `json:"version"`
+	Summary              string                `json:"summary,omitempty"`
+	Messages             []ChatMessage         `json:"messages"`
+	SelectedSkills       []selectedSkill       `json:"selected_skills"`
+	MigrationDiagnostics []MigrationDiagnostic `json:"migration_diagnostics,omitempty"`
 }
 
 // NewSessionStore locates the default conversation file at
@@ -172,6 +189,7 @@ func NewSessionWithStoreAndMemory(config Config, provider Provider, store *Sessi
 	session.store = store
 	session.history = cloneChatMessages(loaded.Messages)
 	session.summary = loaded.Summary
+	session.migrationDiagnostics = cloneMigrationDiagnostics(loaded.MigrationDiagnostics)
 	session.selectedSkills = append([]selectedSkill(nil), loaded.selectedSkills...)
 	session.recoveryPending = loaded.Recovered
 	if loaded.Recovered {
@@ -215,10 +233,14 @@ func (s *SessionStore) loadStateUnderTurnLock(version *[sha256.Size]byte) (loade
 			*version = s.version
 		}
 	}()
+	if s.migrationDiagnosticsPending {
+		return SessionLoadResult{}, errMigrationDiagnosticsPending
+	}
 	info, err := os.Lstat(s.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		s.version = [sha256.Size]byte{}
 		s.selectedSkills = nil
+		s.migrationDiagnostics = nil
 		// A quarantine or missing-file marker without a replacement means no
 		// interactive turn has acknowledged the loss, even after a restart.
 		entries, readErr := os.ReadDir(filepath.Dir(s.Path))
@@ -282,14 +304,17 @@ func (s *SessionStore) loadStateUnderTurnLock(version *[sha256.Size]byte) (loade
 		return s.recoverInvalid()
 	}
 	summary, summaryTrimmed := normalizeSummary(disk.Summary)
+	migrationDiagnostics, diagnosticsTrimmed := normalizeMigrationDiagnostics(disk.MigrationDiagnostics)
 	bounded, budgetTrimmed := boundSessionMessages(summary, messages, false, maxContextTokens, maxSessionMessages)
 	s.version = sha256.Sum256(data)
 	s.selectedSkills = append([]selectedSkill(nil), disk.SelectedSkills...)
+	s.migrationDiagnostics = cloneMigrationDiagnostics(migrationDiagnostics)
 	return SessionLoadResult{
-		Messages:       bounded,
-		Summary:        summary,
-		Trimmed:        normalized || summaryTrimmed || budgetTrimmed,
-		selectedSkills: append([]selectedSkill(nil), s.selectedSkills...),
+		Messages:             bounded,
+		Summary:              summary,
+		MigrationDiagnostics: cloneMigrationDiagnostics(migrationDiagnostics),
+		Trimmed:              normalized || summaryTrimmed || diagnosticsTrimmed || budgetTrimmed,
+		selectedSkills:       append([]selectedSkill(nil), s.selectedSkills...),
 	}, nil
 }
 
@@ -317,6 +342,10 @@ func (s *SessionStore) saveState(summary string, messages []ChatMessage) error {
 // Sessions pass their expected token by value so another user of the same
 // store cannot advance their expected version.
 func (s *SessionStore) saveStateWithVersion(summary string, messages []ChatMessage, selected []selectedSkill, expectedVersion [sha256.Size]byte, hasExpectedVersion bool) ([sha256.Size]byte, error) {
+	return s.saveStateWithVersionAndDiagnostics(summary, messages, selected, expectedVersion, hasExpectedVersion, nil, false)
+}
+
+func (s *SessionStore) saveStateWithVersionAndDiagnostics(summary string, messages []ChatMessage, selected []selectedSkill, expectedVersion [sha256.Size]byte, hasExpectedVersion bool, migrationDiagnostics []MigrationDiagnostic, replaceMigrationDiagnostics bool) ([sha256.Size]byte, error) {
 	if err := s.validatePath(); err != nil {
 		return [sha256.Size]byte{}, err
 	}
@@ -351,7 +380,22 @@ func (s *SessionStore) saveStateWithVersion(summary string, messages []ChatMessa
 	if !validSelectedSkills(selected) {
 		return [sha256.Size]byte{}, fmt.Errorf("conversation contains invalid skill selections")
 	}
-	data, err := encodeSessionFile(summary, bounded, selected)
+	if s.migrationDiagnosticsPending {
+		pending := cloneMigrationDiagnostics(s.migrationDiagnostics)
+		if replaceMigrationDiagnostics {
+			requested, _ := normalizeMigrationDiagnostics(migrationDiagnostics)
+			if !migrationDiagnosticsEqual(requested, pending) {
+				return [sha256.Size]byte{}, errMigrationDiagnosticsPending
+			}
+			migrationDiagnostics = requested
+		} else {
+			migrationDiagnostics = pending
+		}
+	} else if !replaceMigrationDiagnostics {
+		migrationDiagnostics = s.migrationDiagnostics
+	}
+	safeMigrationDiagnostics, _ := normalizeMigrationDiagnostics(migrationDiagnostics)
+	data, err := encodeSessionFile(summary, bounded, selected, safeMigrationDiagnostics)
 	if err != nil {
 		return [sha256.Size]byte{}, fmt.Errorf("encode conversation state: %w", err)
 	}
@@ -399,6 +443,8 @@ func (s *SessionStore) saveStateWithVersion(summary string, messages []ChatMessa
 	}
 	s.version = sha256.Sum256(data)
 	s.selectedSkills = append([]selectedSkill(nil), selected...)
+	s.migrationDiagnostics = cloneMigrationDiagnostics(safeMigrationDiagnostics)
+	s.migrationDiagnosticsPending = false
 	return s.version, nil
 }
 
@@ -425,6 +471,8 @@ func (s *SessionStore) recoverInvalid() (SessionLoadResult, error) {
 	}
 	s.version = [sha256.Size]byte{}
 	s.selectedSkills = nil
+	s.migrationDiagnostics = nil
+	s.migrationDiagnosticsPending = false
 	return SessionLoadResult{Recovered: true}, nil
 }
 
@@ -464,9 +512,10 @@ func decodeSessionFile(data []byte) (sessionFile, error) {
 	return disk, nil
 }
 
-func encodeSessionFile(summary string, messages []ChatMessage, selected []selectedSkill) ([]byte, error) {
+func encodeSessionFile(summary string, messages []ChatMessage, selected []selectedSkill, migrationDiagnostics []MigrationDiagnostic) ([]byte, error) {
 	selections := append(make([]selectedSkill, 0, len(selected)), selected...)
-	data, err := json.MarshalIndent(sessionFile{Version: sessionFormatVersion, Summary: summary, Messages: messages, SelectedSkills: selections}, "", "  ")
+	diagnostics := cloneMigrationDiagnostics(migrationDiagnostics)
+	data, err := json.MarshalIndent(sessionFile{Version: sessionFormatVersion, Summary: summary, Messages: messages, SelectedSkills: selections, MigrationDiagnostics: diagnostics}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

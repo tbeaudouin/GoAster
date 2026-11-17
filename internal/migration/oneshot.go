@@ -17,19 +17,28 @@ import (
 
 // OneShotResult contains only information safe to return to the model.
 type OneShotResult struct {
-	CreationState string `json:"creation_state"`
-	Code          string `json:"code,omitempty"`
-	Stage         string `json:"stage,omitempty"`
-	HTTPStatus    int    `json:"http_status,omitempty"`
-	ProviderCode  string `json:"provider_code,omitempty"`
-	ServerName    string `json:"server_name,omitempty"`
-	ServerID      int64  `json:"server_id,omitempty"`
-	ServerLabel   string `json:"server_label,omitempty"`
-	IP            string `json:"ip,omitempty"`
-	Location      string `json:"location,omitempty"`
-	Expires       int64  `json:"expires,omitempty"`
-	Attempt       string `json:"attempt,omitempty"`
-	Handoff       string `json:"handoff,omitempty"`
+	CreationState   string          `json:"creation_state"`
+	Code            string          `json:"code,omitempty"`
+	Stage           string          `json:"stage,omitempty"`
+	HTTPStatus      int             `json:"http_status,omitempty"`
+	ProviderCode    string          `json:"provider_code,omitempty"`
+	ProviderMessage string          `json:"provider_message,omitempty"`
+	ProviderFields  []ProviderField `json:"provider_fields,omitempty"`
+	ServerName      string          `json:"server_name,omitempty"`
+	ServerID        int64           `json:"server_id,omitempty"`
+	ServerLabel     string          `json:"server_label,omitempty"`
+	IP              string          `json:"ip,omitempty"`
+	Location        string          `json:"location,omitempty"`
+	Expires         int64           `json:"expires,omitempty"`
+	Attempt         string          `json:"attempt,omitempty"`
+	Handoff         string          `json:"handoff,omitempty"`
+}
+
+// ProviderField is the bounded, model-safe form of one provider validation
+// field. Only fixed allowlisted field names and messages survive parsing.
+type ProviderField struct {
+	Field    string   `json:"field"`
+	Messages []string `json:"messages"`
 }
 
 type oneShotResponse struct {
@@ -42,10 +51,12 @@ type oneShotResponse struct {
 	Expires       int64  `json:"expires"`
 	SetupURL      string `json:"setup_url"`
 	Error         struct {
-		Code         string `json:"code"`
-		Stage        string `json:"stage"`
-		HTTPStatus   int    `json:"http_status"`
-		ProviderCode string `json:"provider_code"`
+		Code            string          `json:"code"`
+		Stage           string          `json:"stage"`
+		HTTPStatus      int             `json:"http_status"`
+		ProviderCode    string          `json:"provider_code"`
+		ProviderMessage string          `json:"provider_message"`
+		ProviderFields  []ProviderField `json:"provider_fields"`
 	} `json:"error"`
 }
 
@@ -59,6 +70,171 @@ func safeCreateField(s string) string {
 		}
 	}
 	return s
+}
+
+const (
+	maxProviderFields        = 8
+	maxProviderFieldMessages = 8
+)
+
+func safeProviderFields(fields []ProviderField) []ProviderField {
+	if len(fields) > maxProviderFields {
+		fields = fields[:maxProviderFields]
+	}
+	safe := make([]ProviderField, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if len(field.Messages) > maxProviderFieldMessages {
+			continue
+		}
+		detail := diagnostics.MigrationProviderFieldValue(field.Field, field.Messages)
+		if detail == "" {
+			continue
+		}
+		if _, exists := seen[detail]; exists {
+			continue
+		}
+		seen[detail] = struct{}{}
+		parts := strings.SplitN(detail, "=", 2)
+		messages := strings.Split(parts[1], "|")
+		safe = append(safe, ProviderField{Field: parts[0], Messages: messages})
+	}
+	return safe
+}
+
+func scrubProviderFields(fields []ProviderField, secrets ...string) []ProviderField {
+	clean := make([]ProviderField, 0, len(fields))
+	for _, field := range fields {
+		private := false
+		for _, secret := range secrets {
+			if secret != "" && (strings.Contains(field.Field, secret) || anyStringContains(field.Messages, secret)) {
+				private = true
+				break
+			}
+		}
+		if !private {
+			clean = append(clean, field)
+		}
+	}
+	return clean
+}
+
+func anyStringContains(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func oneShotTimeout(result OneShotResult) bool {
+	return result.Code == "provider_timeout" || result.Code == "timeout" || result.ProviderCode == "timeout" || result.ProviderCode == "request_timeout"
+}
+
+// normalizeOneShotCreationState keeps an explicit service outcome authoritative
+// when error metadata is contradictory. A confirmed creation wins over a
+// timeout, and an explicit uncertainty is never weakened into not_created.
+// A timeout can only turn an explicit not-created state into uncertainty;
+// missing or unrecognized states remain unknown regardless of error metadata.
+func normalizeOneShotCreationState(result OneShotResult) string {
+	state := diagnostics.MigrationCreationState(result.CreationState)
+	switch state {
+	case "created", "unknown":
+		return state
+	case "not_created":
+		if oneShotTimeout(result) {
+			return "unknown"
+		}
+		return "not_created"
+	default:
+		return "unknown"
+	}
+}
+
+// SanitizeOneShotResult applies the same fixed bounds and allowlists to every
+// model-facing result, including results supplied by test or runtime seams.
+// It never copies arbitrary provider text or private handoff material.
+func SanitizeOneShotResult(result OneShotResult) OneShotResult {
+	result.Code = diagnostics.MigrationCode(result.Code)
+	result.Stage = diagnostics.MigrationStage(result.Stage)
+	if result.HTTPStatus < 100 || result.HTTPStatus > 599 {
+		result.HTTPStatus = 0
+	}
+	result.ProviderCode = diagnostics.BackendValue(result.ProviderCode)
+	result.ProviderMessage = diagnostics.MigrationProviderMessage(result.ProviderMessage)
+	result.ProviderFields = safeProviderFields(result.ProviderFields)
+	result.CreationState = normalizeOneShotCreationState(result)
+	if !ValidMigrationServerName(result.ServerName) {
+		result.ServerName = ""
+	}
+	result.ServerLabel = safeCreateField(result.ServerLabel)
+	result.IP = safeCreateField(result.IP)
+	if net.ParseIP(result.IP) == nil {
+		result.IP = ""
+	}
+	result.Location = safeCreateField(result.Location)
+	result.Attempt = safeCreateField(result.Attempt)
+	if result.ServerID < 0 {
+		result.ServerID = 0
+	}
+	if result.Expires < 0 || result.Expires > 4102444800 {
+		result.Expires = 0
+	}
+	switch result.Handoff {
+	case "delivered", "failed":
+	default:
+		result.Handoff = ""
+	}
+	if result.Code == "response_unusable" {
+		result.Handoff = ""
+	}
+	return result
+}
+
+func unusableOneShotResponse(result OneShotResult, status int, err error) OneShotResult {
+	result.HTTPStatus = status
+	result = SanitizeOneShotResult(result)
+	if result.CreationState != "created" {
+		result.CreationState = "unknown"
+	}
+	result.Code = "response_unusable"
+	result.Handoff = ""
+	fields := []diagnostics.Field{
+		{Key: "status", Value: fmt.Sprint(status)},
+		{Key: "code", Value: result.Code},
+		{Key: "stage", Value: result.Stage},
+		{Key: "creation_state", Value: result.CreationState},
+	}
+	diagnostics.Error("migration.create", err, fields...)
+	return result
+}
+
+// creationEvidenceFromTopLevel extracts only fields whose meaning can be
+// validated without trusting the error envelope. It intentionally recognizes
+// only an exact created state and a request-matching server label; all other
+// raw response values stay discarded.
+func creationEvidenceFromTopLevel(fields map[string]json.RawMessage, request Request, safeServerName string) OneShotResult {
+	result := OneShotResult{ServerName: safeServerName}
+	if raw, ok := fields["creation_state"]; ok {
+		var state string
+		if json.Unmarshal(raw, &state) == nil && state == "created" {
+			result.CreationState = state
+		}
+	}
+	if raw, ok := fields["server_id"]; ok {
+		var serverID int64
+		if json.Unmarshal(raw, &serverID) == nil && serverID > 0 {
+			result.ServerID = serverID
+		}
+	}
+	if raw, ok := fields["server_label"]; ok {
+		var serverLabel string
+		if json.Unmarshal(raw, &serverLabel) == nil && safeCreateField(serverLabel) == serverLabel && serverLabel == request.ServerName {
+			result.ServerLabel = serverLabel
+		}
+	}
+	return result
 }
 
 // CreateOnce sends one request and never persists or retries secret material.
@@ -136,9 +312,13 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		return fail("unknown", "response_unusable", errors.Join(errors.New("create response unreadable"), err))
 	}
 	defer clear(data)
+	topLevelFields, fieldsErr := decodeUniqueTopLevelFields(data)
+	if fieldsErr != nil {
+		return unusableOneShotResponse(OneShotResult{ServerName: safeServerName}, response.StatusCode, errors.New("invalid create response"))
+	}
 	var decoded oneShotResponse
 	if err := decodeExactJSON(data, &decoded); err != nil {
-		return fail("unknown", "response_unusable", err)
+		return unusableOneShotResponse(creationEvidenceFromTopLevel(topLevelFields, request, safeServerName), response.StatusCode, errors.New("invalid create response"))
 	}
 	result := OneShotResult{CreationState: decoded.CreationState, ServerName: safeServerName, ServerID: decoded.ServerID, ServerLabel: safeCreateField(decoded.ServerLabel), IP: safeCreateField(decoded.IP), Location: safeCreateField(decoded.Location), Expires: decoded.Expires, Attempt: safeCreateField(decoded.Attempt)}
 	// Treat all service-provided labels as untrusted; never return request secrets.
@@ -152,6 +332,9 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	result.IP = scrub(result.IP)
 	result.Location = scrub(result.Location)
 	result.Attempt = scrub(result.Attempt)
+	if result.ServerLabel != request.ServerName {
+		result.ServerLabel = ""
+	}
 	if net.ParseIP(result.IP) == nil {
 		result.IP = ""
 	}
@@ -162,23 +345,27 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		result.Expires = 0
 	}
 	if response.StatusCode != http.StatusCreated {
-		if decoded.CreationState != "not_created" && decoded.CreationState != "unknown" && decoded.CreationState != "created" || decoded.Error.HTTPStatus != response.StatusCode || safeCreateField(decoded.Error.Code) == "" || safeCreateField(decoded.Error.Stage) == "" {
-			return fail("unknown", "response_unusable", errors.New("invalid create error response"))
-		}
 		result.Code = diagnostics.MigrationCode(scrub(decoded.Error.Code))
-		if scrub(decoded.Error.Code) == "no_capacity" {
-			result.Code = "no_capacity"
-		}
 		result.Stage = diagnostics.MigrationStage(scrub(decoded.Error.Stage))
 		result.HTTPStatus = response.StatusCode
 		result.ProviderCode = diagnostics.BackendValue(scrub(decoded.Error.ProviderCode))
+		result.ProviderMessage = diagnostics.MigrationProviderMessage(scrub(decoded.Error.ProviderMessage))
+		result.ProviderFields = scrubProviderFields(safeProviderFields(decoded.Error.ProviderFields), secret, token, pub)
+		result = SanitizeOneShotResult(result)
+		if diagnostics.MigrationCreationState(decoded.CreationState) == "" || decoded.Error.HTTPStatus != response.StatusCode || result.Code == "" || result.Stage == "" {
+			return unusableOneShotResponse(result, response.StatusCode, errors.New("invalid create error response"))
+		}
 		if result.Code == "target_exists" || result.Code == "provider_lookup_failure" {
 			if result.CreationState != "not_created" || result.Stage != "provider" || result.Code == "target_exists" && (response.StatusCode != http.StatusConflict || result.ServerID <= 0 || result.ServerLabel == "" || result.ServerLabel != request.ServerName) {
-				return fail("unknown", "response_unusable", errors.New("invalid exact-name lookup response"))
+				return unusableOneShotResponse(result, response.StatusCode, errors.New("invalid exact-name lookup response"))
 			}
 		}
-		diagnostics.Error("migration.create", errors.New("service returned create error"), diagnostics.Field{Key: "status", Value: fmt.Sprint(response.StatusCode)}, diagnostics.Field{Key: "code", Value: result.Code}, diagnostics.Field{Key: "stage", Value: result.Stage}, diagnostics.Field{Key: "creation_state", Value: result.CreationState}, diagnostics.Field{Key: "backend_code", Value: result.ProviderCode})
-		return result
+		logFields := []diagnostics.Field{{Key: "status", Value: fmt.Sprint(response.StatusCode)}, {Key: "code", Value: result.Code}, {Key: "stage", Value: result.Stage}, {Key: "creation_state", Value: result.CreationState}, {Key: "backend_code", Value: result.ProviderCode}, {Key: "provider_message", Value: result.ProviderMessage}}
+		for _, field := range result.ProviderFields {
+			logFields = append(logFields, diagnostics.Field{Key: "provider_field", Value: diagnostics.MigrationProviderFieldValue(field.Field, field.Messages)})
+		}
+		diagnostics.Error("migration.create", errors.New("service returned create error"), logFields...)
+		return SanitizeOneShotResult(result)
 	}
 	setup, parseErr := url.Parse(decoded.SetupURL)
 	origin, originErr := url.Parse(options.WebOrigin)

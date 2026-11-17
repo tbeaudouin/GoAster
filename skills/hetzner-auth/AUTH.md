@@ -19,11 +19,21 @@ parsed JSON to safe fields, and discard the raw body. Do not shell-source the
 env file or put the token in a curl argument. Never expose raw provider
 responses or errors. Follow the official [Cloud API documentation](https://docs.hetzner.cloud/reference/cloud).
 
+For a current read-only availability clarification, use only
+`GET /v1/server_types?name=<url-encoded-exact-type>`, match the requested
+server type in `server_types[]`, and inspect the requested type's
+`locations[].available` values. Do not use the retired generic
+`GET /v1/datacenters` endpoint (removed 2026-10-01), shell around the API, or
+invent a migration availability tool or endpoint. The result is a snapshot,
+not a reservation or capacity guarantee; never expose the token or
+Authorization header in chat, model context, logs, or command output.
+
 Use authenticated API requests for actual provider availability and creation.
 A safe read-only request can answer a needed clarification, but API pricing is
 not a required pricing, discovery, or preapproval gate. Public Hetzner Cloud
 pages are the source for indicative catalogue and rough public price
-information. Authentication does not prove project identity; do not invent a
+information; public rough prices are informational and do not guarantee
+capacity. Authentication does not prove project identity; do not invent a
 project metadata check. If authentication fails, stop auth-dependent work.
 Emit one bounded ERROR diagnostic with safe operation and status context at
 runtime failure boundaries, as repository rules require.

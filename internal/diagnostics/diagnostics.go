@@ -139,6 +139,10 @@ func Error(operation string, err error, fields ...Field) {
 			value = knownDescription(field.Value)
 		case "backend_message":
 			value = RemoteMessage(field.Value)
+		case "provider_message":
+			value = MigrationProviderMessage(field.Value)
+		case "provider_field":
+			value = MigrationProviderFieldDetail(field.Value)
 		case "backend_type":
 			value = BackendValue(field.Value)
 		case "backend_code":
@@ -190,7 +194,7 @@ func MigrationStage(value string) string {
 func MigrationCode(value string) string {
 	switch value {
 	case "credentials_unavailable", "key_generation_failed", "configuration_invalid", "request_invalid", "handoff_failed", "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable",
-		"no_capacity", "target_exists", "provider_lookup_failure", "response_unavailable", "response_unusable", "invalid_arguments", "capability_unavailable", "missing_hcloud_token", "credential_storage_unreadable", "invalid_hcloud_token", "protected_storage_failure", "recipient_unavailable", "recipient_changed", "handoff_failure", "cancelled", "timeout", "dns_failure", "tls_failure", "transport_failure", "invalid_response", "web_auth_rejected", "web_http_error", "provider_auth_rejected", "provider_http_error", "upstream_unknown", "created", "created_delivery_failed", "manual_review", "unknown_failure":
+		"no_capacity", "target_exists", "provider_lookup_failure", "invalid_input", "response_unavailable", "response_unusable", "invalid_arguments", "capability_unavailable", "private_conversation_required", "owner_unavailable", "request_cancelled", "already_attempted", "claim_failed", "missing_hcloud_token", "credential_storage_unreadable", "invalid_hcloud_token", "protected_storage_failure", "recipient_unavailable", "recipient_changed", "handoff_failure", "cancelled", "timeout", "dns_failure", "tls_failure", "transport_failure", "invalid_response", "web_auth_rejected", "web_http_error", "provider_auth_rejected", "provider_http_error", "upstream_unknown", "created", "created_delivery_failed", "manual_review", "unknown_failure":
 		return value
 	default:
 		return ""
@@ -206,6 +210,107 @@ func MigrationCreationState(value string) string {
 	default:
 		return ""
 	}
+}
+
+// MigrationProviderMessage retains only fixed, safe provider explanations
+// supplied by the migration Web contract. Arbitrary provider text is never
+// copied into a model result, persisted diagnostic, or runtime log.
+func MigrationProviderMessage(value string) string {
+	if len(value) > 160 {
+		return ""
+	}
+	switch value {
+	case "invalid", "invalid input", "invalid_input", "invalid request",
+		"invalid server type", "invalid location", "validation failed", "provider rejected request",
+		"server type not found", "server type is invalid", "server type is not available",
+		"server type is unavailable", "server type unavailable", "location not found", "location is invalid",
+		"location is not available", "location unavailable", "no compatible location", "no compatible locations",
+		"no capacity", "capacity unavailable", "name already exists",
+		"resource not found", "resource unavailable", "unauthorized", "forbidden",
+		"rate limit exceeded", "request timed out", "internal server error",
+		"the requested server type is not available", "the requested location is not available",
+		"the requested server type or location is invalid",
+		"the requested server type is not available in the requested location",
+		"the requested server type is not available in the requested locations",
+		"the requested location is not available for the requested server type",
+		"the requested server type is not available in any requested location",
+		"the requested location is not available for the server type":
+		return value
+	default:
+		return ""
+	}
+}
+
+// MigrationProviderFieldName retains the small fixed set of request fields
+// whose provider validation details are safe and useful to expose.
+func MigrationProviderFieldName(value string) string {
+	if len(value) > 64 {
+		return ""
+	}
+	switch value {
+	case "server_type", "server_name", "name", "location", "locations", "image", "ssh_keys", "login_public_key", "datacenter", "public_net", "server":
+		return value
+	default:
+		return ""
+	}
+}
+
+// MigrationProviderFieldMessage retains fixed provider validation messages.
+func MigrationProviderFieldMessage(value string) string {
+	if len(value) > 160 {
+		return ""
+	}
+	switch value {
+	case "required", "is required", "invalid", "is invalid", "unavailable", "is unavailable", "not available", "is not available", "not found", "does not exist", "already exists",
+		"must not be empty", "must be a valid server type", "must be a valid location",
+		"must be available", "not available in this location", "not available in the requested location", "not available in the requested locations",
+		"cannot be used with the selected server type", "has an invalid format", "is too long",
+		"must be unique", "must contain at least one item", "must contain at most 64 items",
+		"must be a string", "must be an array", "must be a boolean", "is not supported":
+		return value
+	default:
+		return ""
+	}
+}
+
+// MigrationProviderFieldValue creates a bounded safe representation for one
+// provider field and its fixed messages. The representation is used only for
+// diagnostics; it is not a copy of the provider response.
+func MigrationProviderFieldValue(field string, messages []string) string {
+	safeField := MigrationProviderFieldName(field)
+	if safeField == "" || len(messages) == 0 || len(messages) > 8 {
+		return ""
+	}
+	safeMessages := make([]string, 0, len(messages))
+	seen := make(map[string]struct{}, len(messages))
+	for _, message := range messages {
+		safeMessage := MigrationProviderFieldMessage(message)
+		if safeMessage == "" {
+			continue
+		}
+		if _, exists := seen[safeMessage]; exists {
+			continue
+		}
+		seen[safeMessage] = struct{}{}
+		safeMessages = append(safeMessages, safeMessage)
+	}
+	if len(safeMessages) == 0 {
+		return ""
+	}
+	return safeField + "=" + strings.Join(safeMessages, "|")
+}
+
+// MigrationProviderFieldDetail validates the bounded log representation made
+// by MigrationProviderFieldValue before it is copied to an ERROR record.
+func MigrationProviderFieldDetail(value string) string {
+	if len(value) > 512 {
+		return ""
+	}
+	parts := strings.Split(value, "=")
+	if len(parts) != 2 {
+		return ""
+	}
+	return MigrationProviderFieldValue(parts[0], strings.Split(parts[1], "|"))
 }
 
 func token(s string) string {
@@ -254,7 +359,7 @@ func expectedOnly(err error, depth int) bool {
 func BackendValue(value string) string {
 	switch value {
 	case "invalid_request_error", "authentication_error", "auth_error", "permission_error", "not_found_error", "rate_limit_error", "server_error", "api_error", "provider_error", "backend_error", "gateway_rejected",
-		"invalid_api_key", "invalid_authentication", "token_expired", "invalid_token", "insufficient_quota", "rate_limit_exceeded", "model_not_found", "model_not_available", "context_length_exceeded", "invalid_json", "content_policy_violation", "content_filter", "request_timeout", "timeout", "overloaded", "internal_error", "invalid_grant", "invalid_client", "access_denied", "authorization_pending", "slow_down", "expired_token", "unsupported_country_region_territory":
+		"invalid_api_key", "invalid_authentication", "token_expired", "invalid_token", "insufficient_quota", "rate_limit_exceeded", "model_not_found", "model_not_available", "context_length_exceeded", "invalid_json", "content_policy_violation", "content_filter", "request_timeout", "timeout", "overloaded", "internal_error", "invalid_grant", "invalid_client", "access_denied", "authorization_pending", "slow_down", "expired_token", "unsupported_country_region_territory", "invalid_input", "resource_unavailable", "uniqueness_error", "not_found", "unauthorized", "forbidden", "service_error":
 		return value
 	}
 	return ""

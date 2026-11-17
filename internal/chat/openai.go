@@ -1522,6 +1522,13 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 					if err != nil {
 						return "", status, err
 					}
+					if call.Name == migrationToolName {
+						if observer := migrationDiagnosticObserver(ctx); observer != nil {
+							if err := observer(result); err != nil {
+								return "", status, err
+							}
+						}
+					}
 					if call.Name == loadSkillCodexTool.Name {
 						if len(result) > maxCodexSkillBytes-skillBytes {
 							return "", status, skillRecovery(fmt.Errorf("skill load failed for %q: combined skill content exceeds %d bytes; stopped the workflow", name, maxCodexSkillBytes), skillBudgetMessage)

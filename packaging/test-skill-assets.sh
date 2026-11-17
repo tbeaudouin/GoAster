@@ -113,6 +113,24 @@ for label, base in (("source", root), ("installed", installed_root)):
             if forbidden in content:
                 raise SystemExit(f"{label} migration {filename} retained retired guidance: {forbidden!r}")
 
+availability_requirements = (
+    "GET /v1/server_types?name=<url-encoded-exact-type>",
+    "server_types[]",
+    "locations[].available",
+    "removed 2026-10-01",
+    "capacity guarantee",
+)
+for label, base in (("source", root), ("installed", installed_root)):
+    for filename in ("SKILL.md", "AUTH.md"):
+        path = base / "skills" / ("goaster-migration" if filename == "SKILL.md" else "hetzner-auth") / filename
+        content = " ".join(path.read_text(encoding="utf-8").split())
+        for phrase in availability_requirements:
+            if phrase not in content:
+                raise SystemExit(f"{label} {path.parent.name} {filename} missing current availability guidance: {phrase!r}")
+        for forbidden in ("Use GET /v1/datacenters", "call GET /v1/datacenters", "Use the migration availability endpoint", "Use the migration availability tool"):
+            if forbidden in content:
+                raise SystemExit(f"{label} {path.parent.name} {filename} retained active retired availability guidance: {forbidden!r}")
+
 notes = " ".join((root / "docs" / "goaster-migration.md").read_text(encoding="utf-8").split())
 for phrase in ("ordinary generic", "one-shot", "server_name", "target_exists", "local persistence"):
     if phrase not in notes:

@@ -11,6 +11,18 @@ Create one new Hetzner server only, not an existing server or another provider. 
 
 Choose an exact size and type that fits the requested workload, preferring a fitting CX or CAX without favoring either. CX is x86 and CAX is ARM; choose CAX only when the user's software supports ARM. CPX requires the user's explicit choice; never substitute it automatically. Before approval, check the latest official public Hetzner catalogue with normal internet search/fetch and give a rough price with its source, currency, and date; include the VAT basis when shown. If pricing is unavailable, say so and continue. Price is context, not a target, cap, ranking, or required quote. Public availability is not a live capacity guarantee. By default, omit `locations` or pass an empty list to allow any compatible available location. If the user specifies locations, treat them as a strict list and never widen it.
 
+If a current authenticated availability clarification is needed, follow
+`hetzner-auth` and use only read-only `GET
+/v1/server_types?name=<url-encoded-exact-type>`. Match the requested type and
+match it in `server_types[]`; inspect its `locations[].available` values,
+applying an approved location list strictly. This is a snapshot, not a
+capacity guarantee or reservation. Never
+use the retired generic `GET /v1/datacenters` endpoint (removed 2026-10-01),
+shell around the API, or invent a migration availability tool or endpoint. Keep
+the token and Authorization header out of model context, chat, logs, and
+command output. Public rough price remains informational and is not an API
+pricing prerequisite.
+
 ## 3. Get approval for one exact choice
 
 Generate one cryptographically random name using the shell and verify it matches `^goaster-migration-[0-9a-f]{16}$`. Ask for one private spending approval that includes the requested timing—`immediate` or `eventual`—and summarizes the exact `server_name`, exact `server_type`, location choice, and rough price if available. That one approval covers the timing and exact values; do not change the approved name, type, size, or locations.

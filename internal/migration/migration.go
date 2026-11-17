@@ -167,27 +167,54 @@ func webEndpoint(origin, path string, allowInsecure bool) (string, error) {
 	return parsed.String(), nil
 }
 
-func decodeExactJSON(data []byte, output any) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return fmt.Errorf("inspect migration JSON fields: %w", err)
-	}
+// decodeUniqueTopLevelFields inspects only the top-level object shape. It is
+// deliberately separate from typed decoding so safe creation evidence can be
+// recovered when an error envelope is malformed without accepting that
+// envelope. Unknown fields are shape-checked and then discarded; they are
+// never copied into a result.
+func decodeUniqueTopLevelFields(data []byte) (map[string]json.RawMessage, error) {
 	inspector := json.NewDecoder(bytes.NewReader(data))
-	if token, err := inspector.Token(); err != nil || token != json.Delim('{') {
-		return errors.New("migration JSON must be an object")
+	token, err := inspector.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errors.New("migration JSON must be an object")
 	}
-	seen := make(map[string]bool, len(fields))
+	fields := make(map[string]json.RawMessage)
+	seen := make(map[string]struct{})
 	for inspector.More() {
 		token, err := inspector.Token()
 		field, ok := token.(string)
-		if err != nil || !ok || field != strings.ToLower(field) || seen[field] {
-			return errors.New("migration JSON field names must be unique and lower-case")
+		if err != nil || !ok || field != strings.ToLower(field) {
+			return nil, errors.New("migration JSON field names must be unique and lower-case")
 		}
-		seen[field] = true
+		if _, exists := seen[field]; exists {
+			return nil, errors.New("migration JSON field names must be unique and lower-case")
+		}
+		seen[field] = struct{}{}
 		var value json.RawMessage
 		if err := inspector.Decode(&value); err != nil {
-			return fmt.Errorf("inspect migration JSON value: %w", err)
+			return nil, fmt.Errorf("inspect migration JSON value: %w", err)
 		}
+		switch field {
+		case "creation_state", "server_id", "server_label":
+			fields[field] = value
+		}
+	}
+	if token, err := inspector.Token(); err != nil || token != json.Delim('}') {
+		return nil, errors.New("migration JSON object is incomplete")
+	}
+	var extra json.RawMessage
+	if err := inspector.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("migration JSON contains trailing data")
+		}
+		return nil, fmt.Errorf("decode migration trailing data: %w", err)
+	}
+	return fields, nil
+}
+
+func decodeExactJSON(data []byte, output any) error {
+	if _, err := decodeUniqueTopLevelFields(data); err != nil {
+		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

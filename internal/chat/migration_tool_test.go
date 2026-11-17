@@ -145,3 +145,59 @@ func TestScheduledMigrationRequiresTransportCallback(t *testing.T) {
 		t.Fatal(result, err, calls)
 	}
 }
+
+func TestMigrationToolExposesOnlySafeProviderDiagnostics(t *testing.T) {
+	tools := make(chan Tool, 1)
+	if err := RegisterMigrationTool(channelToolRegistrar(tools), MigrationToolOperations{Create: func(context.Context, migration.Request, int64) migration.OneShotResult {
+		return migration.OneShotResult{
+			CreationState:   "unknown",
+			Code:            "invalid_input",
+			Stage:           "provider",
+			HTTPStatus:      422,
+			ProviderCode:    "invalid_input",
+			ProviderMessage: "invalid input",
+			ProviderFields: []migration.ProviderField{
+				{Field: "server_type", Messages: []string{"is not available"}},
+				{Field: "private", Messages: []string{"private provider body"}},
+			},
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	tool := <-tools
+	ctx := WithConversationID(WithConversationType(context.Background(), "private"), 7)
+	result, err := tool.Handler(ctx, `{"action":"create","server_type":"cx22","server_name":"`+migrationToolTargetName+`"}`)
+	if err != nil || !strings.Contains(result, `"creation_state":"unknown"`) || !strings.Contains(result, `"provider_message":"invalid input"`) || !strings.Contains(result, `"field":"server_type"`) || strings.Contains(result, "private provider body") || strings.Contains(result, "private") {
+		t.Fatalf("migration tool diagnostics = %q, error = %v", result, err)
+	}
+}
+
+func TestMigrationToolNormalizesMissingOrInvalidCreationState(t *testing.T) {
+	for _, test := range []struct {
+		name, state string
+	}{
+		{name: "missing", state: ""},
+		{name: "invalid", state: "maybe_created"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tools := make(chan Tool, 1)
+			if err := RegisterMigrationTool(channelToolRegistrar(tools), MigrationToolOperations{Create: func(context.Context, migration.Request, int64) migration.OneShotResult {
+				return migration.OneShotResult{
+					CreationState: test.state,
+					Code:          "invalid_input",
+					Stage:         "provider",
+					HTTPStatus:    422,
+					ProviderCode:  "invalid_input",
+				}
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			tool := <-tools
+			ctx := WithConversationID(WithConversationType(context.Background(), "private"), 7)
+			result, err := tool.Handler(ctx, `{"action":"create","server_type":"cx22","server_name":"`+migrationToolTargetName+`"}`)
+			if err != nil || !strings.Contains(result, `"creation_state":"unknown"`) {
+				t.Fatalf("migration tool result = %q, error = %v", result, err)
+			}
+		})
+	}
+}

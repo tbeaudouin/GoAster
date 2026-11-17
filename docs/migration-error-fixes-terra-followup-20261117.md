@@ -1,0 +1,17 @@
+# Migration error fixes follow-up review — 2026-11-17
+
+## Finding
+
+1. **High: a missing or invalid creation state is still promoted to `not_created`.** `internal/migration/oneshot.go:145` normalizes an absent or unrecognized state to an empty string, then lines 154–155 infer `not_created` from HTTP 422, provider stage and either `invalid_input` code. For example, `SanitizeOneShotResult(OneShotResult{CreationState: "", Code: "invalid_input", Stage: "provider", HTTPStatus: 422})` returns `not_created`; an unrecognized state behaves the same. The Web decoder rejects missing or invalid states before this point, but both migration tool operation paths use the sanitizer (`internal/chat/migration_tool.go:139` and 144), and persisted diagnostic normalization uses it as well (`internal/chat/migration_diagnostics.go:63`). Consequently malformed or incomplete operation/metadata results can become a confident no-server outcome in model context and after restart. The test at `internal/migration/oneshot_test.go` explicitly expects this inference. Preserve uncertainty for missing or invalid states (or reject the result as unusable with an `unknown` outcome), rather than infer creation certainty from error metadata alone. Update the contract and validation report accordingly, and add missing/invalid-state tests through sanitization, tool output, and persisted/restarted metadata, alongside the existing contradictory-state cases.
+
+## Resolution of prior findings
+
+- Finding 1 is partially resolved: explicit `created` and `unknown` survive conflicting 422 metadata, and `created` survives timeout metadata. The missing/invalid-state path above remains actionable. The updated contract asserts 422 authority; this offline review did not independently establish an external service implementation or provider guarantee.
+- Finding 2 is resolved for valid retained records: the notice includes its prefix in the 8 KiB limit, removes older details first, and retains the newest outcome. Worst-case accumulated records are tested after restart.
+- Finding 3 is resolved: records append in occurrence order, with a regression for `unknown`, `not_created`, `unknown` across failed turns and restarts.
+
+## Scope and verification
+
+Reviewed the tracked diff and untracked implementation, tests, and validation report, plus repository conventions. The safe provider detail allowlists and diagnostic metadata exclude arbitrary provider text, generic tool bodies, credentials and private handoff material; no new leak was identified in the reviewed paths. Session loading remains compatible with files lacking the additive field, checkpointing occurs before model continuation, and the notice is charged against the context budget. The implementation and focused tests cover success, failure, cancellation, checkpoint failure and restart; persistence remains subject to the limitations stated in the validation report. No additional actionable simplicity or compatibility issue was identified.
+
+Offline checks: `git diff --check`, `sh packaging/test-skill-assets.sh`, and `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go test ./internal/chat ./internal/migration ./internal/diagnostics ./internal/artefacts -count=1 -timeout 120s` passed. The first test invocation using `go` from PATH could not run because it was Go 1.22.2; the successful invocation used the locally installed Go toolchain required by the module. No network, secrets, GitHub, deployment, or commits were used.

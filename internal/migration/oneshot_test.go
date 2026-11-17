@@ -154,6 +154,99 @@ func TestOneShotOfflineFailures(t *testing.T) {
 	}
 }
 
+func TestOneShotProviderDiagnosticsAreSafeAndClassified(t *testing.T) {
+	mode := "invalid"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mode == "invalid" || mode == "invalid-created" || mode == "invalid-not-created" {
+			state := "unknown"
+			if mode == "invalid-created" {
+				state = "created"
+			} else if mode == "invalid-not-created" {
+				state = "not_created"
+			}
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprintf(w, `{"creation_state":%q,"error":{"code":"invalid_input","stage":"provider","http_status":422,"provider_code":"invalid_input","provider_message":"invalid input","provider_fields":[{"field":"server_type","messages":["is not available"]},{"field":"location","messages":["not available in this location","https://private.invalid/secret"]},{"field":"private_url","messages":["https://private.invalid/secret"]},{"field":"server_type","messages":["private provider detail"]}]}}`, state)
+			return
+		}
+		state := "unknown"
+		if mode == "timeout-created" {
+			state = "created"
+		}
+		w.WriteHeader(http.StatusGatewayTimeout)
+		fmt.Fprintf(w, `{"creation_state":%q,"error":{"code":"provider_timeout","stage":"provider","http_status":504,"provider_code":"timeout","provider_message":"private timeout detail"}}`, state)
+	}))
+	defer server.Close()
+	options := DefaultOptions()
+	options.WebOrigin = server.URL
+	options.AllowInsecureHTTP = true
+	options.HTTPClient = server.Client()
+	options.LoadHetznerToken = func() (string, error) { return "test-token", nil }
+	options.MigrationRecipient = func() (int64, error) { return 7, nil }
+	options.PrepareRecipientHandoffParts = func(int64) (func(context.Context, string, []byte) error, error) {
+		return func(context.Context, string, []byte) error { return nil }, nil
+	}
+	var logs strings.Builder
+	restore := diagnostics.SetOutput(&logs)
+	invalid := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+	restore()
+	encoded, _ := json.Marshal(invalid)
+	if invalid.CreationState != "unknown" || invalid.Code != "invalid_input" || invalid.Stage != "provider" || invalid.HTTPStatus != http.StatusUnprocessableEntity || invalid.ProviderCode != "invalid_input" || invalid.ProviderMessage != "invalid input" || len(invalid.ProviderFields) != 2 {
+		t.Fatalf("invalid-input result = %+v", invalid)
+	}
+	if strings.Contains(string(encoded), "private") || strings.Contains(logs.String(), "private") || !strings.Contains(logs.String(), `provider_message="invalid input"`) || !strings.Contains(logs.String(), `provider_field="server_type=is not available"`) {
+		t.Fatalf("unsafe provider details leaked: result=%s logs=%s", encoded, logs.String())
+	}
+
+	mode = "invalid-created"
+	createdInvalid := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+	if createdInvalid.CreationState != "created" {
+		t.Fatalf("created invalid-input result = %+v, want created evidence preserved", createdInvalid)
+	}
+
+	mode = "timeout-created"
+	createdTimeout := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+	if createdTimeout.CreationState != "created" {
+		t.Fatalf("created timeout result = %+v, want created evidence preserved", createdTimeout)
+	}
+
+	mode = "invalid-not-created"
+	notCreated := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+	if notCreated.CreationState != "not_created" {
+		t.Fatalf("authoritative rejection result = %+v, want not_created", notCreated)
+	}
+
+	mode = "timeout"
+	timeout := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+	if timeout.CreationState != "unknown" || timeout.Code != "provider_timeout" || timeout.ProviderMessage != "" {
+		t.Fatalf("timeout result = %+v, want unknown without unsafe message", timeout)
+	}
+}
+
+func TestSanitizeOneShotResultRequiresExplicitCreationState(t *testing.T) {
+	for _, test := range []struct {
+		name, state, code, providerCode, want string
+	}{
+		{name: "created with invalid input", state: "created", code: "invalid_input", providerCode: "invalid_input", want: "created"},
+		{name: "unknown with invalid input", state: "unknown", code: "invalid_input", providerCode: "invalid_input", want: "unknown"},
+		{name: "not created with invalid input", state: "not_created", code: "invalid_input", providerCode: "invalid_input", want: "not_created"},
+		{name: "created with timeout", state: "created", code: "provider_timeout", providerCode: "timeout", want: "created"},
+		{name: "unknown with timeout", state: "unknown", code: "provider_timeout", providerCode: "timeout", want: "unknown"},
+		{name: "not created with timeout", state: "not_created", code: "provider_timeout", providerCode: "timeout", want: "unknown"},
+		{name: "provider rejection without state", state: "", code: "invalid_input", providerCode: "invalid_input", want: "unknown"},
+		{name: "provider rejection with invalid state", state: "maybe_created", code: "invalid_input", providerCode: "invalid_input", want: "unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := SanitizeOneShotResult(OneShotResult{CreationState: test.state, Code: test.code, Stage: "provider", HTTPStatus: http.StatusUnprocessableEntity, ProviderCode: test.providerCode})
+			if test.code == "provider_timeout" {
+				got = SanitizeOneShotResult(OneShotResult{CreationState: test.state, Code: test.code, Stage: "provider", HTTPStatus: http.StatusGatewayTimeout, ProviderCode: test.providerCode})
+			}
+			if got.CreationState != test.want {
+				t.Fatalf("sanitized result = %+v, want state %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestOneShotRejectsInvalidServerNamesBeforeEffects(t *testing.T) {
 	tokenCalls, recipientCalls, handoffCalls := 0, 0, 0
 	options := Options{
@@ -426,6 +519,64 @@ func TestOneShotRejectsAmbiguousResponses(t *testing.T) {
 				if strings.Contains(logs.String()+string(encoded), value) {
 					t.Fatal("private response or credential leaked")
 				}
+			}
+		})
+	}
+}
+
+func TestOneShotPreservesCreatedOnInvalidErrorValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "missing error metadata",
+			status: http.StatusInternalServerError,
+			body:   `{"creation_state":"created","server_id":42,"server_label":"goaster-migration-0123456789abcdef","ip":"192.0.2.1","location":"fsn1","expires":2000000000,"attempt":"attempt1","setup_url":"https://private.invalid/setup"}`,
+		},
+		{
+			name:   "inconsistent error status",
+			status: http.StatusInternalServerError,
+			body:   `{"creation_state":"created","server_id":42,"server_label":"goaster-migration-0123456789abcdef","error":{"code":"unavailable","stage":"provider","http_status":409}}`,
+		},
+		{
+			name:   "target exists contradiction",
+			status: http.StatusConflict,
+			body:   `{"creation_state":"created","server_id":42,"server_label":"goaster-migration-0123456789abcdef","error":{"code":"target_exists","stage":"provider","http_status":409}}`,
+		},
+		{
+			name:   "provider lookup failure contradiction",
+			status: http.StatusBadGateway,
+			body:   `{"creation_state":"created","server_id":42,"server_label":"goaster-migration-0123456789abcdef","error":{"code":"provider_lookup_failure","stage":"provider","http_status":502}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deliveries := 0
+			options := DefaultOptions()
+			options.WebOrigin = "https://web.invalid"
+			options.LoadHetznerToken = func() (string, error) { return "synthetic-token", nil }
+			options.MigrationRecipient = func() (int64, error) { return 7, nil }
+			options.PrepareRecipientHandoffParts = func(int64) (func(context.Context, string, []byte) error, error) {
+				return func(context.Context, string, []byte) error {
+					deliveries++
+					return nil
+				}, nil
+			}
+			options.HTTPClient = oneShotDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+
+			result := CreateOnce(t.Context(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if deliveries != 0 || result.CreationState != "created" || result.Code != "response_unusable" || result.ServerID != 42 || result.ServerLabel != oneShotTargetName || result.ServerName != oneShotTargetName || result.Handoff != "" {
+				t.Fatalf("invalid response result = %+v deliveries=%d", result, deliveries)
+			}
+			if strings.Contains(string(encoded), "private.invalid") || strings.Contains(string(encoded), "synthetic-token") {
+				t.Fatalf("private response data leaked: %s", encoded)
 			}
 		})
 	}

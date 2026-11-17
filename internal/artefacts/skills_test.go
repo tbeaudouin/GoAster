@@ -119,6 +119,30 @@ func TestInstallBundledStartersOnce(t *testing.T) {
 	checkDefaultMemoryWithoutHardLinks(t)
 }
 
+func TestBundledMigrationAvailabilityGuidanceIsCurrent(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("..", "..", "skills", "hetzner-auth", "SKILL.md"),
+		filepath.Join("..", "..", "skills", "hetzner-auth", "AUTH.md"),
+		filepath.Join("..", "..", "skills", "goaster-migration", "SKILL.md"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := strings.Join(strings.Fields(string(data)), " ")
+		for _, phrase := range []string{"GET /v1/server_types?name=<url-encoded-exact-type>", "server_types[]", "locations[].available", "removed 2026-10-01", "capacity guarantee"} {
+			if !strings.Contains(content, phrase) {
+				t.Errorf("%s missing current availability guidance %q", path, phrase)
+			}
+		}
+		for _, forbidden := range []string{"Use GET /v1/datacenters", "call GET /v1/datacenters", "Use the migration availability tool", "Use the migration availability endpoint"} {
+			if strings.Contains(content, forbidden) {
+				t.Errorf("%s retained active retired availability guidance %q", path, forbidden)
+			}
+		}
+	}
+}
+
 func checkDefaultMemoryWithoutHardLinks(t interface {
 	TempDir() string
 	Fatal(...any)
