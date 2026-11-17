@@ -156,11 +156,14 @@ func Error(operation string, err error, fields ...Field) {
 			value = MigrationCode(field.Value)
 		case "creation_state":
 			value = MigrationCreationState(field.Value)
+		case "event":
+			value = safeEvent(field.Value)
 		case "phase":
-			switch field.Value {
-			case "pre-stream", "stream", "post-stream":
-				value = field.Value
-			}
+			value = safePhase(field.Value)
+		case "dispatch_state":
+			value = safeInfoField(field.Key, field.Value)
+		case "handoff_delivery":
+			value = safeInfoField(field.Key, field.Value)
 		case "method":
 			switch field.Value {
 			case "agent probe", "getUpdates", "setMyCommands", "sendMessage", "editMessageText", "sendDocument", "getFile", "downloadAttachment", "downloadFile", "deleteMessage", "sendChatAction":
@@ -176,6 +179,75 @@ func Error(operation string, err error, fields ...Field) {
 	outputMu.Lock()
 	_, _ = io.WriteString(output, record)
 	outputMu.Unlock()
+}
+
+// Info records only fixed lifecycle metadata. It intentionally has no error
+// message or arbitrary-value path; callers use it for bounded state journals.
+func Info(operation string, fields ...Field) {
+	record := "INFO operation=" + token(operation)
+	for i, field := range fields {
+		if i >= 16 {
+			break
+		}
+		value := safeInfoField(field.Key, field.Value)
+		if value != "" {
+			record += " " + field.Key + "=" + strconv.Quote(value)
+		}
+	}
+	record += "\n"
+	outputMu.Lock()
+	_, _ = io.WriteString(output, record)
+	outputMu.Unlock()
+}
+
+func safeInfoField(key, value string) string {
+	switch key {
+	case "event":
+		return safeEvent(value)
+	case "phase":
+		return safePhase(value)
+	case "dispatch_state":
+		switch value {
+		case "pending", "dispatched", "returned":
+			return value
+		}
+	case "creation_state":
+		return MigrationCreationState(value)
+	case "code":
+		if value == "none" {
+			return value
+		}
+		return MigrationCode(value)
+	case "stage":
+		if value == "none" {
+			return value
+		}
+		return MigrationStage(value)
+	case "handoff_delivery":
+		switch value {
+		case "not_attempted", "pending", "delivered", "failed", "unknown":
+			return value
+		}
+	}
+	return ""
+}
+
+func safeEvent(value string) string {
+	switch value {
+	case "entered", "http_dispatch", "result", "model_recovery", "tool_call", "post_tool_authentication", "skill_recovery", "error", "final":
+		return value
+	default:
+		return ""
+	}
+}
+
+func safePhase(value string) string {
+	switch value {
+	case "pre-stream", "stream", "post-stream", "create", "dispatch", "result", "handoff", "initial_notice", "model_command", "tool_observer", "session_error", "final_reply":
+		return value
+	default:
+		return ""
+	}
 }
 
 // MigrationStage retains only fixed stages from the active one-shot create

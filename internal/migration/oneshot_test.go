@@ -370,11 +370,17 @@ func TestOneShotBoundaries(t *testing.T) {
 			result := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, opts, 7)
 			restore()
 			logText := logs.text()
+			if tc.mode == "lost" && (!strings.Contains(logText, `event="entered" phase="create" dispatch_state="pending"`) || !strings.Contains(logText, `event="http_dispatch" phase="dispatch" dispatch_state="dispatched"`) || !strings.Contains(logText, `event="result" phase="result" dispatch_state="returned" creation_state="unknown" code="response_unavailable" stage="none" handoff_delivery="not_attempted"`)) {
+				t.Fatalf("lifecycle log: %s", logText)
+			}
 			if tc.mode == "lost" && (strings.Count(logText, "ERROR") != 1 || !strings.Contains(logText, "unexpected EOF") || !strings.Contains(logText, `creation_state="unknown"`) || !strings.Contains(logText, `code="response_unavailable"`)) {
 				t.Fatalf("lost response diagnostic: %s", logText)
 			}
-			if tc.mode == "delivery_logged" && logText != "" {
-				t.Fatalf("duplicate diagnostic: %s", logText)
+			if tc.mode == "delivery" && !strings.Contains(logText, `event="result" phase="result" dispatch_state="returned" creation_state="created" code="handoff_failed" stage="handoff" handoff_delivery="failed"`) {
+				t.Fatalf("handoff result journal: %s", logText)
+			}
+			if tc.mode == "delivery_logged" && (strings.Contains(logText, "ERROR") || !strings.Contains(logText, `event="result"`)) {
+				t.Fatalf("duplicate or missing lifecycle diagnostic: %s", logText)
 			}
 			if tc.mode == "created_error" {
 				for _, field := range []string{`status="500"`, `stage="handoff"`, `code="unavailable"`, `creation_state="created"`, `backend_code="rate_limit_exceeded"`} {

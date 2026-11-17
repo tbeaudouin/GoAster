@@ -719,23 +719,33 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.Header().Set("Cache-Control", "no-cache")
 		encoder := json.NewEncoder(w)
+		streamContext, cancelStream := context.WithCancel(r.Context())
+		defer cancelStream()
 		_, canFlush := w.(http.Flusher)
 		streamEmitted := false
 		var streamErr error
-		emit := func(event any) {
+		var streamOperation, streamEvent, streamPhase string
+		defer func() {
+			if streamErr != nil {
+				diagnostics.Error(streamOperation, streamErr, diagnostics.Field{Key: "event", Value: streamEvent}, diagnostics.Field{Key: "phase", Value: streamPhase})
+			}
+		}()
+		emit := func(eventName, phase string, event any) {
 			if streamErr != nil {
 				return
 			}
 			streamEmitted = true
 			if err := encoder.Encode(event); err != nil {
-				streamErr = err
-				diagnostics.Error("agent.chat.stream_encode", err)
+				streamErr = fmt.Errorf("encode NDJSON event: %w", err)
+				cancelStream()
+				streamOperation, streamEvent, streamPhase = "agent.chat.stream_encode", eventName, phase
 				return
 			}
 			if canFlush {
 				if err := http.NewResponseController(w).Flush(); err != nil {
-					streamErr = err
-					diagnostics.Error("agent.chat.stream_flush", err)
+					streamErr = fmt.Errorf("flush NDJSON event: %w", err)
+					cancelStream()
+					streamOperation, streamEvent, streamPhase = "agent.chat.stream_flush", eventName, phase
 				}
 			}
 		}
@@ -744,14 +754,14 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 				http.Error(w, "model command does not accept attachments", http.StatusBadRequest)
 				return
 			}
-			emit(struct {
+			emit("final", "model_command", struct {
 				Type  string `json:"type"`
 				Reply string `json:"reply"`
 			}{"final", modelCommandReply(registry, request.ChatID, request.Message)})
 			return
 		}
 		observer := func(name, arguments string) {
-			emit(struct {
+			emit("tool_call", "tool_observer", struct {
 				Type      string `json:"type"`
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
@@ -766,13 +776,16 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		}
 		if !chat.IsClearCommand(request.Message) {
 			if notice := session.PendingModelRecoveryNotice(); notice != "" {
-				emit(struct {
+				emit("model_recovery", "initial_notice", struct {
 					Type    string `json:"type"`
 					Message string `json:"message"`
 				}{"model_recovery", notice})
 			}
 		}
-		requestContext := chat.WithConversationType(r.Context(), request.ChatType)
+		if streamErr != nil {
+			return
+		}
+		requestContext := chat.WithConversationType(streamContext, request.ChatType)
 		requestContext = chat.WithConversationID(requestContext, request.ChatID)
 		requestContext = chat.WithConversationThreadID(requestContext, request.ThreadID)
 		requestContext = chat.WithToolCallObserver(requestContext, observer)
@@ -785,6 +798,12 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			requestContext = chat.WithShellEnvironment(requestContext, values)
 		}
 		reply, err := session.ReplyWithAttachments(requestContext, request.Message, metadata)
+		if streamErr != nil {
+			if errors.Is(err, context.Canceled) {
+				streamErr = errors.Join(streamErr, err)
+			}
+			return
+		}
 		if err != nil {
 			if errors.Is(err, attachment.ErrUnsupportedImage) {
 				http.Error(w, "unsupported image format", http.StatusUnsupportedMediaType)
@@ -792,7 +811,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			}
 			if message := chat.PostToolAuthenticationMessage(err); message != "" {
 				if streamEmitted {
-					emit(struct {
+					emit("post_tool_authentication", "session_error", struct {
 						Type  string `json:"type"`
 						Error string `json:"error"`
 					}{"post_tool_authentication", message})
@@ -804,7 +823,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			}
 			if message := chat.SkillRecoveryMessage(err); message != "" {
 				if streamEmitted {
-					emit(struct {
+					emit("skill_recovery", "session_error", struct {
 						Type  string `json:"type"`
 						Error string `json:"error"`
 					}{"skill_recovery", message})
@@ -816,7 +835,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			}
 			if errors.Is(err, chat.ErrModelUnavailable) {
 				if streamEmitted {
-					emit(struct {
+					emit("error", "session_error", struct {
 						Type  string `json:"type"`
 						Error string `json:"error"`
 					}{"error", boundedAgentModelError(err)})
@@ -826,7 +845,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 				return
 			}
 			if streamEmitted {
-				emit(struct {
+				emit("error", "session_error", struct {
 					Type string `json:"type"`
 				}{"error"})
 				return
@@ -834,7 +853,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			http.Error(w, "agent request failed; check remote authentication", http.StatusServiceUnavailable)
 			return
 		}
-		emit(struct {
+		emit("final", "final_reply", struct {
 			Type  string `json:"type"`
 			Reply string `json:"reply"`
 		}{"final", reply})

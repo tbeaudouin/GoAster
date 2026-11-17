@@ -132,6 +132,36 @@ func TestMigrationDiagnosticMetadataAllowlist(t *testing.T) {
 	}
 }
 
+func TestInfoKeepsLifecycleFieldsFixedAndSafe(t *testing.T) {
+	var output bytes.Buffer
+	restore := SetOutput(&output)
+	defer restore()
+
+	Info("migration.create",
+		Field{Key: "event", Value: "http_dispatch"},
+		Field{Key: "phase", Value: "dispatch"},
+		Field{Key: "dispatch_state", Value: "dispatched"},
+		Field{Key: "creation_state", Value: "unknown"},
+		Field{Key: "code", Value: "response_unavailable"},
+		Field{Key: "stage", Value: "service"},
+		Field{Key: "handoff_delivery", Value: "not_attempted"},
+		Field{Key: "server_name", Value: "goaster-migration-0123456789abcdef"},
+		Field{Key: "result", Value: `{"token":"private"}`},
+		Field{Key: "phase", Value: "private phase"})
+
+	log := output.String()
+	for _, want := range []string{`INFO operation=migration.create`, `event="http_dispatch"`, `phase="dispatch"`, `dispatch_state="dispatched"`, `creation_state="unknown"`, `code="response_unavailable"`, `stage="service"`, `handoff_delivery="not_attempted"`} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("lifecycle info = %q, missing %q", log, want)
+		}
+	}
+	for _, unwanted := range []string{"goaster-migration-0123456789abcdef", "private", "token", "result"} {
+		if strings.Contains(log, unwanted) {
+			t.Fatalf("lifecycle info leaked %q: %q", unwanted, log)
+		}
+	}
+}
+
 func TestMigrationTargetCodesAreAllowlisted(t *testing.T) {
 	for _, code := range []string{"target_exists", "provider_lookup_failure"} {
 		if got := MigrationCode(code); got != code {

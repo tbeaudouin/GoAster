@@ -371,6 +371,7 @@ func TestGenericCronRealSessionMigrationTerminalResultsDoNotReplay(t *testing.T)
 	}{
 		{name: "target_exists", result: migration.OneShotResult{CreationState: "not_created", Code: "target_exists"}},
 		{name: "success", result: migration.OneShotResult{CreationState: "created", Code: "created", Handoff: "delivered"}},
+		{name: "created_without_handoff", result: migration.OneShotResult{CreationState: "created", Code: "created"}},
 		{name: "unknown", result: migration.OneShotResult{CreationState: "unknown", Code: "response_unavailable"}},
 		{name: "partial", result: migration.OneShotResult{CreationState: "created", Code: "handoff_failed", Handoff: "failed"}},
 		{name: "lookup_error", result: migration.OneShotResult{CreationState: "not_created", Code: "provider_lookup_failure"}},
@@ -399,7 +400,7 @@ func TestGenericCronRealSessionMigrationTerminalResultsDoNotReplay(t *testing.T)
 				t.Fatalf("terminal run count = %d", runs)
 			}
 			saved, ok := harness.jobs.Get(job.ID)
-			needsReview := testCase.name == "unknown" || testCase.name == "partial" || testCase.name == "lookup_error"
+			needsReview := testCase.name == "created_without_handoff" || testCase.name == "unknown" || testCase.name == "partial" || testCase.name == "lookup_error"
 			wantStatus := scheduler.StatusCompleted
 			if needsReview {
 				wantStatus = scheduler.StatusFailed

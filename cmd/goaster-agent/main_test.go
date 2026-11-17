@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"goaster/internal/chat"
 	"goaster/internal/command"
 	"goaster/internal/controlsecret"
+	"goaster/internal/diagnostics"
 	"goaster/internal/localenv"
 )
 
@@ -33,6 +35,51 @@ type fakeProvider struct{ err error }
 func readyAuth(context.Context) error { return nil }
 
 const testControlSecret = "test-control-secret"
+
+type streamResponseWriter struct {
+	header http.Header
+	write  func([]byte) (int, error)
+	flush  func() error
+}
+
+func (writer streamResponseWriter) Header() http.Header { return writer.header }
+
+func (writer streamResponseWriter) Write(data []byte) (int, error) {
+	if writer.write == nil {
+		return len(data), nil
+	}
+	return writer.write(data)
+}
+
+func (writer streamResponseWriter) WriteHeader(int) {}
+
+func (writer streamResponseWriter) Flush() { _ = writer.FlushError() }
+
+func (writer streamResponseWriter) FlushError() error {
+	if writer.flush == nil {
+		return nil
+	}
+	return writer.flush()
+}
+
+type streamLifecycleSession struct {
+	notice string
+	reply  func(context.Context, string) (string, error)
+}
+
+func (session streamLifecycleSession) Reply(ctx context.Context, message string) (string, error) {
+	return session.reply(ctx, message)
+}
+
+func (session streamLifecycleSession) ReplyScheduled(ctx context.Context, message string) (string, error) {
+	return session.reply(ctx, message)
+}
+
+func (session streamLifecycleSession) ReplyWithAttachments(ctx context.Context, message string, _ []attachment.Metadata) (string, error) {
+	return session.reply(ctx, message)
+}
+
+func (session streamLifecycleSession) PendingModelRecoveryNotice() string { return session.notice }
 
 func handler(provider chat.Provider, checkAuth func(context.Context) error) http.Handler {
 	return handlerWithMemory(provider, nil, checkAuth)
@@ -253,6 +300,85 @@ func TestAgentLoopbackHandler(t *testing.T) {
 	if checks != 1 {
 		t.Fatalf("readiness authentication checks = %d, want 1", checks)
 	}
+}
+
+func TestAgentBrokenNDJSONStreamCancelsBeforeFurtherWork(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		initial    bool
+		flush      bool
+		wantEvent  string
+		wantPhase  string
+		wantOutput string
+	}{
+		{name: "initial notice encode", initial: true, wantEvent: "model_recovery", wantPhase: "initial_notice"},
+		{name: "initial notice flush", initial: true, flush: true, wantEvent: "model_recovery", wantPhase: "initial_notice", wantOutput: `"type":"model_recovery"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			writer := streamResponseWriter{header: make(http.Header)}
+			if test.flush {
+				writer.write = func(data []byte) (int, error) {
+					return output.Write(data)
+				}
+				writer.flush = func() error { return syscall.EPIPE }
+			} else {
+				writer.write = func([]byte) (int, error) { return 0, syscall.EPIPE }
+			}
+			sideEffects := 0
+			replies := 0
+			session := streamLifecycleSession{
+				notice: testNotice(test.initial),
+				reply: func(ctx context.Context, _ string) (string, error) {
+					replies++
+					if err := ctx.Err(); err != nil {
+						return "", err
+					}
+					sideEffects++
+					return "reply", nil
+				},
+			}
+			h := handlerWithMemoryAndRegistryWithSecretAndRuntime(readyAuth, chat.ModelRegistry{}, testControlSecret,
+				func(int64, int64) agentSession { return session }, cronDeliveryQueue{})
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/chat", strings.NewReader(`{"chat_id":42,"message":"run"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set(controlAuthorizationHeader, testControlSecret)
+			var logs strings.Builder
+			restore := diagnostics.SetOutput(&logs)
+			h.ServeHTTP(writer, request)
+			restore()
+
+			if (test.initial && replies != 0) || sideEffects != 0 {
+				t.Fatalf("work continued after broken stream: replies=%d side_effects=%d", replies, sideEffects)
+			}
+			if !test.initial && replies != 1 {
+				t.Fatalf("tool turn calls = %d, want 1", replies)
+			}
+			operation := "agent.chat.stream_encode"
+			if test.flush {
+				operation = "agent.chat.stream_flush"
+			}
+			if strings.Count(logs.String(), "ERROR operation="+operation) != 1 ||
+				!strings.Contains(logs.String(), `event="`+test.wantEvent+`"`) ||
+				!strings.Contains(logs.String(), `phase="`+test.wantPhase+`"`) ||
+				!strings.Contains(logs.String(), "broken pipe") {
+				t.Fatalf("stream diagnostic = %q", logs.String())
+			}
+			if strings.Contains(logs.String(), "private") || strings.Contains(output.String(), `"type":"error"`) || strings.Contains(output.String(), `"type":"final"`) {
+				t.Fatalf("unsafe or late stream data: logs=%q output=%q", logs.String(), output.String())
+			}
+			if test.wantOutput != "" && !strings.Contains(output.String(), test.wantOutput) {
+				t.Fatalf("stream output = %q, missing %q", output.String(), test.wantOutput)
+			}
+		})
+	}
+}
+
+func testNotice(initial bool) string {
+	if initial {
+		return "safe model recovery notice"
+	}
+	return ""
 }
 
 func TestServeRejectsInvalidConfiguredControlSecretBeforeStartup(t *testing.T) {

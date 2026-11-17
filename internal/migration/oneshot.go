@@ -240,7 +240,37 @@ func creationEvidenceFromTopLevel(fields map[string]json.RawMessage, request Req
 // CreateOnce sends one request and never persists or retries secret material.
 // The setup URL and private key are delivered through the split owner handoff
 // callback only.
-func CreateOnce(ctx context.Context, request Request, options Options, owner int64) OneShotResult {
+func CreateOnce(ctx context.Context, request Request, options Options, owner int64) (result OneShotResult) {
+	dispatchState := "pending"
+	diagnostics.Info("migration.create",
+		diagnostics.Field{Key: "event", Value: "entered"},
+		diagnostics.Field{Key: "phase", Value: "create"},
+		diagnostics.Field{Key: "dispatch_state", Value: dispatchState})
+	defer func() {
+		safe := SanitizeOneShotResult(result)
+		code, stage := safe.Code, safe.Stage
+		if code == "" {
+			code = "none"
+		}
+		if stage == "" {
+			stage = "none"
+		}
+		handoff := "not_attempted"
+		switch safe.Handoff {
+		case "delivered":
+			handoff = "delivered"
+		case "failed":
+			handoff = "failed"
+		}
+		diagnostics.Info("migration.create",
+			diagnostics.Field{Key: "event", Value: "result"},
+			diagnostics.Field{Key: "phase", Value: "result"},
+			diagnostics.Field{Key: "dispatch_state", Value: dispatchState},
+			diagnostics.Field{Key: "creation_state", Value: safe.CreationState},
+			diagnostics.Field{Key: "code", Value: code},
+			diagnostics.Field{Key: "stage", Value: stage},
+			diagnostics.Field{Key: "handoff_delivery", Value: handoff})
+	}()
 	safeServerName := ""
 	if ValidMigrationServerName(request.ServerName) {
 		safeServerName = request.ServerName
@@ -296,7 +326,13 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+secret)
+	dispatchState = "dispatched"
+	diagnostics.Info("migration.create",
+		diagnostics.Field{Key: "event", Value: "http_dispatch"},
+		diagnostics.Field{Key: "phase", Value: "dispatch"},
+		diagnostics.Field{Key: "dispatch_state", Value: dispatchState})
 	response, err := options.HTTPClient.Do(httpRequest)
+	dispatchState = "returned"
 	if err != nil {
 		if errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 			err = errors.Join(io.ErrUnexpectedEOF, err)
@@ -320,7 +356,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	if err := decodeExactJSON(data, &decoded); err != nil {
 		return unusableOneShotResponse(creationEvidenceFromTopLevel(topLevelFields, request, safeServerName), response.StatusCode, errors.New("invalid create response"))
 	}
-	result := OneShotResult{CreationState: decoded.CreationState, ServerName: safeServerName, ServerID: decoded.ServerID, ServerLabel: safeCreateField(decoded.ServerLabel), IP: safeCreateField(decoded.IP), Location: safeCreateField(decoded.Location), Expires: decoded.Expires, Attempt: safeCreateField(decoded.Attempt)}
+	result = OneShotResult{CreationState: decoded.CreationState, ServerName: safeServerName, ServerID: decoded.ServerID, ServerLabel: safeCreateField(decoded.ServerLabel), IP: safeCreateField(decoded.IP), Location: safeCreateField(decoded.Location), Expires: decoded.Expires, Attempt: safeCreateField(decoded.Attempt)}
 	// Treat all service-provided labels as untrusted; never return request secrets.
 	scrub := func(value string) string {
 		if strings.Contains(value, secret) || token != "" && strings.Contains(value, token) || strings.Contains(value, pub) {
@@ -393,6 +429,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	}
 	if decoded.ServerID <= 0 || result.Attempt == "" || result.ServerLabel == "" || result.ServerLabel != request.ServerName || result.IP == "" || result.Location == "" || result.Expires <= 0 || parseErr != nil || originErr != nil || setup.Scheme != origin.Scheme || setup.Host != origin.Host || setup.User != nil || !fragmentMatches {
 		result.Code = "handoff_failed"
+		result.Stage = "handoff"
 		result.Handoff = "failed"
 		diagnostics.Error("migration.handoff", errors.New("invalid create success handoff"))
 		return result
@@ -400,6 +437,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	current, err = options.MigrationRecipient()
 	if err != nil || current != owner {
 		result.Code = "handoff_failed"
+		result.Stage = "handoff"
 		result.Handoff = "failed"
 		diagnostics.Error("migration.handoff", errors.Join(errors.New("paired recipient changed"), err))
 		return result
@@ -407,6 +445,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	err = deliverParts(ctx, decoded.SetupURL, private)
 	if err != nil {
 		result.Code = "handoff_failed"
+		result.Stage = "handoff"
 		result.Handoff = "failed"
 		if _, logged := err.(interface{ DiagnosticLogged() }); !logged {
 			diagnostics.Error("migration.handoff", err)

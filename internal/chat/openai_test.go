@@ -1676,6 +1676,14 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 			if runs := jobs.RunDue(requestContext); runs != 1 || !errors.Is(executionErr, context.Canceled) {
 				t.Fatalf("%s before %s: runs=%d error=%v", spec.Kind, tc.cancelBefore, runs, executionErr)
 			}
+			var failure providerFailure
+			if !errors.As(executionErr, &failure) || failure.status != http.StatusOK || failure.phase != "post-stream" {
+				t.Fatalf("cancellation lost provider response metadata: %v", executionErr)
+			}
+			fields := failure.DiagnosticFields()
+			if len(fields) != 2 || fields[0].Value != "post-stream" || fields[1].Value != "200" {
+				t.Fatalf("cancellation diagnostic fields = %v", fields)
+			}
 			cancel()
 			jobs, err = scheduler.New(options)
 			if err != nil {

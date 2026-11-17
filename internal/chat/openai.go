@@ -753,6 +753,10 @@ func (err providerFailure) Error() string {
 
 func (err providerFailure) Unwrap() error { return err.cause }
 
+func (err providerFailure) DiagnosticFields() []diagnostics.Field {
+	return []diagnostics.Field{{Key: "phase", Value: err.phase}, {Key: "status", Value: strconv.Itoa(err.status)}}
+}
+
 func wrapProviderFailure(phase string, status int, cause error) error {
 	if cause == nil {
 		return nil
