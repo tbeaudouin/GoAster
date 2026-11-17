@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,8 @@ import (
 
 	"goaster/internal/diagnostics"
 )
+
+const oneShotTargetName = "goaster-migration-0123456789abcdef"
 
 func TestOneShotOffline(t *testing.T) {
 	for _, locations := range [][]string{nil, {}, {"fsn1"}} {
@@ -39,7 +42,11 @@ func TestOneShotOffline(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if len(body) != 3 && len(body) != 4 || body["hcloud_token"] != "test-token" || body["server_type"] != "cx22" || !strings.HasPrefix(fmt.Sprint(body["login_public_key"]), "ssh-ed25519 ") {
+				wantFields := 4
+				if len(locations) > 0 {
+					wantFields++
+				}
+				if len(body) != wantFields || body["hcloud_token"] != "test-token" || body["server_type"] != "cx22" || body["server_name"] != oneShotTargetName || !strings.HasPrefix(fmt.Sprint(body["login_public_key"]), "ssh-ed25519 ") {
 					t.Error("wrong contract")
 				}
 				public = fmt.Sprint(body["login_public_key"])
@@ -47,7 +54,7 @@ func TestOneShotOffline(t *testing.T) {
 					t.Error("locations widened")
 				}
 				w.WriteHeader(201)
-				fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"server1","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, r.Host, secret)
+				fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"%s","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, oneShotTargetName, r.Host, secret)
 			}))
 			defer server.Close()
 			opts := DefaultOptions()
@@ -63,7 +70,7 @@ func TestOneShotOffline(t *testing.T) {
 					return nil
 				}, nil
 			}
-			result := CreateOnce(context.Background(), Request{ServerType: "cx22", Locations: locations}, opts, 7)
+			result := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName, Locations: locations}, opts, 7)
 			block, _ := pem.Decode(privateKey)
 			if block == nil {
 				t.Fatal("missing private key")
@@ -90,7 +97,6 @@ func TestOneShotOfflineFailures(t *testing.T) {
 	calls := 0
 	targetExists := false
 	lookupFailure := false
-	const targetName = "goaster-migration-0123456789abcdef"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		body, err := io.ReadAll(r.Body)
@@ -99,7 +105,7 @@ func TestOneShotOfflineFailures(t *testing.T) {
 		}
 		if targetExists {
 			var fields map[string]any
-			if err := json.Unmarshal(body, &fields); err != nil || fields["server_name"] != targetName {
+			if err := json.Unmarshal(body, &fields); err != nil || fields["server_name"] != oneShotTargetName {
 				t.Fatalf("named request body = %s", body)
 			}
 			secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -109,7 +115,7 @@ func TestOneShotOfflineFailures(t *testing.T) {
 				return
 			}
 			w.WriteHeader(http.StatusConflict)
-			fmt.Fprintf(w, `{"creation_state":"not_created","server_id":42,"server_label":%q,"setup_url":"https://private.invalid/setup#owner=%s","error":{"code":"target_exists","stage":"provider","http_status":409}}`, targetName, secret)
+			fmt.Fprintf(w, `{"creation_state":"not_created","server_id":42,"server_label":%q,"setup_url":"https://private.invalid/setup#owner=%s","error":{"code":"target_exists","stage":"provider","http_status":409}}`, oneShotTargetName, secret)
 			return
 		}
 		w.WriteHeader(503)
@@ -125,25 +131,63 @@ func TestOneShotOfflineFailures(t *testing.T) {
 	opts.PrepareRecipientHandoff = func(int64) (func(context.Context, []byte) error, error) {
 		return func(context.Context, []byte) error { return nil }, nil
 	}
-	if got := CreateOnce(context.Background(), Request{ServerType: "cx22", Locations: []string{"fsn1", "fsn1"}}, opts, 7); got.CreationState != "not_created" || calls != 0 {
+	if got := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName, Locations: []string{"fsn1", "fsn1"}}, opts, 7); got.CreationState != "not_created" || calls != 0 {
 		t.Fatal(got, calls)
 	}
 	if got := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: "goaster-migration-0123456789abcde"}, opts, 7); got.CreationState != "not_created" || got.ServerName != "" || calls != 0 {
 		t.Fatalf("invalid target name result = %+v calls=%d", got, calls)
 	}
-	if got := CreateOnce(context.Background(), Request{ServerType: "cax22"}, opts, 7); got.CreationState != "unknown" || calls != 1 {
+	if got := CreateOnce(context.Background(), Request{ServerType: "cax22", ServerName: oneShotTargetName}, opts, 7); got.CreationState != "unknown" || calls != 1 {
 		t.Fatal(got, calls)
 	}
 	targetExists = true
-	result := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: targetName}, opts, 7)
+	result := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, opts, 7)
 	encoded, _ := json.Marshal(result)
-	if result.CreationState != "not_created" || result.Code != "target_exists" || result.Stage != "provider" || result.HTTPStatus != http.StatusConflict || result.ServerID != 42 || result.ServerLabel != targetName || result.ServerName != targetName || result.Handoff != "" || strings.Contains(string(encoded), "setup_url") || strings.Contains(string(encoded), "private.invalid") {
+	if result.CreationState != "not_created" || result.Code != "target_exists" || result.Stage != "provider" || result.HTTPStatus != http.StatusConflict || result.ServerID != 42 || result.ServerLabel != oneShotTargetName || result.ServerName != oneShotTargetName || result.Handoff != "" || strings.Contains(string(encoded), "setup_url") || strings.Contains(string(encoded), "private.invalid") {
 		t.Fatalf("existing target result = %+v encoded=%s", result, encoded)
 	}
 	lookupFailure = true
-	result = CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: targetName}, opts, 7)
+	result = CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, opts, 7)
 	if result.CreationState != "not_created" || result.Code != "provider_lookup_failure" || result.Stage != "provider" || result.HTTPStatus != http.StatusBadGateway || calls != 3 {
 		t.Fatalf("lookup failure result = %+v calls=%d", result, calls)
+	}
+}
+
+func TestOneShotRejectsInvalidServerNamesBeforeEffects(t *testing.T) {
+	tokenCalls, recipientCalls, handoffCalls := 0, 0, 0
+	options := Options{
+		LoadHetznerToken: func() (string, error) {
+			tokenCalls++
+			return "", errors.New("token should not be loaded")
+		},
+		MigrationRecipient: func() (int64, error) {
+			recipientCalls++
+			return 7, nil
+		},
+		PrepareRecipientHandoff: func(int64) (func(context.Context, []byte) error, error) {
+			handoffCalls++
+			return func(context.Context, []byte) error { return nil }, nil
+		},
+	}
+	for _, tc := range []struct {
+		name    string
+		request Request
+	}{
+		{name: "omitted", request: Request{ServerType: "cx22"}},
+		{name: "empty", request: Request{ServerType: "cx22", ServerName: ""}},
+		{name: "whitespace-only", request: Request{ServerType: "cx22", ServerName: "   "}},
+		{name: "null decoded as empty", request: Request{ServerType: "cx22", ServerName: ""}},
+		{name: "malformed", request: Request{ServerType: "cx22", ServerName: "goaster-migration-0123456789abcde"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := CreateOnce(context.Background(), tc.request, options, 7)
+			if result.CreationState != "not_created" || result.Code != "invalid_arguments" || result.ServerName != "" {
+				t.Fatalf("invalid name result = %+v", result)
+			}
+		})
+	}
+	if tokenCalls != 0 || recipientCalls != 0 || handoffCalls != 0 {
+		t.Fatalf("invalid names reached effects: token=%d recipient=%d handoff=%d", tokenCalls, recipientCalls, handoffCalls)
 	}
 }
 
@@ -162,6 +206,7 @@ func TestOneShotBoundaries(t *testing.T) {
 		{"delivery already logged", "delivery_logged", "created", "failed", 1},
 		{"wrong secret", "wrong_secret", "created", "failed", 1},
 		{"wrong origin", "wrong_origin", "created", "failed", 1},
+		{"wrong returned name", "wrong_name", "created", "failed", 1},
 		{"lost response", "lost", "unknown", "", 1},
 		{"redirect", "redirect", "unknown", "", 1},
 		{"created error", "created_error", "created", "", 1},
@@ -192,8 +237,12 @@ func TestOneShotBoundaries(t *testing.T) {
 				if tc.mode == "wrong_secret" {
 					secret += "extra"
 				}
+				serverLabel := oneShotTargetName
+				if tc.mode == "wrong_name" {
+					serverLabel = "server1"
+				}
 				w.WriteHeader(201)
-				fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"server1","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":%q}`, origin+"/setup#owner="+secret)
+				fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":%q,"server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":%q}`, serverLabel, origin+"/setup#owner="+secret)
 			}))
 			defer server.Close()
 			opts := DefaultOptions()
@@ -224,7 +273,7 @@ func TestOneShotBoundaries(t *testing.T) {
 			}
 			logs := make(testLog, 8)
 			restore := diagnostics.SetOutput(logs)
-			result := CreateOnce(context.Background(), Request{ServerType: "cx22"}, opts, 7)
+			result := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, opts, 7)
 			restore()
 			logText := logs.text()
 			if tc.mode == "lost" && (strings.Count(logText, "ERROR") != 1 || !strings.Contains(logText, "unexpected EOF") || !strings.Contains(logText, `creation_state="unknown"`) || !strings.Contains(logText, `code="response_unavailable"`)) {
@@ -269,7 +318,7 @@ func TestOneShotRemoteFieldsRedacted(t *testing.T) {
 	var logs strings.Builder
 	restore := diagnostics.SetOutput(&logs)
 	defer restore()
-	result := CreateOnce(context.Background(), Request{ServerType: "cx22"}, opts, 7)
+	result := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, opts, 7)
 	data, _ := json.Marshal(result)
 	for _, value := range []string{secret, "test-token", server.URL} {
 		if strings.Contains(string(data), value) || strings.Contains(logs.String(), value) {

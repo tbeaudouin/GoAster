@@ -453,13 +453,25 @@ func validateBillableRequest(request Request) error {
 	if err := validateMachineRequest(request.ServerType, request.Locations); err != nil {
 		return err
 	}
-	if request.ServerName != "" && !validMigrationServerName(request.ServerName) {
+	if request.ServerName != "" && !ValidMigrationServerName(request.ServerName) {
 		return errInvalidRequest
 	}
 	return rejectLegacyPriceApproval(request)
 }
 
-func validMigrationServerName(value string) bool {
+func validateOneShotRequest(request Request) error {
+	if err := validateBillableRequest(request); err != nil {
+		return err
+	}
+	if !ValidMigrationServerName(request.ServerName) {
+		return errInvalidRequest
+	}
+	return nil
+}
+
+// ValidMigrationServerName accepts only the fixed active one-shot migration
+// name format. Retired monitor records keep their historical request shape.
+func ValidMigrationServerName(value string) bool {
 	const prefix = "goaster-migration-"
 	if len(value) != len(prefix)+16 || !strings.HasPrefix(value, prefix) {
 		return false

@@ -66,7 +66,7 @@ func safeCreateField(s string) string {
 // a compatibility path for legacy callers and tests only.
 func CreateOnce(ctx context.Context, request Request, options Options, owner int64) OneShotResult {
 	safeServerName := ""
-	if validMigrationServerName(request.ServerName) {
+	if ValidMigrationServerName(request.ServerName) {
 		safeServerName = request.ServerName
 	}
 	fail := func(state, code string, err error) OneShotResult {
@@ -75,7 +75,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		}
 		return OneShotResult{CreationState: state, Code: code, ServerName: safeServerName}
 	}
-	if err := validateBillableRequest(request); err != nil {
+	if err := validateOneShotRequest(request); err != nil {
 		return fail("not_created", "invalid_arguments", err)
 	}
 	options = completeOptions(options)
@@ -112,7 +112,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	payload, err := json.Marshal(struct {
 		Token      string   `json:"hcloud_token"`
 		ServerType string   `json:"server_type"`
-		ServerName string   `json:"server_name,omitempty"`
+		ServerName string   `json:"server_name"`
 		Locations  []string `json:"locations,omitempty"`
 		PublicKey  string   `json:"login_public_key"`
 	}{token, request.ServerType, request.ServerName, request.Locations, pub})
@@ -179,7 +179,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		result.HTTPStatus = response.StatusCode
 		result.ProviderCode = diagnostics.BackendValue(scrub(decoded.Error.ProviderCode))
 		if result.Code == codeTargetExists || result.Code == codeProviderLookupFailure {
-			if result.CreationState != creationNotCreated || result.Stage != stageProvider || result.Code == codeTargetExists && (request.ServerName == "" || response.StatusCode != http.StatusConflict || result.ServerID <= 0 || result.ServerLabel == "" || result.ServerLabel != request.ServerName) {
+			if result.CreationState != creationNotCreated || result.Stage != stageProvider || result.Code == codeTargetExists && (response.StatusCode != http.StatusConflict || result.ServerID <= 0 || result.ServerLabel == "" || result.ServerLabel != request.ServerName) {
 				return fail(creationUnknown, "response_unusable", errors.New("invalid exact-name lookup response"))
 			}
 		}
@@ -210,7 +210,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 			}
 		}
 	}
-	if decoded.ServerID <= 0 || result.Attempt == "" || result.ServerLabel == "" || request.ServerName != "" && result.ServerLabel != request.ServerName || result.IP == "" || result.Location == "" || result.Expires <= 0 || parseErr != nil || originErr != nil || setup.Scheme != origin.Scheme || setup.Host != origin.Host || setup.User != nil || !fragmentMatches {
+	if decoded.ServerID <= 0 || result.Attempt == "" || result.ServerLabel == "" || result.ServerLabel != request.ServerName || result.IP == "" || result.Location == "" || result.Expires <= 0 || parseErr != nil || originErr != nil || setup.Scheme != origin.Scheme || setup.Host != origin.Host || setup.User != nil || !fragmentMatches {
 		result.Code = "handoff_failed"
 		result.Handoff = "failed"
 		diagnostics.Error("migration.handoff", errors.New("invalid create success handoff"))

@@ -74,8 +74,8 @@ for phrase in (
 # separately catches stale metadata or authorization guidance alongside SKILL.
 requirements = {
     "META.md": ("one exact migration server", "private", "paired owner"),
-    "AUTH.md": ("public admission and rate bookkeeping first", "read-only exact-name lookup before capacity", "paired private Telegram", "explicit conversational approval", "request-scoped", "never to the model", "local persistence", "duplicate charges", "fresh conversational approval", "server_name", "target_exists", "no_capacity", "1800", "one create call"),
-    "SKILL.md": ("public admission and rate bookkeeping first", "read-only exact-name lookup before capacity", "paired private Telegram", "explicit conversational approval", "eventual exact request", "protected one-shot", "server_name", "target_exists", "1800 seconds", "no_capacity", "do not replay", "Never expose the URL", "separate", "SSH private key", "one scheduled create call"),
+    "AUTH.md": ("public admission and rate bookkeeping first", "read-only exact-name lookup before capacity", "paired private Telegram", "explicit conversational approval", "request-scoped", "never to the model", "local persistence", "duplicate charges", "fresh conversational approval", "server_name", "Every approved immediate or eventual request supplies the same exact", "target_exists", "no_capacity", "1800", "one create call"),
+    "SKILL.md": ("public admission and rate bookkeeping first", "read-only exact-name lookup before capacity", "paired private Telegram", "explicit conversational approval", "eventual exact request", "protected one-shot", "server_name", "target_exists", "Every immediate and scheduled create supplies the same approved fixed name", "1800 seconds", "no_capacity", "do not replay", "Never expose the URL", "separate", "SSH private key", "one scheduled create call"),
 }
 for label, base in (("source", root), ("installed", installed_root)):
     for filename, phrases in requirements.items():

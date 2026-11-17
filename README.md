@@ -1,6 +1,6 @@
 # GoAster
 
-Migration uses an immediate one-shot create or one eventual create after explicit approval in a paired private conversation. The skill generates one exact `goaster-migration-[0-9a-f]{16}` name, persists it in the ordinary cron job, and reuses it every 1800 seconds; the Web endpoint performs public admission and rate bookkeeping first, then checks that name before capacity, migration-record state, key, or billable create work. Only explicit `not_created` plus `no_capacity` retries. `target_exists` stops normally with no new server and no implication setup/key material was recovered; success, uncertainty, handoff failure, lookup failure, and other failures are terminal. Private setup material is sent as a separate URL message and key-only attachment to the paired owner and is not retained locally. Eligible scheduled model turns can make one create call; they cannot schedule further jobs. Dedicated migration monitors and old protected records do not resume, replay, or change.
+Migration uses an immediate one-shot create or one eventual create after explicit approval in a paired private conversation. Every create supplies one approved exact `goaster-migration-[0-9a-f]{16}` name; the agent may generate or propose it without a separate naming workflow. An eventual request persists that same name in the ordinary cron job and reuses it every 1800 seconds; the Web endpoint performs public admission and rate bookkeeping first, then checks that name before capacity, migration-record state, key, or billable create work. Only explicit `not_created` plus `no_capacity` retries. `target_exists` stops normally with no new server and no implication setup/key material was recovered; success, uncertainty, handoff failure, lookup failure, and other failures are terminal. Private setup material is sent as a separate URL message and key-only attachment to the paired owner and is not retained locally. Eligible scheduled model turns can make one create call; they cannot schedule further jobs. Dedicated migration monitors and old protected records do not resume, replay, or change.
 
 Starter installation does not overwrite existing user-owned installed skills. Owners should review and reconcile their installed `goaster-migration` META, AUTH, and SKILL guidance with the bundled one-shot version themselves. Updating existing installations is a separate rollout; this repository change does not establish that any deployed version has been updated or live integration verified.
 
@@ -120,11 +120,14 @@ register command names with hyphens. The command may include Telegram's
 its contents are not sent to the remote agent, model, command output, or logs.
 
 For a central migration, use a private conversation and obtain ordinary
-explicit user approval for the exact server type, strict location preference,
-current estimate/currency (or unavailable pricing), and one immediate or
-eventual create before any billable operation. This is a conversational
-workflow requirement, not a trusted cryptographic binding or a separate
-approval mechanism. The ordinary cron message contains the exact server name, type and locations.
+explicit user approval for one exact fixed name, the exact server type, strict
+location preference, current estimate/currency (or unavailable pricing), and
+one immediate or eventual create before any billable operation. The agent may
+generate or propose the name as part of this workflow; no separate naming
+workflow is needed. This is a conversational workflow requirement, not a
+trusted cryptographic binding or a separate approval mechanism. Every create
+supplies that same approved name; an ordinary cron message also contains the
+exact name, type and locations.
 The model must follow those instructions; they are not an independently bound
 approval record. A claimed private job at 1800 seconds and max_runs=1 receives
 one create capability per turn, and only explicit no-capacity permits retry. Terminal or uncertain outcomes remain stopped for

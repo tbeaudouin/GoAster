@@ -91,13 +91,13 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 	}
 	return registrar.RegisterTool(Tool{
 		Name:        migrationToolName,
-		Description: "Create one server after owner approval in a private chat. A scheduled attempt must use its exact server_name; the Web API checks that name after public admission. Private handoff is sent directly to the owner.",
+		Description: "Create one server after owner approval in a private chat. Every create must use the same approved exact server_name; the Web API checks that name after public admission. Private handoff is sent directly to the owner.",
 		Parameters: map[string]any{"type": "object", "properties": map[string]any{
 			"action":      map[string]any{"type": "string", "enum": []string{"create"}},
 			"server_type": map[string]any{"type": "string"},
 			"server_name": map[string]any{"type": "string"},
 			"locations":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		}, "required": []string{"action", "server_type"}, "additionalProperties": false},
+		}, "required": []string{"action", "server_type", "server_name"}, "additionalProperties": false},
 		Handler: func(ctx context.Context, arguments string) (string, error) {
 			return executeMigrationTool(ctx, arguments, operations)
 		},
@@ -107,7 +107,7 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 type migrationToolArguments struct {
 	Action     string   `json:"action"`
 	ServerType string   `json:"server_type,omitempty"`
-	ServerName string   `json:"server_name,omitempty"`
+	ServerName string   `json:"server_name"`
 	Locations  []string `json:"locations,omitempty"`
 }
 
@@ -126,6 +126,9 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		return reject("request_cancelled")
 	}
 	if parsed.Action != "create" {
+		return reject("invalid_arguments")
+	}
+	if !migration.ValidMigrationServerName(parsed.ServerName) {
 		return reject("invalid_arguments")
 	}
 	if ConversationType(ctx) != "private" {

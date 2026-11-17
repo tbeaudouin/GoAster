@@ -163,6 +163,7 @@ func (log migrationTestLog) Write(data []byte) (int, error) {
 }
 
 func TestMigrationTransportEOFThroughCreateOnce(t *testing.T) {
+	const targetName = "goaster-migration-0123456789abcdef"
 	paths := Paths{Token: filepath.Join(t.TempDir(), "token"), UserID: filepath.Join(t.TempDir(), "user-id")}
 	if err := writePrivate(paths.Token, []byte(testToken)); err != nil {
 		t.Fatal(err)
@@ -176,7 +177,7 @@ func TestMigrationTransportEOFThroughCreateOnce(t *testing.T) {
 			creates.Add(1)
 			secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"server1","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, r.Host, secret)
+			fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"%s","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, targetName, r.Host, secret)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
@@ -214,7 +215,7 @@ func TestMigrationTransportEOFThroughCreateOnce(t *testing.T) {
 	}
 	var logs strings.Builder
 	restore := diagnostics.SetOutput(&logs)
-	result := migration.CreateOnce(t.Context(), migration.Request{ServerType: "cx22"}, opts, 42)
+	result := migration.CreateOnce(t.Context(), migration.Request{ServerType: "cx22", ServerName: targetName}, opts, 42)
 	restore()
 	if result.CreationState != "created" || result.Handoff != "failed" || result.Code != "handoff_failed" || creates.Load() != 1 || uploads.Load() != 1 || messages.Load() != 1 {
 		t.Fatalf("result=%+v creates=%d messages=%d uploads=%d", result, creates.Load(), messages.Load(), uploads.Load())

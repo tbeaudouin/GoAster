@@ -132,8 +132,8 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 				}
 				return migration.OneShotResult{CreationState: "not_created", Code: rejection}
 			}
-			if request.ServerName == "" {
-				diagnostics.Error("agent.cron.migration", errors.New("scheduled migration target name is missing"))
+			if !migration.ValidMigrationServerName(request.ServerName) {
+				diagnostics.Error("agent.cron.migration", errors.New("scheduled migration target name is missing or invalid"))
 				review = true
 				return migration.OneShotResult{CreationState: "not_created", Code: "invalid_arguments"}
 			}
