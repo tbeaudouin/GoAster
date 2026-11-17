@@ -26,7 +26,6 @@ import (
 	"goaster/internal/command"
 	"goaster/internal/controlsecret"
 	"goaster/internal/localenv"
-	"goaster/internal/migration"
 )
 
 type fakeProvider struct{ err error }
@@ -1550,68 +1549,9 @@ func (postToolAgentError) Error() string {
 func (err postToolAgentError) Is(target error) bool { return target.Error() == err.Error() }
 func (err postToolAgentError) Unwrap() error        { return err.cause }
 
-func TestMigrationOperationsRequireScheduler(t *testing.T) {
-	operations := migrationOperations(migration.Options{}, nil, true)
-	result, err := operations.Start(context.Background(), migration.Request{ServerType: "cx22"})
-	if err == nil || !strings.Contains(err.Error(), "migration scheduler capability is unavailable") || result.Status != "unavailable" {
-		t.Fatalf("migration start = %#v, %v", result, err)
-	}
-}
-
-func TestPairedMigrationOptionsWireHandoffWithoutEnablingExecution(t *testing.T) {
-	options := pairedMigrationOptions()
-	if options.PrepareHandoff == nil {
-		t.Fatal("migration handoff preparation is not wired")
-	}
-
-	operations := migrationOperations(options, nil, false)
-	result, err := operations.Start(t.Context(), migration.Request{ServerType: "cx22"})
-	if err == nil || !strings.Contains(err.Error(), "migration scheduler capability is unavailable") || result.Status != "unavailable" {
-		t.Fatalf("migration start with disabled runtime = %#v, %v", result, err)
-	}
-}
-
-type migrationRuntimeRegistrar func(chat.Tool) error
-
-func (f migrationRuntimeRegistrar) RegisterTool(tool chat.Tool) error { return f(tool) }
-
-type migrationRuntimeProbe struct {
-	migrationSchedulerRuntime
-	start func(context.Context) error
-	stop  func()
-}
-
-func (p migrationRuntimeProbe) Start(ctx context.Context) error { return p.start(ctx) }
-func (p migrationRuntimeProbe) Stop()                           { p.stop() }
-
-func TestStartMigrationRuntimeOrderingAndFailure(t *testing.T) {
-	started, stopped := false, false
-	probe := migrationRuntimeProbe{
-		start: func(context.Context) error { started = true; return nil },
-		stop:  func() { stopped = true },
-	}
-	registrar := migrationRuntimeRegistrar(func(tool chat.Tool) error {
-		if !started || stopped || tool.Name != "goaster_migration" {
-			t.Fatal("registration preceded scheduler readiness")
-		}
-		result, err := tool.Handler(chat.WithConversationType(t.Context(), "private"), `{"action":"start_monitor","server_type":""}`)
-		if err != nil || strings.Contains(result, "scheduler capability is unavailable") {
-			t.Fatalf("runtime not wired: %s %v", result, err)
-		}
-		return errors.New("registration failed")
-	})
-	if err := startMigrationRuntime(t.Context(), registrar, migration.Options{}, probe); err == nil || !stopped {
-		t.Fatal("registration failure must stop scheduler")
-	}
-	started, stopped = false, false
-	probe.start = func(context.Context) error { return errors.New("startup failed") }
-	if err := startMigrationRuntime(t.Context(), registrar, migration.Options{}, probe); err == nil || started || stopped {
-		t.Fatal("scheduler failure must prevent registration")
-	}
-}
-
-// The production entry point must not start the retired persistent scheduler.
-func TestServeDoesNotStartLegacyMigrationScheduler(t *testing.T) {
+// The production entry point exposes one-shot create through generic cron;
+// it has no migration-specific lifecycle runtime.
+func TestServeWiresOneShotCreateWithoutMigrationLifecycleRuntime(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1627,7 +1567,7 @@ func TestServeDoesNotStartLegacyMigrationScheduler(t *testing.T) {
 		t.Fatal("serve end missing")
 	}
 	text = text[:end]
-	for _, forbidden := range []string{"newMigrationScheduler(", "startMigrationRuntime(", "StartMonitor(", "ScheduledExecutor("} {
+	for _, forbidden := range []string{"newMigrationScheduler(", "startMigrationRuntime(", "StartMonitor(", "MigrationStatus(", "StopMonitor(", "ScheduledExecutor(", "MonitorScheduler"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("serve starts retired migration runtime: %s", forbidden)
 		}

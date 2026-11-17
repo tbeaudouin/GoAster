@@ -234,68 +234,6 @@ func probeAgent(ctx context.Context, probe string, output io.Writer) error {
 	return err
 }
 
-type migrationSchedulerRuntime interface {
-	migration.MonitorScheduler
-	Start(context.Context) error
-	Stop()
-}
-
-func newMigrationScheduler(options migration.Options) (migrationSchedulerRuntime, error) {
-	path, err := migration.SchedulerPath()
-	if err != nil {
-		return nil, fmt.Errorf("find migration scheduler path: %w", err)
-	}
-	var jobs migrationSchedulerRuntime
-	created, err := scheduler.New(scheduler.Options{
-		Path: path,
-		Executor: func(ctx context.Context, message string) error {
-			return migration.ScheduledExecutor(ctx, message, jobs, options)
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("initialize migration scheduler: %w", err)
-	}
-	jobs = created
-	return jobs, nil
-}
-
-func migrationOperations(options migration.Options, jobs migrationSchedulerRuntime, ready bool) chat.MigrationToolOperations {
-	return chat.MigrationToolOperations{
-		Start: func(ctx context.Context, request migration.Request) (migration.Result, error) {
-			if !ready || jobs == nil {
-				return migration.Result{Status: "unavailable", ServerType: request.ServerType}, errors.New("migration scheduler capability is unavailable")
-			}
-			return migration.StartMonitor(ctx, request, options, jobs)
-		},
-		Status: func(_ context.Context, jobID string) (migration.StatusResult, error) {
-			if !ready || jobs == nil {
-				return migration.StatusResult{}, errors.New("migration scheduler capability is unavailable")
-			}
-			return migration.MigrationStatusWithOptions(jobID, jobs, options)
-		},
-		Stop: func(_ context.Context, jobID string) (migration.Result, error) {
-			if !ready || jobs == nil {
-				return migration.Result{}, errors.New("migration scheduler capability is unavailable")
-			}
-			return migration.StopMonitorWithOptions(jobID, jobs, options)
-		},
-	}
-}
-
-func startMigrationRuntime(ctx context.Context, registrar chat.ToolRegistrar, options migration.Options, jobs migrationSchedulerRuntime) error {
-	if jobs == nil {
-		return errors.New("migration scheduler is unavailable")
-	}
-	if err := jobs.Start(ctx); err != nil {
-		return fmt.Errorf("start migration scheduler: %w", err)
-	}
-	if err := chat.RegisterMigrationTool(registrar, migrationOperations(options, jobs, true)); err != nil {
-		jobs.Stop()
-		return fmt.Errorf("register migration tool: %w", err)
-	}
-	return nil
-}
-
 func reportScheduledMigrationOutcome(ctx context.Context, owner int64, result migration.OneShotResult, report func(context.Context, int64, migration.OneShotResult) error) migration.OneShotResult {
 	if report != nil {
 		if err := report(ctx, owner, result); err != nil {
@@ -310,9 +248,7 @@ func reportScheduledMigrationOutcome(ctx context.Context, owner int64, result mi
 
 func pairedMigrationOptions() migration.Options {
 	options := migration.DefaultOptions()
-	options.PrepareHandoff = telegram.PrepareMigrationHandoff
 	options.MigrationRecipient = telegram.MigrationRecipient
-	options.PrepareRecipientHandoff = telegram.PrepareRecipientMigrationHandoff
 	options.PrepareRecipientHandoffParts = telegram.PrepareRecipientMigrationHandoffParts
 	options.ReportOutcome = telegram.ReportMigrationOutcome
 	return options

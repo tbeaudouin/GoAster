@@ -104,8 +104,8 @@ type Job struct {
 	MaxRuns        int        `json:"max_runs,omitempty"`
 	DeleteAfterRun bool       `json:"delete_after_run,omitempty"`
 	// Origin fields are captured from transport context by the generic cron
-	// tool. They are never accepted from model arguments. Migration monitor
-	// jobs leave them empty and continue using their separate store path.
+	// tool. They are never accepted from model arguments. Jobs created without
+	// transport context leave them empty.
 	OriginChatID   int64  `json:"origin_chat_id,omitempty"`
 	OriginChatType string `json:"origin_chat_type,omitempty"`
 	OriginThreadID int64  `json:"origin_thread_id,omitempty"`

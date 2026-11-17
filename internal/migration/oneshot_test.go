@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"goaster/internal/diagnostics"
@@ -128,8 +129,8 @@ func TestOneShotOfflineFailures(t *testing.T) {
 	opts.HTTPClient = server.Client()
 	opts.LoadHetznerToken = func() (string, error) { return "token", nil }
 	opts.MigrationRecipient = func() (int64, error) { return 7, nil }
-	opts.PrepareRecipientHandoff = func(int64) (func(context.Context, []byte) error, error) {
-		return func(context.Context, []byte) error { return nil }, nil
+	opts.PrepareRecipientHandoffParts = func(int64) (func(context.Context, string, []byte) error, error) {
+		return func(context.Context, string, []byte) error { return nil }, nil
 	}
 	if got := CreateOnce(context.Background(), Request{ServerType: "cx22", ServerName: oneShotTargetName, Locations: []string{"fsn1", "fsn1"}}, opts, 7); got.CreationState != "not_created" || calls != 0 {
 		t.Fatal(got, calls)
@@ -164,9 +165,9 @@ func TestOneShotRejectsInvalidServerNamesBeforeEffects(t *testing.T) {
 			recipientCalls++
 			return 7, nil
 		},
-		PrepareRecipientHandoff: func(int64) (func(context.Context, []byte) error, error) {
+		PrepareRecipientHandoffParts: func(int64) (func(context.Context, string, []byte) error, error) {
 			handoffCalls++
-			return func(context.Context, []byte) error { return nil }, nil
+			return func(context.Context, string, []byte) error { return nil }, nil
 		},
 	}
 	for _, tc := range []struct {
@@ -256,11 +257,11 @@ func TestOneShotBoundaries(t *testing.T) {
 				}
 				return 7, nil
 			}
-			opts.PrepareRecipientHandoff = func(int64) (func(context.Context, []byte) error, error) {
+			opts.PrepareRecipientHandoffParts = func(int64) (func(context.Context, string, []byte) error, error) {
 				if tc.mode == "prepare" {
 					return nil, fmt.Errorf("private failure")
 				}
-				return func(context.Context, []byte) error {
+				return func(context.Context, string, []byte) error {
 					deliveries++
 					if tc.mode == "delivery" {
 						return fmt.Errorf("delivery failure")
@@ -312,8 +313,8 @@ func TestOneShotRemoteFieldsRedacted(t *testing.T) {
 	opts.AllowInsecureHTTP = true
 	opts.LoadHetznerToken = func() (string, error) { return "test-token", nil }
 	opts.MigrationRecipient = func() (int64, error) { return 7, nil }
-	opts.PrepareRecipientHandoff = func(int64) (func(context.Context, []byte) error, error) {
-		return func(context.Context, []byte) error { return nil }, nil
+	opts.PrepareRecipientHandoffParts = func(int64) (func(context.Context, string, []byte) error, error) {
+		return func(context.Context, string, []byte) error { return nil }, nil
 	}
 	var logs strings.Builder
 	restore := diagnostics.SetOutput(&logs)
@@ -346,3 +347,86 @@ type loggedDeliveryFailure struct{}
 
 func (loggedDeliveryFailure) Error() string     { return "delivery failed" }
 func (loggedDeliveryFailure) DiagnosticLogged() {}
+
+func TestOneShotCredentialFailureDiagnostics(t *testing.T) {
+	for _, cause := range []error{ErrHetznerTokenMissing, ErrHetznerTokenInvalid, errors.Join(ErrCredentialStorageUnreadable, syscall.EACCES)} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			var logs strings.Builder
+			restore := diagnostics.SetOutput(&logs)
+			defer restore()
+			options := Options{
+				MigrationRecipient: func() (int64, error) { return 7, nil },
+				PrepareRecipientHandoffParts: func(int64) (func(context.Context, string, []byte) error, error) {
+					return func(context.Context, string, []byte) error {
+						t.Error("credential failure reached delivery")
+						return nil
+					}, nil
+				},
+				LoadHetznerToken: func() (string, error) { return "", cause },
+				HTTPClient: oneShotDoer(func(*http.Request) (*http.Response, error) {
+					t.Error("credential failure reached HTTP")
+					return nil, nil
+				}),
+			}
+			result := CreateOnce(t.Context(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+			if result.CreationState != "not_created" || result.Code != "credentials_unavailable" || strings.Count(logs.String(), "ERROR") != 1 || !strings.Contains(logs.String(), `code="credentials_unavailable"`) {
+				t.Fatalf("result=%+v log=%s", result, logs.String())
+			}
+			expected := cause.Error()
+			if errors.Is(cause, ErrCredentialStorageUnreadable) {
+				expected = ErrCredentialStorageUnreadable.Error()
+			}
+			if !strings.Contains(logs.String(), expected) || errors.Is(cause, syscall.EACCES) && !strings.Contains(logs.String(), "permission denied") {
+				t.Fatalf("safe cause missing: %s", logs.String())
+			}
+		})
+	}
+}
+
+type oneShotDoer func(*http.Request) (*http.Response, error)
+
+func (do oneShotDoer) Do(request *http.Request) (*http.Response, error) { return do(request) }
+
+func TestOneShotRejectsAmbiguousResponses(t *testing.T) {
+	const valid = `{"creation_state":"not_created","error":{"code":"no_capacity","stage":"provider","http_status":409}}`
+	for _, tc := range []struct {
+		name, body  string
+		code, state string
+	}{
+		{"no capacity", valid, "no_capacity", "not_created"},
+		{"duplicate field", strings.Replace(valid, `"creation_state":"not_created"`, `"creation_state":"unknown","creation_state":"not_created"`, 1), "response_unusable", "unknown"},
+		{"unknown field", strings.Replace(valid, `"error":`, `"private":"synthetic-response-secret","error":`, 1), "response_unusable", "unknown"},
+		{"case alias", strings.Replace(valid, `"creation_state"`, `"Creation_State"`, 1), "response_unusable", "unknown"},
+		{"trailing JSON", valid + ` {}`, "response_unusable", "unknown"},
+		{"oversize", strings.Repeat(" ", 65537), "response_unusable", "unknown"},
+		{"wrong existing name", `{"creation_state":"not_created","server_id":42,"server_label":"goaster-migration-fedcba9876543210","error":{"code":"target_exists","stage":"provider","http_status":409}}`, "response_unusable", "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, deliveries := 0, 0
+			var logs strings.Builder
+			restore := diagnostics.SetOutput(&logs)
+			defer restore()
+			options := Options{
+				MigrationRecipient: func() (int64, error) { return 7, nil },
+				PrepareRecipientHandoffParts: func(int64) (func(context.Context, string, []byte) error, error) {
+					return func(context.Context, string, []byte) error { deliveries++; return nil }, nil
+				},
+				LoadHetznerToken: func() (string, error) { return "synthetic-provider-token", nil },
+				HTTPClient: oneShotDoer(func(*http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{StatusCode: 409, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+				}),
+			}
+			result := CreateOnce(t.Context(), Request{ServerType: "cx22", ServerName: oneShotTargetName}, options, 7)
+			encoded, _ := json.Marshal(result)
+			if calls != 1 || deliveries != 0 || result.Code != tc.code || result.CreationState != tc.state || strings.Count(logs.String(), "ERROR") != 1 {
+				t.Fatalf("result=%+v calls=%d deliveries=%d log=%s", result, calls, deliveries, logs.String())
+			}
+			for _, value := range []string{"synthetic-provider-token", "synthetic-response-secret"} {
+				if strings.Contains(logs.String()+string(encoded), value) {
+					t.Fatal("private response or credential leaked")
+				}
+			}
+		})
+	}
+}

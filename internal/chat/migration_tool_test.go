@@ -35,7 +35,7 @@ func TestMigrationToolOneShotPrivate(t *testing.T) {
 		t.Fatalf("migration tool required fields = %#v", r.tool.Parameters["required"])
 	}
 	ctx := WithConversationID(WithConversationType(context.Background(), "private"), 7)
-	for _, bad := range []string{`{"action":"start","server_type":"cx22"}`, `{"action":"status"}`, `{"action":"create","server_type":"cx22","retry_attempt":"x"}`} {
+	for _, bad := range []string{`{"action":"unsupported","server_type":"cx22"}`, `{"action":"create","server_type":"cx22","unexpected":"x"}`, `{"action":"create","server_type":"cx22","server_name":"` + migrationToolTargetName + `","unexpected":"x"}`} {
 		r.tool.Handler(ctx, bad)
 	}
 	r.tool.Handler(WithConversationType(context.Background(), "group"), `{"action":"create","server_type":"cx22","server_name":"`+migrationToolTargetName+`"}`)
@@ -71,6 +71,9 @@ func TestMigrationToolRejectsInvalidServerNamesBeforeCreate(t *testing.T) {
 		name string
 		args string
 	}{
+		{name: "missing server type", args: `{"action":"create","server_name":"` + migrationToolTargetName + `"}`},
+		{name: "empty server type", args: `{"action":"create","server_type":"","server_name":"` + migrationToolTargetName + `"}`},
+		{name: "whitespace server type", args: `{"action":"create","server_type":" cx22 ","server_name":"` + migrationToolTargetName + `"}`},
 		{name: "omitted", args: `{"action":"create","server_type":"cx22"}`},
 		{name: "empty", args: `{"action":"create","server_type":"cx22","server_name":""}`},
 		{name: "whitespace-only", args: `{"action":"create","server_type":"cx22","server_name":"   "}`},

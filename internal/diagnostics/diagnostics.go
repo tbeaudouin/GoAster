@@ -152,8 +152,6 @@ func Error(operation string, err error, fields ...Field) {
 			value = MigrationCode(field.Value)
 		case "creation_state":
 			value = MigrationCreationState(field.Value)
-		case "monitor_id":
-			value = MigrationMonitorID(field.Value)
 		case "phase":
 			switch field.Value {
 			case "pre-stream", "stream", "post-stream":
@@ -176,22 +174,23 @@ func Error(operation string, err error, fields ...Field) {
 	outputMu.Unlock()
 }
 
-// MigrationStage retains only the fixed migration diagnostic stages.
+// MigrationStage retains only fixed stages from the active one-shot create
+// contract.
 func MigrationStage(value string) string {
 	switch value {
-	case "input", "configuration", "storage", "recipient", "monitor", "availability", "create", "handoff", "provider", "status", "stop", "tool", "unknown":
+	case "input", "configuration", "storage", "recipient", "request", "create", "handoff", "provider", "service", "tool", "unknown":
 		return value
 	default:
 		return ""
 	}
 }
 
-// MigrationCode retains only the fixed migration diagnostic codes. The legacy
-// values remain accepted because validated retained records may contain them.
+// MigrationCode retains only fixed codes from the active one-shot create
+// contract.
 func MigrationCode(value string) string {
 	switch value {
-	case "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable",
-		"no_capacity", "target_exists", "provider_lookup_failure", "response_unavailable", "response_unusable", "invalid_arguments", "capability_unavailable", "missing_hcloud_token", "credential_storage_unreadable", "invalid_hcloud_token", "protected_storage_failure", "recipient_unavailable", "recipient_changed", "handoff_failure", "cancelled", "timeout", "dns_failure", "tls_failure", "transport_failure", "invalid_response", "web_auth_rejected", "web_http_error", "provider_auth_rejected", "provider_http_error", "upstream_unknown", "monitor_state_failure", "monitor_not_found", "monitor_in_progress", "monitor_stop_unconfirmed", "persisted_state_invalid", "monitor_started", "monitor_stopped", "retry_confirmation_required", "created", "created_delivery_failed", "availability_retry_exhausted", "manual_review", "unknown_failure":
+	case "credentials_unavailable", "key_generation_failed", "configuration_invalid", "request_invalid", "handoff_failed", "provider_timeout", "provider_dns_failure", "provider_tls_failure", "provider_transport_failure", "invalid_request", "operation_conflict", "creation_uncertain", "storage_unavailable", "rate_limited", "unauthorized", "unavailable",
+		"no_capacity", "target_exists", "provider_lookup_failure", "response_unavailable", "response_unusable", "invalid_arguments", "capability_unavailable", "missing_hcloud_token", "credential_storage_unreadable", "invalid_hcloud_token", "protected_storage_failure", "recipient_unavailable", "recipient_changed", "handoff_failure", "cancelled", "timeout", "dns_failure", "tls_failure", "transport_failure", "invalid_response", "web_auth_rejected", "web_http_error", "provider_auth_rejected", "provider_http_error", "upstream_unknown", "created", "created_delivery_failed", "manual_review", "unknown_failure":
 		return value
 	default:
 		return ""
@@ -207,19 +206,6 @@ func MigrationCreationState(value string) string {
 	default:
 		return ""
 	}
-}
-
-// MigrationMonitorID retains only non-secret local migration monitor IDs.
-func MigrationMonitorID(value string) string {
-	if len(value) <= len("migration-") || len(value) > 96 || !strings.HasPrefix(value, "migration-") {
-		return ""
-	}
-	for _, character := range value {
-		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
-			return ""
-		}
-	}
-	return value
 }
 
 func token(s string) string {
@@ -319,6 +305,7 @@ func knownDescription(message string) string {
 		"OpenAI subscription authentication required: credential file has no access token",
 		"OpenAI subscription authentication required: saved credentials have no refresh token",
 		"OpenAI subscription authentication required: saved access token is expired and has no refresh token",
+		"HCLOUD_TOKEN is missing", "HCLOUD_TOKEN is invalid", "migration credential storage is unreadable",
 		"credential path is empty", "credential file must not be a symbolic link", "token response has no access token",
 		"authentication checker is unavailable", "chat provider is nil", "too many attachments", "invalid conversation history",
 		"Codex response is missing", "Codex response body is missing", "OpenAI response is missing", "OpenAI response body is missing",

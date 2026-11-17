@@ -115,14 +115,12 @@ func TestMigrationDiagnosticMetadataAllowlist(t *testing.T) {
 		Field{Key: "stage", Value: "create"},
 		Field{Key: "code", Value: "invalid_request"},
 		Field{Key: "creation_state", Value: "not_created"},
-		Field{Key: "monitor_id", Value: "migration-safe"},
 		Field{Key: "stage", Value: "private-stage"},
 		Field{Key: "code", Value: "private-code"},
-		Field{Key: "creation_state", Value: "private-state"},
-		Field{Key: "monitor_id", Value: "/tmp/private"})
+		Field{Key: "creation_state", Value: "private-state"})
 
 	log := output.String()
-	for _, want := range []string{`stage="create"`, `code="invalid_request"`, `creation_state="not_created"`, `monitor_id="migration-safe"`} {
+	for _, want := range []string{`stage="create"`, `code="invalid_request"`, `creation_state="not_created"`} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("migration diagnostic = %q, missing %q", log, want)
 		}
@@ -138,6 +136,11 @@ func TestMigrationTargetCodesAreAllowlisted(t *testing.T) {
 	for _, code := range []string{"target_exists", "provider_lookup_failure"} {
 		if got := MigrationCode(code); got != code {
 			t.Fatalf("MigrationCode(%q) = %q", code, got)
+		}
+	}
+	for _, code := range []string{"monitor_started", "monitor_stopped", "retry_confirmation_required"} {
+		if got := MigrationCode(code); got != "" {
+			t.Fatalf("retired MigrationCode(%q) = %q", code, got)
 		}
 	}
 }

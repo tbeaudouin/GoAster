@@ -62,8 +62,8 @@ func safeCreateField(s string) string {
 }
 
 // CreateOnce sends one request and never persists or retries secret material.
-// Active callers use the split handoff callback; the combined callback remains
-// a compatibility path for legacy callers and tests only.
+// The setup URL and private key are delivered through the split owner handoff
+// callback only.
 func CreateOnce(ctx context.Context, request Request, options Options, owner int64) OneShotResult {
 	safeServerName := ""
 	if ValidMigrationServerName(request.ServerName) {
@@ -79,28 +79,22 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		return fail("not_created", "invalid_arguments", err)
 	}
 	options = completeOptions(options)
-	if owner <= 0 || options.MigrationRecipient == nil || options.PrepareRecipientHandoffParts == nil && options.PrepareRecipientHandoff == nil {
+	if owner <= 0 || options.MigrationRecipient == nil || options.PrepareRecipientHandoffParts == nil {
 		return fail("not_created", "recipient_unavailable", errors.New("paired recipient unavailable"))
 	}
 	current, err := options.MigrationRecipient()
 	if err != nil || current != owner {
 		return fail("not_created", "recipient_unavailable", errors.Join(errors.New("paired recipient mismatch"), err))
 	}
-	var deliver func(context.Context, []byte) error
-	var deliverParts func(context.Context, string, []byte) error
-	if options.PrepareRecipientHandoffParts != nil {
-		deliverParts, err = options.PrepareRecipientHandoffParts(owner)
-	} else {
-		deliver, err = options.PrepareRecipientHandoff(owner)
-	}
-	if err != nil || deliver != nil && deliverParts != nil || deliver == nil && deliverParts == nil {
+	deliverParts, err := options.PrepareRecipientHandoffParts(owner)
+	if err != nil || deliverParts == nil {
 		return fail("not_created", "recipient_unavailable", errors.Join(errors.New("handoff unavailable"), err))
 	}
 	token, err := options.LoadHetznerToken()
 	if err != nil {
 		return fail("not_created", "credentials_unavailable", err)
 	}
-	pub, private, secret, _, err := generateLoginMaterial()
+	pub, private, secret, err := generateLoginMaterial()
 	if err != nil {
 		return fail("not_created", "key_generation_failed", err)
 	}
@@ -178,9 +172,9 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		result.Stage = diagnostics.MigrationStage(scrub(decoded.Error.Stage))
 		result.HTTPStatus = response.StatusCode
 		result.ProviderCode = diagnostics.BackendValue(scrub(decoded.Error.ProviderCode))
-		if result.Code == codeTargetExists || result.Code == codeProviderLookupFailure {
-			if result.CreationState != creationNotCreated || result.Stage != stageProvider || result.Code == codeTargetExists && (response.StatusCode != http.StatusConflict || result.ServerID <= 0 || result.ServerLabel == "" || result.ServerLabel != request.ServerName) {
-				return fail(creationUnknown, "response_unusable", errors.New("invalid exact-name lookup response"))
+		if result.Code == "target_exists" || result.Code == "provider_lookup_failure" {
+			if result.CreationState != "not_created" || result.Stage != "provider" || result.Code == "target_exists" && (response.StatusCode != http.StatusConflict || result.ServerID <= 0 || result.ServerLabel == "" || result.ServerLabel != request.ServerName) {
+				return fail("unknown", "response_unusable", errors.New("invalid exact-name lookup response"))
 			}
 		}
 		diagnostics.Error("migration.create", errors.New("service returned create error"), diagnostics.Field{Key: "status", Value: fmt.Sprint(response.StatusCode)}, diagnostics.Field{Key: "code", Value: result.Code}, diagnostics.Field{Key: "stage", Value: result.Stage}, diagnostics.Field{Key: "creation_state", Value: result.CreationState}, diagnostics.Field{Key: "backend_code", Value: result.ProviderCode})
@@ -223,13 +217,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		diagnostics.Error("migration.handoff", errors.Join(errors.New("paired recipient changed"), err))
 		return result
 	}
-	if deliverParts != nil {
-		err = deliverParts(ctx, decoded.SetupURL, private)
-	} else {
-		handoff := buildHandoff(decoded.SetupURL, decoded.ServerID, decoded.IP, private)
-		defer clear(handoff)
-		err = deliver(ctx, handoff)
-	}
+	err = deliverParts(ctx, decoded.SetupURL, private)
 	if err != nil {
 		result.Code = "handoff_failed"
 		result.Handoff = "failed"

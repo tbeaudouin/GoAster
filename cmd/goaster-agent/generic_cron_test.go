@@ -453,7 +453,7 @@ func TestGenericCronRejectedSecondMigrationCallDisarmsRetry(t *testing.T) {
 		cancel           bool
 	}{
 		{name: "malformed", args: `{"action":"create","server_type":7}`, code: "invalid_arguments"},
-		{name: "wrong action", args: `{"action":"stop"}`, code: "invalid_arguments"},
+		{name: "wrong action", args: `{"action":"unsupported"}`, code: "invalid_arguments"},
 		{name: "cancelled", args: scheduledMigrationToolArguments, code: "request_cancelled", cancel: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

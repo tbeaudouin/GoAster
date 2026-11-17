@@ -1,3 +1,26 @@
 # Migration
 
-See [API-first migration integration](api-first-migration-20261116.md) and the bundled `goaster-migration` skill. Every immediate and scheduled `goaster_migration` create supplies the same approved fixed name in the exact `goaster-migration-[0-9a-f]{16}` format; the agent may generate or propose it as part of the workflow without a separate naming workflow. After conversational approval for one exact name, type and optional strict locations, the existing generic `cron` tool can carry one protected one-shot eventual-create instruction at 1800 seconds; there is no migration-specific schedule action. Scheduling persists that exact target name, and every attempt sends it as `server_name`; the Web endpoint performs existing public admission and rate bookkeeping first, then the read-only exact-name lookup before capacity, migration-record state, key, or billable create work. It retries only an explicit `not_created` plus `no_capacity`; `target_exists` is a normal stop with no new server or setup/key recovery claim. Success, handoff failure, lookup failure, timeout or unknown, and every other failure are terminal. Dedicated migration monitors are retired, and old protected records are untouched and do not resume or replay. The setup URL and key-only SSH attachment are delivered separately to the revalidated paired private owner; there is no secret local persistence.
+The active `goaster_migration` tool accepts only `action: "create"`, the
+required exact `server_type`, the required exact
+`goaster-migration-[0-9a-f]{16}` `server_name`, and optional strict
+`locations`. It is available only in a paired private conversation. The
+one-shot source loads the protected provider token, generates an ephemeral Ed25519 key
+and owner secret, sends one HTTPS create request, and delivers the setup URL
+and key as separate private handoff parts to the revalidated paired owner.
+
+Public server discovery and rough pricing belong to the normal public
+search/fetch tools and the migration skill. They are informational and do not
+gate the create call. The Web endpoint performs its own admission, exact-name
+lookup, capacity, and provider sequence. The source does not expose provider
+credentials, setup URLs, private keys, or request bodies to the model, cron
+messages, logs, or local persistence.
+
+An eventual request uses the ordinary generic `cron` tool with the approved
+exact name, type, and locations in its message, `every_seconds: 1800`, and
+`max_runs: 1`. A claimed turn can call create once and cannot add another
+job. Only an explicit `creation_state: "not_created"` with `code:
+"no_capacity"` rearms the job. A `target_exists` result stops normally without
+creating another server; all other outcomes, including an uncertain response
+or incomplete handoff, stop for safe private reporting and manual
+reconciliation. Existing files from older installations are not read,
+deleted, migrated, or resumed by this runtime.

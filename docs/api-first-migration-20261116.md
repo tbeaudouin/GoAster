@@ -1,9 +1,25 @@
-# API-first migration integration
+# One-shot migration integration
 
-The active `goaster_migration` tool accepts only `action=create`, the exact server type, one required exact fixed `server_name` for every create, and optional strict locations. In a paired private Telegram conversation, it loads the current protected Hetzner token, generates an ephemeral Ed25519 key and bearer secret, and sends one request to the web contract in `api-first-web-contract-20261116.md`. The service chooses architecture and image. No price cap or operation history is used. The handoff goes directly to the revalidated paired owner. Secrets are not returned to the model or persisted by this flow.
+The active `goaster_migration` tool accepts only `action: "create"`, exact
+`server_type` and exact `server_name`, plus optional strict `locations`. A
+paired private conversation supplies approval and the owner identity. The
+source sends one request to `POST /api/migration/create`, keeps credentials
+and private handoff material out of model-visible results, and uses the
+split Telegram handoff for the setup URL and `id_ed25519` key attachment.
 
-Every immediate `create` is one-shot and supplies the approved exact fixed `server_name`. For an eventual request, the agent may generate or propose one cryptographically random exact name matching `^goaster-migration-[0-9a-f]{16}$` as part of the same workflow; it is placed in an ordinary generic cron job at 1800 seconds with `max_runs=1`, and there is no migration-specific schedule action. Every due run reuses that same name in the protected one-shot `POST /api/migration/create`; the endpoint performs public admission and rate bookkeeping first, then checks that exact name before capacity, migration-record state, key, or billable create work. Only an explicit `creation_state=not_created` and `code=no_capacity` result rearms the job. `target_exists` stops normally with no new server created and does not imply setup or key recovery. Creation, handoff failure or partial delivery, lookup failure, lost or unusable responses, and every other failure are terminal and require safe private reporting or manual review. A new attempt requires the skill's duplicate billing warning and one owner approval; account inspection is optional.
+Waiting uses the ordinary generic cron tool: the approved name, type, and
+locations remain in the message, the interval is 1800 seconds, and
+`max_runs` is 1. The scheduler grants one create call per claimed turn and
+rearms only for the exact `not_created` / `no_capacity` result. Success,
+`target_exists`, uncertainty, provider lookup failure, handoff failure, and
+all other results are terminal. A later interactive attempt requires the
+normal duplicate-charge warning and fresh approval.
 
-The setup URL is sent as a separate clickable private message and the SSH private key as a separate key-only `id_ed25519` attachment. The paired owner is revalidated before each part; partial delivery never triggers recreation. A claimed private cron job with 1800-second interval and max_runs=1 permits one scheduled create call. The model follows the visible message for request terms; these terms are not separately bound. Dedicated migration monitors are retired: they will not resume or replay, and old protected records are untouched.
+Public catalogue discovery and rough pricing are normal informational
+search/fetch work. They are not an authenticated provider prerequisite or a
+price-approval field. Existing files from older installations are not read,
+deleted, migrated, or resumed by this source runtime.
 
-Offline validation: `go test ./...`, `go vet ./...`, and `go test -race ./internal/migration ./internal/chat ./internal/telegram ./cmd/goaster-agent`. Tests use fake HTTP and delivery functions and must not contact live services.
+Offline validation uses local HTTP and delivery fakes; no live provider,
+Telegram, Web, deployment, or cloud operation is part of this repository's
+tests.

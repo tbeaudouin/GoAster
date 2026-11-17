@@ -7,13 +7,10 @@ import (
 	"io"
 	"strings"
 
-	"goaster/internal/diagnostics"
 	"goaster/internal/migration"
 )
 
 const migrationToolName = "goaster_migration"
-
-const migrationRetryConfirmationWarning = "The previous attempt may already have created a server. Trying again could create a duplicate and add charges. I recommend checking your Hetzner account for duplicate servers. Are you sure you want me to try again?"
 
 type conversationTypeKey struct{}
 type conversationIDKey struct{}
@@ -62,36 +59,34 @@ func ConversationType(ctx context.Context) string {
 type scheduledMigrationKey struct{}
 type scheduledMigrationStartedKey struct{}
 
-// WithScheduledMigrationStarted guards cron mutations after a migration begins.
+// WithScheduledMigrationStarted guards cron mutations after a scheduled
+// create attempt begins.
 func WithScheduledMigrationStarted(ctx context.Context, started func() bool) context.Context {
 	return context.WithValue(ctx, scheduledMigrationStartedKey{}, started)
 }
 
-// WithScheduledMigration is set by the claimed transport cron executor, never by tool arguments.
+// WithScheduledMigration is set by the claimed generic cron executor, never by
+// tool arguments.
 func WithScheduledMigration(ctx context.Context, create func(context.Context, migration.Request, string) migration.OneShotResult) context.Context {
 	return context.WithValue(ctx, scheduledMigrationKey{}, create)
 }
 
-// MigrationToolOperations keeps the model-facing control plane separate from
-// the privileged migration executor. No operation accepts a token, key,
-// owner URL, chat ID, or callback secret.
+// MigrationToolOperations contains the sole model-facing create capability.
+// The owner identity and private handoff are supplied by the transport/runtime
+// rather than by model arguments.
 type MigrationToolOperations struct {
 	Create func(context.Context, migration.Request, int64) migration.OneShotResult
-	Start  func(context.Context, migration.Request) (migration.Result, error)
-	Status func(context.Context, string) (migration.StatusResult, error)
-	Stop   func(context.Context, string) (migration.Result, error)
 }
 
-// RegisterMigrationTool exposes the source-side migration control plane. The
-// handoff is delivered directly by the paired Telegram implementation after
-// ordinary explicit approval in a private conversation.
+// RegisterMigrationTool exposes one-shot server creation after ordinary
+// explicit approval in a paired private conversation.
 func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOperations) error {
 	if registrar == nil {
 		return errors.New("migration tool registrar is nil")
 	}
 	return registrar.RegisterTool(Tool{
 		Name:        migrationToolName,
-		Description: "Create one server after owner approval in a private chat. Every create must use the same approved exact server_name; the Web API checks that name after public admission. Private handoff is sent directly to the owner.",
+		Description: "Create one server after owner approval in a private chat. Every create must use the approved exact server_name and server_type; locations are optional strict constraints. Private URL and key handoff is sent directly to the paired owner.",
 		Parameters: map[string]any{"type": "object", "properties": map[string]any{
 			"action":      map[string]any{"type": "string", "enum": []string{"create"}},
 			"server_type": map[string]any{"type": "string"},
@@ -106,7 +101,7 @@ func RegisterMigrationTool(registrar ToolRegistrar, operations MigrationToolOper
 
 type migrationToolArguments struct {
 	Action     string   `json:"action"`
-	ServerType string   `json:"server_type,omitempty"`
+	ServerType string   `json:"server_type"`
 	ServerName string   `json:"server_name"`
 	Locations  []string `json:"locations,omitempty"`
 }
@@ -125,10 +120,7 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 	if err := ctx.Err(); err != nil {
 		return reject("request_cancelled")
 	}
-	if parsed.Action != "create" {
-		return reject("invalid_arguments")
-	}
-	if !migration.ValidMigrationServerName(parsed.ServerName) {
+	if parsed.Action != "create" || parsed.ServerType == "" || strings.TrimSpace(parsed.ServerType) != parsed.ServerType || !migration.ValidMigrationServerName(parsed.ServerName) {
 		return reject("invalid_arguments")
 	}
 	if ConversationType(ctx) != "private" {
@@ -172,71 +164,4 @@ func encodeMigrationToolResult(value any) (string, error) {
 		return "", errors.Join(errors.New("encode migration tool result"), err)
 	}
 	return string(data), nil
-}
-
-type migrationToolErrorResponse struct {
-	Status            string `json:"status"`
-	Stage             string `json:"stage"`
-	Code              string `json:"code"`
-	Cause             string `json:"cause"`
-	HTTPStatus        int    `json:"http_status,omitempty"`
-	ProviderCode      string `json:"provider_code,omitempty"`
-	MonitorID         string `json:"monitor_id,omitempty"`
-	ResultState       string `json:"result_state"`
-	CreationState     string `json:"creation_state"`
-	MonitoringState   string `json:"monitoring_state"`
-	MonitoringStopped bool   `json:"monitoring_stopped"`
-	NextAction        string `json:"next_action"`
-}
-
-func migrationToolRejected(code string) string {
-	return `{"creation_state":"not_created","code":"invalid_arguments"}`
-}
-
-func migrationToolOperationFailure(err error, result migration.Result) string {
-	diagnostic := migration.DiagnosticFor(err, result)
-	if !migration.IsMigrationFailure(err) {
-		fields := migration.DiagnosticLogFields(diagnostic)
-		diagnostics.Error("migration.tool", err, fields...)
-	}
-	return encodeMigrationToolError("error", diagnostic)
-}
-
-func migrationToolCapabilityFailure(err error) string {
-	diagnostics.Error("migration.tool", err)
-	return encodeMigrationToolError("error", migration.CapabilityUnavailableDiagnostic())
-}
-
-func safeMigrationMonitorID(value string) bool {
-	if len(value) < len("migration-")+1 || len(value) > 96 || !strings.HasPrefix(value, "migration-") {
-		return false
-	}
-	for _, character := range value {
-		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
-			return false
-		}
-	}
-	return true
-}
-
-func encodeMigrationToolError(status string, diagnostic migration.Diagnostic) string {
-	response := migrationToolErrorResponse{
-		Status:            status,
-		Stage:             diagnostic.Stage,
-		Code:              diagnostic.Code,
-		Cause:             diagnostic.Cause,
-		HTTPStatus:        diagnostic.HTTPStatus,
-		ProviderCode:      diagnostic.ProviderCode,
-		MonitorID:         diagnostic.MonitorID,
-		ResultState:       diagnostic.ResultState,
-		CreationState:     diagnostic.CreationState,
-		MonitoringState:   diagnostic.MonitoringState,
-		MonitoringStopped: diagnostic.MonitoringStopped,
-		NextAction:        diagnostic.NextAction,
-	}
-	data, err := json.Marshal(response)
-	if err != nil {
-		return `{"status":"error","stage":"tool","code":"unknown_failure","cause":"the migration failed for an unclassified reason","result_state":"error","creation_state":"unknown","monitoring_state":"unknown","monitoring_stopped":false,"next_action":"inspect status and reconcile external state before any new attempt"}`
-	}
-	return string(data)
 }

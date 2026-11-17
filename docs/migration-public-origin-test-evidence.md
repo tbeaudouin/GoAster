@@ -3,31 +3,14 @@
 ## Scope
 
 Migration guidance and packaging checks use the fixed public service
-`https://goasterweb-thomas.fly.dev/`. The skill prohibits deployment/address
-questions and speculative readiness gates while retaining TLS verification,
-stop/report on actual HTTPS failures, secret protections, create-once records,
-new-bot identity, and private-conversation explicit approval for exact cost
-terms.
+`https://goasterweb-thomas.fly.dev/`. The active workflow uses normal public
+search/fetch tools for catalogue discovery and rough pricing, then sends one
+HTTPS create request after paired-private approval. TLS verification, actual
+HTTPS failure reporting, secret protection, exact-name validation, and the
+split private URL/key handoff remain required.
 
 ## Offline validation
 
-Verified using installed Go 1.25.9 explicitly because the default PATH Go is
-older than this repository requires. All commands passed:
-
-```sh
-GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local /usr/local/go/bin/go test ./...
-GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local /usr/local/go/bin/go vet ./...
-sh packaging/test-skill-assets.sh
-git diff --check
-```
-
-Packaging tests inspect canonical origin/service URL, prohibited deployment
-and address questions, callback/owner URLs, actual-failure safeguards,
-packaged skill content, and local Markdown links.
-
-## Remaining gaps
-
-No live GoAsterWeb, Redis, Telegram, SSH or Hetzner requests were made.
-No provisioning, migration, restart or live conversational acceptance was
-performed. Existing running GoAster instances do not receive this source
-change until separately upgraded and their installed skill refreshed.
+The Go tests use local HTTP and Telegram fakes. The packaging check validates
+the installed skill tree and local Markdown links. No provider, Web, Telegram,
+SSH, deployment, or cloud request is part of this evidence.

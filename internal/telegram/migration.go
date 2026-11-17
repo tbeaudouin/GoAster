@@ -12,7 +12,6 @@ import (
 	"goaster/internal/migration"
 )
 
-const migrationHandoffFilename = "goaster-migration-handoff.txt"
 const migrationPrivateKeyFilename = "id_ed25519"
 const migrationHandoffMaxBytes int64 = 32 * 1024
 
@@ -22,17 +21,6 @@ func migrationTelegramClient() httpDoer {
 		Transport:     &http.Transport{Proxy: nil},
 		CheckRedirect: noRedirect,
 	}
-}
-
-// PrepareMigrationHandoff fixes the paired recipient before a create request.
-func PrepareMigrationHandoff() (func(context.Context, []byte) error, error) {
-	return prepareMigrationHandoffWith(DefaultPaths, migrationTelegramClient(), "https://api.telegram.org")
-}
-
-// PrepareMigrationHandoffParts fixes the paired recipient before an active
-// one-shot create. The setup URL and private key are delivered separately.
-func PrepareMigrationHandoffParts() (func(context.Context, string, []byte) error, error) {
-	return prepareMigrationHandoffPartsWith(DefaultPaths, migrationTelegramClient(), "https://api.telegram.org")
 }
 
 func MigrationRecipient() (int64, error) { return migrationRecipient(DefaultPaths) }
@@ -50,34 +38,8 @@ func migrationRecipient(paths Paths) (int64, error) {
 	return id, nil
 }
 
-func PrepareRecipientMigrationHandoff(expected int64) (func(context.Context, []byte) error, error) {
-	return prepareRecipientMigrationHandoffWith(DefaultPaths, migrationTelegramClient(), "https://api.telegram.org", expected)
-}
-
 func PrepareRecipientMigrationHandoffParts(expected int64) (func(context.Context, string, []byte) error, error) {
 	return PrepareRecipientMigrationHandoffPartsWith(DefaultPaths, migrationTelegramClient(), "https://api.telegram.org", expected)
-}
-
-func prepareRecipientMigrationHandoffWith(paths Paths, client httpDoer, apiBase string, expected int64) (func(context.Context, []byte) error, error) {
-	current, err := migrationRecipient(paths)
-	if err != nil || expected <= 0 || current != expected {
-		return nil, errors.Join(errors.New("migration paired user changed or is unavailable"), err)
-	}
-	token, err := readPrivate(paths.Token)
-	if err != nil {
-		return nil, errors.Join(errors.New("migration Telegram token is unavailable"), err)
-	}
-	defer clear(token)
-	if err := ValidateToken(string(token)); err != nil {
-		return nil, errors.Join(errors.New("migration Telegram token is unavailable"), err)
-	}
-	return func(ctx context.Context, data []byte) error {
-		current, err := migrationRecipient(paths)
-		if err != nil || current != expected {
-			return errors.Join(errors.New("migration paired user changed or is unavailable"), err)
-		}
-		return sendMigrationHandoffTo(ctx, paths, client, apiBase, expected, data)
-	}, nil
 }
 
 // PrepareRecipientMigrationHandoffPartsWith configures the split handoff transport.
@@ -99,78 +61,12 @@ func PrepareRecipientMigrationHandoffPartsWith(paths Paths, client httpDoer, api
 	}, nil
 }
 
-func prepareMigrationHandoffWith(paths Paths, client httpDoer, apiBase string) (func(context.Context, []byte) error, error) {
-	userData, err := readPrivate(paths.UserID)
-	if err != nil {
-		return nil, errors.New("migration paired user is unavailable")
-	}
-	defer clear(userData)
-	userID, err := strconv.ParseInt(string(userData), 10, 64)
-	if err != nil || userID <= 0 {
-		return nil, errors.New("migration paired user is unavailable")
-	}
-	token, err := readPrivate(paths.Token)
-	if err != nil {
-		return nil, errors.Join(errors.New("migration Telegram token is unavailable"), err)
-	}
-	defer clear(token)
-	if err := ValidateToken(string(token)); err != nil {
-		return nil, errors.Join(errors.New("migration Telegram token is unavailable"), err)
-	}
-	return func(ctx context.Context, data []byte) error {
-		return sendMigrationHandoffTo(ctx, paths, client, apiBase, userID, data)
-	}, nil
-}
-
-func prepareMigrationHandoffPartsWith(paths Paths, client httpDoer, apiBase string) (func(context.Context, string, []byte) error, error) {
-	userData, err := readPrivate(paths.UserID)
-	if err != nil {
-		return nil, errors.New("migration paired user is unavailable")
-	}
-	defer clear(userData)
-	userID, err := strconv.ParseInt(string(userData), 10, 64)
-	if err != nil || userID <= 0 {
-		return nil, errors.New("migration paired user is unavailable")
-	}
-	token, err := readPrivate(paths.Token)
-	if err != nil {
-		return nil, errors.Join(errors.New("migration Telegram token is unavailable"), err)
-	}
-	defer clear(token)
-	if err := ValidateToken(string(token)); err != nil {
-		return nil, errors.Join(errors.New("migration Telegram token is unavailable"), err)
-	}
-	return func(ctx context.Context, setupURL string, privateKey []byte) error {
-		return sendMigrationHandoffPartsTo(ctx, paths, client, apiBase, userID, setupURL, privateKey)
-	}, nil
-}
-
 // deliveryError keeps the underlying cause while indicating that Telegram owns the diagnostic.
 type deliveryError struct{ cause error }
 
 func (err deliveryError) Error() string     { return "migration handoff delivery failed" }
 func (err deliveryError) Unwrap() error     { return err.cause }
 func (err deliveryError) DiagnosticLogged() {}
-
-func sendMigrationHandoffTo(ctx context.Context, paths Paths, client httpDoer, apiBase string, userID int64, data []byte) error {
-	if len(data) == 0 || int64(len(data)) > migrationHandoffMaxBytes {
-		return errors.New("migration handoff is unavailable")
-	}
-	token, err := readPrivate(paths.Token)
-	if err != nil {
-		diagnostics.Error("telegram.migration_delivery", err, diagnostics.Field{Key: "method", Value: "sendDocument"})
-		return deliveryError{cause: err}
-	}
-	defer clear(token)
-	if err := ValidateToken(string(token)); err != nil {
-		diagnostics.Error("telegram.migration_delivery", err, diagnostics.Field{Key: "method", Value: "sendDocument"})
-		return deliveryError{cause: err}
-	}
-	if err := sendDocument(ctx, client, apiBase, string(token), userID, migrationHandoffFilename, data, diagnostics.Field{Key: "stage", Value: "handoff"}, diagnostics.Field{Key: "creation_state", Value: "created"}, diagnostics.Field{Key: "code", Value: "handoff_failure"}); err != nil {
-		return deliveryError{cause: err}
-	}
-	return nil
-}
 
 func sendMigrationHandoffPartsTo(ctx context.Context, paths Paths, client httpDoer, apiBase string, userID int64, setupURL string, privateKey []byte) error {
 	if strings.TrimSpace(setupURL) == "" || len(privateKey) == 0 || int64(len(privateKey)) > migrationHandoffMaxBytes {

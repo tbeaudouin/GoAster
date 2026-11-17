@@ -89,7 +89,7 @@ for label, base in (("source", root), ("installed", installed_root)):
                 raise SystemExit(f"{label} migration {filename} retained retired guidance: {forbidden!r}")
 
 notes = " ".join((root / "docs" / "goaster-migration.md").read_text(encoding="utf-8").split())
-for phrase in ("retired", "protected one-shot", "server_name", "target_exists", "no secret local persistence"):
+for phrase in ("ordinary generic", "one-shot", "server_name", "target_exists", "local persistence"):
     if phrase not in notes:
         raise SystemExit(f"migration notes missing guidance: {phrase!r}")
 

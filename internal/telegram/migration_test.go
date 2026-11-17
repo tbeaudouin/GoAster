@@ -49,12 +49,7 @@ func TestMigrationHandoffUsesOnlyStoredPairedUser(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"result":{"message_id":1}}`)),
 		}, nil
 	})
-	data := []byte("GoAster migration setup: https://web.example/migration#attempt=abc&owner=secret\nprivate key material")
-	deliver, err := prepareMigrationHandoffWith(paths, client, "https://telegram.synthetic")
-	if err != nil {
-		t.Fatal(err)
-	}
-	parts, err := prepareMigrationHandoffPartsWith(paths, client, "https://telegram.synthetic")
+	parts, err := PrepareRecipientMigrationHandoffPartsWith(paths, client, "https://telegram.synthetic", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,28 +59,15 @@ func TestMigrationHandoffUsesOnlyStoredPairedUser(t *testing.T) {
 	if len(requestPaths) != 2 || !strings.HasSuffix(requestPaths[0], "/sendMessage") || !strings.HasSuffix(requestPaths[1], "/sendDocument") || !strings.Contains(requestBodies[0], "https://web.example/migration#attempt=abc") || !strings.Contains(requestBodies[0], "owner=secret") || !strings.Contains(requestBodies[1], "BEGIN PRIVATE KEY") {
 		t.Fatalf("split handoff requests = %q / %q", requestPaths, requestBodies)
 	}
-	if err := os.WriteFile(paths.UserID, []byte("42"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	changeAfterMessage = true
 	if err := parts(t.Context(), "https://web.example/migration#attempt=partial&owner=secret", []byte("-----BEGIN PRIVATE KEY-----\npartial\n-----END PRIVATE KEY-----\n")); err == nil || switchErr != nil || len(requestPaths) != 3 || !strings.HasSuffix(requestPaths[2], "/sendMessage") {
 		t.Fatalf("owner change after link was accepted: err=%v switch=%v paths=%q", err, switchErr, requestPaths)
 	}
-	if err := os.WriteFile(paths.UserID, []byte("42"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := deliver(t.Context(), data); err != nil {
-		t.Fatal(err)
-	}
-	if requestPath != "/bot"+testToken+"/sendDocument" {
+	if requestPath != "/bot"+testToken+"/sendMessage" {
 		t.Fatalf("Telegram endpoint = %q", requestPath)
 	}
-	bodyText := string(requestBody)
-	if !strings.Contains(bodyText, "name=\"chat_id\"\r\n\r\n42\r\n") || !strings.Contains(bodyText, "private key material") {
-		t.Fatalf("paired-user document body = %q", bodyText)
-	}
-	if strings.Contains(bodyText, "name=\"chat_id\"\r\n\r\n99\r\n") || strings.Contains(bodyText, "model-supplied") {
-		t.Fatalf("document delivery leaked a group or model destination: %q", bodyText)
+	if !strings.Contains(string(requestBody), `"chat_id":42`) || strings.Contains(string(requestBody), `"chat_id":99`) {
+		t.Fatalf("paired-user message body = %q", requestBody)
 	}
 }
 
@@ -113,45 +95,18 @@ func TestOfflineMigrationRecipientChangePreventsDelivery(t *testing.T) {
 	}
 	calls := 0
 	client := doerFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, nil })
-	deliver, err := prepareRecipientMigrationHandoffWith(paths, client, "https://telegram.synthetic", 42)
+	deliver, err := PrepareRecipientMigrationHandoffPartsWith(paths, client, "https://telegram.synthetic", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(paths.UserID, []byte("99"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := deliver(t.Context(), []byte("synthetic")); err == nil || calls != 0 {
+	if err := deliver(t.Context(), "https://web.example/migration#attempt=changed&owner=secret", []byte("synthetic")); err == nil || calls != 0 {
 		t.Fatalf("changed pairing accepted: err=%v calls=%d", err, calls)
 	}
-	if _, err := prepareRecipientMigrationHandoffWith(paths, client, "https://telegram.synthetic", 42); err == nil {
+	if _, err := PrepareRecipientMigrationHandoffPartsWith(paths, client, "https://telegram.synthetic", 42); err == nil {
 		t.Fatal("changed pairing accepted for preparation")
-	}
-}
-
-func TestMigrationDeliveryPreservesLoggedCause(t *testing.T) {
-	paths := Paths{Token: filepath.Join(t.TempDir(), "token")}
-	if err := writePrivate(paths.Token, []byte(testToken)); err != nil {
-		t.Fatal(err)
-	}
-	cause := errors.New("private-transport-detail")
-	client := doerFunc(func(*http.Request) (*http.Response, error) { return nil, cause })
-	logs := make(migrationTestLog, 8)
-	restore := diagnostics.SetOutput(logs)
-	err := sendMigrationHandoffTo(t.Context(), paths, client, "https://telegram.synthetic", 42, []byte("private-handoff"))
-	restore()
-	close(logs)
-	logText := ""
-	for line := range logs {
-		logText += line
-	}
-	if !errors.Is(err, cause) {
-		t.Fatal("transport cause lost")
-	}
-	if _, ok := err.(interface{ DiagnosticLogged() }); !ok {
-		t.Fatal("missing diagnostic ownership")
-	}
-	if strings.Count(logText, "ERROR") != 1 || strings.Contains(logText, "private-transport-detail") || strings.Contains(logText, "private-handoff") || strings.Contains(err.Error(), "private-transport-detail") {
-		t.Fatalf("unsafe diagnostic: %s", logText)
 	}
 }
 
