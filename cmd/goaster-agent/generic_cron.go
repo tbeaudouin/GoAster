@@ -105,6 +105,7 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	requestContext := chat.WithConversationType(ctx, job.OriginChatType)
 	requestContext = chat.WithConversationID(requestContext, job.OriginChatID)
 	requestContext = chat.WithConversationThreadID(requestContext, job.OriginThreadID)
+	requestContext = chat.WithScheduledCronJobID(requestContext, job.ID)
 	requestContext = chat.WithRuntimeFailureOperation(requestContext, "agent.cron")
 	var resultMu sync.Mutex
 	called, retry, review := false, false, false
@@ -175,6 +176,14 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 		}
 		return err
 	}
+	resultMu.Lock()
+	shouldRetry := retry
+	resultMu.Unlock()
+	if shouldRetry {
+		// No-capacity is the only deliberately quiet outcome. The same durable
+		// recurring job remains enabled and the scheduler computes its next run.
+		return scheduler.ErrRetry
+	}
 	if enqueue == nil {
 		cause := errors.New("generic cron delivery queue is unavailable")
 		diagnostics.Error("agent.cron.delivery", cause, diagnostics.Field{Key: "reason", Value: "delivery queue is unavailable"})
@@ -186,9 +195,6 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	}
 	resultMu.Lock()
 	defer resultMu.Unlock()
-	if retry {
-		return scheduler.ErrRetry
-	}
 	if review {
 		cause := errors.New("scheduled migration result requires review")
 		return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: cause}

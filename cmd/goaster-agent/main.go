@@ -235,6 +235,9 @@ func probeAgent(ctx context.Context, probe string, output io.Writer) error {
 }
 
 func reportScheduledMigrationOutcome(ctx context.Context, owner int64, result migration.OneShotResult, report func(context.Context, int64, migration.OneShotResult) error) migration.OneShotResult {
+	if result.CreationState == "not_created" && result.Code == "no_capacity" {
+		return result
+	}
 	if report != nil {
 		if err := report(ctx, owner, result); err != nil {
 			if _, logged := err.(interface{ DiagnosticLogged() }); !logged {
@@ -293,6 +296,9 @@ func serve(store chat.CredentialStore) (serveErr error) {
 	}
 	if err := chat.RegisterCronTool(provider, cronJobs); err != nil {
 		return fmt.Errorf("register cron tool: %w", err)
+	}
+	if err := chat.RegisterCronSelfDisableTool(provider, cronJobs); err != nil {
+		return fmt.Errorf("register cron self-disable tool: %w", err)
 	}
 	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{
 		Create: func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {

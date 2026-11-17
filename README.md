@@ -1,6 +1,6 @@
 # GoAster
 
-Migration is one-shot server creation after explicit approval in a paired private conversation. Each create supplies the approved exact `goaster-migration-[0-9a-f]{16}` name, exact server type, and optional strict locations. A waiting request uses the ordinary generic cron tool with that same message, `every_seconds: 1800`, and `max_runs: 1`; only an explicit `not_created` plus `no_capacity` result rearms that job. `target_exists`, success, uncertainty, handoff failure, lookup failure, and other results are terminal. Private setup material is sent as a separate URL message and key-only attachment to the paired owner and is not retained locally. A scheduled turn gets one create capability and cannot add another job. This runtime has no migration-specific monitor or operation store; any existing files from an older installation are not read, deleted, migrated, or resumed.
+Migration is one-shot server creation after one private approval for the exact cryptorandom `goaster-migration-[0-9a-f]{16}` name, exact server type, optional strict locations, and rough public price. An immediate top-level `not_created` plus `no_capacity` result creates one ordinary generic cron job with that same literal action/name/type/locations message, `every_seconds: 1800`, and `max_runs: 1`; the same job then waits silently on that exact result. `target_exists`, success, uncertainty, handoff failure, lookup failure, and other results disable/report as appropriate. Private setup material is sent as a separate clickable URL message and key-only attachment to the paired owner and is not retained locally. A scheduled turn gets one create capability, cannot add another job, and may use only the runtime-bound no-argument self-disable tool after create begins. This runtime has no migration-specific monitor or operation store; any existing files from an older installation are not read, deleted, migrated, or resumed.
 
 Starter installation does not overwrite existing user-owned installed skills. Owners should review and reconcile their installed `goaster-migration` META, AUTH, and SKILL guidance with the bundled one-shot version themselves. Updating existing installations is a separate rollout; this repository change does not establish that any deployed version has been updated or live integration verified.
 
@@ -119,16 +119,17 @@ register command names with hyphens. The command may include Telegram's
 `@bot_username` suffix. Telegram receives the file directly as `goaster.env`;
 its contents are not sent to the remote agent, model, command output, or logs.
 
-For a central migration, use a private conversation and obtain ordinary
-explicit user approval for one exact name, exact server type, optional strict
-locations, and one immediate or eventual create before any billable operation.
-Public discovery and rough pricing are informational inputs from the normal
-public search/fetch tools; they are not a required provider API gate. The
-agent may generate the exact name as part of this workflow. An eventual
-request uses an ordinary generic cron message containing the approved name,
-type, and locations. One claimed private job gets one create capability per
-turn, and only explicit no-capacity permits retry. Terminal or uncertain
-outcomes stop for manual review.
+For a central migration, use a private conversation and follow the bundled
+four-step journey: privately check protected `~/.goaster/env` before process
+`HCLOUD_TOKEN`; if missing, use `/get-env`, local `goaster.env`, same-message
+`/env`, review, and exact `ACCEPT`; ask the exact server choice or help;
+propose the exact name/type/locations/rough price; and obtain one spending
+approval covering the immediate create and 30-minute capacity-only retries.
+Before requesting approval, MUST check the latest official public rough pricing
+on a best-effort basis and explicitly report unknown if unavailable.
+Public discovery and rough pricing are informational inputs from official
+public pages, not a target, ceiling, ranking, billing discussion, or provider
+API pricing gate. Secrets stay out of model context and logs.
 
 ## Models
 

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"testing"
 	"time"
 )
 
@@ -475,5 +477,130 @@ func checkCronRejectsSymlinkedExplicitAncestor(t schedulerTestReporter) {
 	}
 	if err := store.Save(nil); err == nil || !strings.Contains(err.Error(), "cron directory") {
 		t.Fatalf("save through symlinked ancestor = %v", err)
+	}
+}
+
+func TestSelfDisableWinsRetryForOrdinaryAndClaimedRuns(t *testing.T) {
+	for _, claimed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("claimed_%t", claimed), func(t *testing.T) {
+			clock := time.Unix(1000, 0)
+			path := filepath.Join(t.TempDir(), "jobs.json")
+			var jobs *Scheduler
+			var calls int
+			var err error
+			jobs, err = New(Options{Path: path, Now: func() time.Time { return clock }, JobExecutor: func(ctx context.Context, job Job) error {
+				calls++
+				if claimed {
+					if _, _, err := jobs.ClaimExecutionMatching(ctx, job); err != nil {
+						return err
+					}
+				}
+				if _, err := jobs.DisableOwnExecution(ctx, job); err != nil {
+					return err
+				}
+				store, err := NewStore(path)
+				if err != nil {
+					return err
+				}
+				persisted, err := store.Load()
+				if err != nil {
+					return err
+				}
+				if len(persisted) != 1 || !persisted[0].SelfDisabled || persisted[0].Enabled {
+					return errors.New("self-disable was not durable during execution")
+				}
+				return ErrRetry
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err := jobs.Add(Job{Kind: ScheduleEvery, EverySeconds: 60, Message: "test", OriginChatID: 42, OriginChatType: "private"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock = clock.Add(time.Minute)
+			if runs := jobs.RunDue(context.Background()); runs != 1 {
+				t.Fatalf("runs = %d", runs)
+			}
+			saved, ok := jobs.Get(job.ID)
+			if !ok || saved.Enabled || saved.NextRun != nil || saved.Status != StatusDisabled || saved.SelfDisabled {
+				t.Fatalf("final state: %+v", saved)
+			}
+			clock = clock.Add(time.Hour)
+			restarted, err := New(Options{Path: path, Now: func() time.Time { return clock }, JobExecutor: func(context.Context, Job) error { calls++; return nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runs := restarted.RunDue(context.Background()); runs != 0 || calls != 1 {
+				t.Fatalf("replayed: runs=%d calls=%d", runs, calls)
+			}
+			saved, ok = restarted.Get(job.ID)
+			if !ok || saved.Enabled || saved.NextRun != nil || saved.Status != StatusDisabled {
+				t.Fatalf("reloaded state: %+v", saved)
+			}
+		})
+	}
+}
+
+func TestSelfDisableRejectsOwnerPausedUntilLaterRun(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	firstChecked := make(chan struct{})
+	resumeCall := make(chan struct{})
+	disableResult := make(chan error, 1)
+	var disable func(executionOwner, Job) error
+	secondStarted := make(chan struct{})
+	finishSecond := make(chan struct{})
+	finished := make(chan int, 1)
+	calls := 0
+	jobs, err := New(Options{Path: filepath.Join(t.TempDir(), "jobs.json"), Now: func() time.Time { return clock }, JobExecutor: func(ctx context.Context, job Job) error {
+		calls++
+		if calls == 1 {
+			owner, ok := scheduledExecutionOwner(ctx)
+			if !ok {
+				return errors.New("missing first execution owner")
+			}
+			go func() {
+				close(firstChecked)
+				<-resumeCall
+				disableResult <- disable(owner, job)
+			}()
+			<-firstChecked
+		} else {
+			close(secondStarted)
+			<-finishSecond
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disable = func(owner executionOwner, job Job) error {
+		_, err := jobs.disableOwnExecution(owner, job)
+		return err
+	}
+	job, err := jobs.Add(Job{Kind: ScheduleEvery, EverySeconds: 60, Message: "test", OriginChatID: 42, OriginChatType: "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	if runs := jobs.RunDue(context.Background()); runs != 1 {
+		t.Fatalf("first runs = %d", runs)
+	}
+	// The call is paused after its first liveness check.
+	clock = clock.Add(time.Minute)
+	go func() { finished <- jobs.RunDue(context.Background()) }()
+	<-secondStarted
+	close(resumeCall)
+	disableErr := <-disableResult
+	close(finishSecond)
+	if runs := <-finished; runs != 1 {
+		t.Fatalf("second runs = %d", runs)
+	}
+	if !errors.Is(disableErr, ErrExecutionClaimUnavailable) {
+		t.Fatalf("expired owner error = %v", disableErr)
+	}
+	saved, ok := jobs.Get(job.ID)
+	if !ok || !saved.Enabled || saved.SelfDisabled || saved.Status != StatusSuccess {
+		t.Fatalf("later run was affected: %+v", saved)
 	}
 }

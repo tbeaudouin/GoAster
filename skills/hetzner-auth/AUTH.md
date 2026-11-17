@@ -23,8 +23,10 @@ For a current read-only availability clarification, use only
 `GET /v1/server_types?name=<url-encoded-exact-type>`, match the requested
 server type in `server_types[]`, and inspect the requested type's
 `locations[].available` values. Do not use the retired generic
-`GET /v1/datacenters` endpoint (removed 2026-10-01), shell around the API, or
-invent a migration availability tool or endpoint. The result is a snapshot,
+`GET /v1/datacenters` endpoint (removed 2026-10-01) or
+invent a migration availability tool or endpoint. A token-safe read-only direct
+provider API request through shell is allowed; keep credentials out of arguments,
+tracing, output, and model context, and return only needed safe fields. The result is a snapshot,
 not a reservation or capacity guarantee; never expose the token or
 Authorization header in chat, model context, logs, or command output.
 
@@ -32,10 +34,15 @@ Use authenticated API requests for actual provider availability and creation.
 A safe read-only request can answer a needed clarification, but API pricing is
 not a required pricing, discovery, or preapproval gate. Public Hetzner Cloud
 pages are the source for indicative catalogue and rough public price
-information; public rough prices are informational and do not guarantee
+information; public rough prices are informational only, not a target, ceiling,
+ranking, or billing discussion, and do not guarantee
 capacity. Authentication does not prove project identity; do not invent a
 project metadata check. If authentication fails, stop auth-dependent work.
 Emit one bounded ERROR diagnostic with safe operation and status context at
 runtime failure boundaries, as repository rules require.
 
 This skill does not authorize resource mutations or costs.
+
+For migration approval, you MUST check the latest official public rough pricing
+before requesting approval. Make a best-effort check and explicitly report
+unknown if unavailable; no authenticated API pricing request is required.

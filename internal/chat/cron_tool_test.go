@@ -548,11 +548,167 @@ func TestScheduledCronManagementAndMigrationGate(t *testing.T) {
 	if _, err := executeCronTool(ctx, `{"action":"disable","id":"`+job.ID+`"}`, jobs); err != nil {
 		t.Fatal(err)
 	}
+	ctx = WithScheduledMigrationStarted(ctx, func() bool { return false })
+	if _, err := executeCronTool(ctx, `{"action":"add","every_seconds":60,"message":"recursive"}`, jobs); err == nil {
+		t.Fatal("migration added cron before create")
+	}
 	ctx = WithScheduledMigrationStarted(ctx, func() bool { return true })
+	if _, err := executeCronTool(ctx, `{"action":"add","every_seconds":60,"message":"recursive"}`, jobs); err == nil {
+		t.Fatal("migration added cron after create")
+	}
 	if _, err := executeCronTool(ctx, `{"action":"enable","id":"`+job.ID+`"}`, jobs); err == nil {
 		t.Fatal("migration rearmed cron")
 	}
 	if _, err := executeCronTool(ctx, `{"action":"list"}`, jobs); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCronSelfDisableIsScheduledOnlyBoundAndDurable(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	var selfHandler ToolHandler
+	var cronHandler ToolHandler
+	var handlerForContext func(context.Context) (ToolHandler, bool)
+	var firstID string
+	var staleContext context.Context
+	var executions int
+	jobs, err := scheduler.New(scheduler.Options{
+		Path: filepath.Join(t.TempDir(), "jobs.json"),
+		Now:  func() time.Time { return clock },
+		JobExecutor: func(ctx context.Context, job scheduler.Job) error {
+			executions++
+			if job.ID != firstID {
+				return fmt.Errorf("unexpected job %q", job.ID)
+			}
+			scheduled := context.WithValue(ctx, scheduledTurnKey{}, true)
+			scheduled = WithConversationType(scheduled, "private")
+			scheduled = WithConversationID(scheduled, 77)
+			scheduled = WithConversationThreadID(scheduled, 9)
+			scheduled = WithScheduledCronJobID(scheduled, job.ID)
+			if bound, ok := ScheduledCronJobID(scheduled); !ok || bound != job.ID {
+				return errors.New("runtime job ID was not visible in the genuine scheduled context")
+			}
+			if handlerForContext == nil {
+				return errors.New("self-disable handler lookup is unavailable")
+			}
+			if _, ok := handlerForContext(scheduled); !ok {
+				return errors.New("self-disable tool was not exposed to scheduled turn")
+			}
+
+			forgedID := WithScheduledCronJobID(scheduled, "other-job")
+			if _, ok := ScheduledCronJobID(forgedID); ok {
+				return errors.New("forged runtime job ID was exposed")
+			}
+			if _, err := selfHandler(forgedID, `{}`); err == nil {
+				return errors.New("forged runtime job ID was accepted")
+			}
+			wrongOrigin := WithConversationID(scheduled, 88)
+			if _, err := selfHandler(wrongOrigin, `{}`); err == nil {
+				return errors.New("wrong conversation owner was accepted")
+			}
+			if _, err := selfHandler(scheduled, `{"id":"other-job"}`); err == nil {
+				return errors.New("model-supplied target ID was accepted")
+			}
+
+			if _, err := cronHandler(scheduled, `{"action":"add","every_seconds":3600,"message":"ordinary scheduled management"}`); err != nil {
+				return fmt.Errorf("ordinary scheduled add: %w", err)
+			}
+			before := WithScheduledMigrationStarted(scheduled, func() bool { return false })
+			if _, err := cronHandler(before, `{"action":"add","every_seconds":60,"message":"recursive"}`); err == nil {
+				return errors.New("cron add was accepted before migration began")
+			}
+
+			started := WithScheduledMigrationStarted(scheduled, func() bool { return true })
+			staleContext = started
+			if _, err := cronHandler(started, `{"action":"add","every_seconds":60,"message":"must be rejected"}`); err == nil {
+				return errors.New("ordinary cron mutation was accepted after migration began")
+			}
+			if _, err := selfHandler(started, `{}`); err != nil {
+				return fmt.Errorf("self-disable after migration began: %w", err)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := NewCodexProvider(CredentialStore{})
+	if err := RegisterCronTool(provider, jobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterCronSelfDisableTool(provider, jobs); err != nil {
+		t.Fatal(err)
+	}
+	selfHandler = provider.tools.byName[cronSelfDisableToolName]
+	cronHandler = provider.tools.byName[cronToolName]
+	if selfHandler == nil || cronHandler == nil {
+		t.Fatal("cron handlers were not registered")
+	}
+	handlerForContext = func(ctx context.Context) (ToolHandler, bool) {
+		return provider.tools.handlerFor(cronSelfDisableToolName, ctx)
+	}
+	if _, ok := provider.tools.handlerFor(cronSelfDisableToolName, context.Background()); ok {
+		t.Fatal("self-disable tool was exposed during a normal turn")
+	}
+	for _, definition := range provider.tools.definitions() {
+		if definition.Name == cronSelfDisableToolName {
+			t.Fatal("self-disable definition was exposed during a normal turn")
+		}
+	}
+	if _, err := selfHandler(context.Background(), `{}`); err == nil {
+		t.Fatal("normal-turn self-disable call unexpectedly succeeded")
+	}
+
+	first, err := jobs.Add(scheduler.Job{
+		ID:             "self-job",
+		Kind:           scheduler.ScheduleEvery,
+		EverySeconds:   60,
+		Message:        "self-disable",
+		MaxRuns:        1,
+		OriginChatID:   77,
+		OriginChatType: "private",
+		OriginThreadID: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID = first.ID
+	other, err := jobs.Add(scheduler.Job{
+		ID:             "other-job",
+		Kind:           scheduler.ScheduleEvery,
+		EverySeconds:   3600,
+		Message:        "must remain enabled",
+		OriginChatID:   88,
+		OriginChatType: "private",
+		OriginThreadID: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(60 * time.Second)
+	if runs := jobs.RunDue(context.Background()); runs != 1 || executions != 1 {
+		t.Fatalf("self-disable execution count = runs:%d executions:%d", runs, executions)
+	}
+	if _, err := selfHandler(staleContext, `{}`); err == nil {
+		t.Fatal("stale completed execution context was accepted")
+	}
+	saved, ok := jobs.Get(first.ID)
+	if !ok || saved.Enabled || saved.Status != scheduler.StatusCompleted || saved.RunCount != 1 || saved.NextRun != nil {
+		t.Fatalf("self-disabled job = %+v", saved)
+	}
+	otherSaved, ok := jobs.Get(other.ID)
+	if !ok || !otherSaved.Enabled || otherSaved.Status != scheduler.StatusScheduled {
+		t.Fatalf("other job was affected = %+v", otherSaved)
+	}
+	restarted, err := scheduler.New(scheduler.Options{Path: jobs.Path(), Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs := restarted.RunDue(context.Background()); runs != 0 {
+		t.Fatalf("self-disabled job replayed after restart: %d", runs)
+	}
+	restartedSaved, ok := restarted.Get(first.ID)
+	if !ok || restartedSaved.Enabled || restartedSaved.Status != scheduler.StatusCompleted || restartedSaved.RunCount != 1 {
+		t.Fatalf("restarted self-disabled job = %+v", restartedSaved)
 	}
 }

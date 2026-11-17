@@ -100,6 +100,7 @@ type Job struct {
 	Error          string     `json:"error,omitempty"`
 	ReviewRequired bool       `json:"review_required,omitempty"`
 	ExecutionClaim bool       `json:"execution_claim,omitempty"`
+	SelfDisabled   bool       `json:"self_disabled,omitempty"`
 	RunCount       int        `json:"run_count"`
 	MaxRuns        int        `json:"max_runs,omitempty"`
 	DeleteAfterRun bool       `json:"delete_after_run,omitempty"`
@@ -542,6 +543,7 @@ func New(options Options) (*Scheduler, error) {
 			job.NextRun = nil
 			job.ReviewRequired = true
 			job.ExecutionClaim = false
+			job.SelfDisabled = false
 			changed = true
 		}
 		if job.Kind == ScheduleAt && !job.DeleteAfterRun {
@@ -887,6 +889,42 @@ type executionOwner struct {
 	scheduler chan struct{}
 	id        string
 	state     chan bool
+	done      chan struct{}
+}
+
+func scheduledExecutionOwner(ctx context.Context) (executionOwner, bool) {
+	if ctx == nil {
+		return executionOwner{}, false
+	}
+	owner, ok := ctx.Value(executionOwnerKey{}).(executionOwner)
+	if !ok || owner.scheduler == nil || owner.state == nil || owner.done == nil || strings.TrimSpace(owner.id) == "" {
+		return executionOwner{}, false
+	}
+	select {
+	case <-owner.done:
+		return executionOwner{}, false
+	default:
+	}
+	return owner, true
+}
+
+// ScheduledExecutionJobID returns the job ID bound by the scheduler to a live
+// scheduled executor. There is deliberately no public setter: callers can use
+// this value for context plumbing, but scheduler mutations must still validate
+// the unforgeable execution owner below.
+func ScheduledExecutionJobID(ctx context.Context) (string, bool) {
+	owner, ok := scheduledExecutionOwner(ctx)
+	if !ok {
+		return "", false
+	}
+	return owner.id, true
+}
+
+// IsScheduledExecution reports whether ctx came from a live scheduler executor.
+// A scheduled-turn marker alone is not sufficient for this check.
+func IsScheduledExecution(ctx context.Context) bool {
+	_, ok := scheduledExecutionOwner(ctx)
+	return ok
 }
 
 // ClaimExecution reserves a job and returns a completion function. A direct
@@ -908,8 +946,8 @@ func (s *Scheduler) claimExecution(ctx context.Context, id string, expected Job,
 	id = strings.TrimSpace(id)
 	var owner executionOwner
 	var scheduled bool
-	if ctx != nil {
-		owner, scheduled = ctx.Value(executionOwnerKey{}).(executionOwner)
+	if candidate, ok := scheduledExecutionOwner(ctx); ok {
+		owner, scheduled = candidate, true
 	}
 	var unlockRun func()
 	successOwner := false
@@ -1009,6 +1047,61 @@ func (s *Scheduler) StopIfNotRunning(id string) (Job, error) {
 	s.jobs[id] = job
 	if err := s.saveLocked(); err != nil {
 		s.jobs[id] = previous
+		return Job{}, err
+	}
+	s.signalWake()
+	return cloneJob(job), nil
+}
+
+// DisableOwnExecution disables only the currently executing scheduled job.
+// The scheduler-bound owner supplies the target ID internally; expectedOrigin
+// is checked in the same durable transaction so a context from another chat or
+// forum topic cannot stop this job. The live claim and running status remain
+// intact until the normal execution finalizer records the result.
+func (s *Scheduler) DisableOwnExecution(ctx context.Context, expectedOrigin Job) (Job, error) {
+	if s == nil {
+		return Job{}, fmt.Errorf("cron scheduler is nil")
+	}
+	owner, ok := scheduledExecutionOwner(ctx)
+	if !ok || owner.scheduler != s.wake {
+		return Job{}, ErrExecutionClaimUnavailable
+	}
+	if expectedOrigin.OriginChatID == 0 || strings.TrimSpace(expectedOrigin.OriginChatType) == "" || expectedOrigin.OriginChatType == "unknown" || expectedOrigin.OriginThreadID < 0 {
+		return Job{}, ErrExecutionClaimUnavailable
+	}
+	return s.disableOwnExecution(owner, expectedOrigin)
+}
+
+func (s *Scheduler) disableOwnExecution(owner executionOwner, expectedOrigin Job) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.reloadLocked()
+	if err != nil {
+		return Job{}, err
+	}
+	defer unlock()
+	// Revocation takes mu too, so this owner remains live through the save.
+	select {
+	case <-owner.done:
+		return Job{}, ErrExecutionClaimUnavailable
+	default:
+	}
+	job, ok := s.jobs[owner.id]
+	if !ok {
+		return Job{}, fmt.Errorf("%w: %s", ErrJobNotFound, owner.id)
+	}
+	if job.Status != StatusRunning || !sameOrigin(job, expectedOrigin) {
+		return Job{}, ErrExecutionClaimUnavailable
+	}
+	previous := job
+	job.Enabled = false
+	job.NextRun = nil
+	job.SelfDisabled = true
+	// Keep Status and ExecutionClaim unchanged. The normal executor owns the
+	// final transition and must retain crash/uncertainty recovery semantics.
+	s.jobs[owner.id] = job
+	if err := s.saveLocked(); err != nil {
+		s.jobs[owner.id] = previous
 		return Job{}, err
 	}
 	s.signalWake()
@@ -1137,6 +1230,7 @@ func (s *Scheduler) RunDue(ctx context.Context) int {
 			job.NextRun = nil
 			job.ReviewRequired = true
 			job.ExecutionClaim = false
+			job.SelfDisabled = false
 			s.jobs[id] = job
 			changed = true
 		}
@@ -1268,7 +1362,7 @@ func (s *Scheduler) executeClaim(ctx context.Context, claimed Job) {
 	if s.jobExecutor == nil && s.executor == nil {
 		executionErr = errors.New("cron scheduler executor is nil")
 	} else {
-		owner := executionOwner{scheduler: s.wake, id: claimed.ID, state: make(chan bool, 1)}
+		owner := executionOwner{scheduler: s.wake, id: claimed.ID, state: make(chan bool, 1), done: make(chan struct{})}
 		owner.state <- false
 		executionContext := context.WithValue(ctx, executionOwnerKey{}, owner)
 		if s.jobExecutor != nil {
@@ -1276,6 +1370,11 @@ func (s *Scheduler) executeClaim(ctx context.Context, claimed Job) {
 		} else {
 			executionErr = s.executor(executionContext, claimed.Message)
 		}
+		// Release mu before waiting on owner.state: claimExecution takes
+		// that channel before mu.
+		s.mu.Lock()
+		close(owner.done)
+		s.mu.Unlock()
 		owned = <-owner.state
 		owner.state <- true
 	}
@@ -1291,9 +1390,15 @@ func (s *Scheduler) executeClaim(ctx context.Context, claimed Job) {
 		return
 	}
 	previous := current
+	selfDisabled := current.SelfDisabled
+	current.SelfDisabled = false
 	current.ExecutionClaim = false
+	if selfDisabled {
+		current.Enabled = false
+		current.NextRun = nil
+	}
 	if errors.Is(executionErr, ErrRetry) && !errors.Is(executionErr, ErrReviewRequired) {
-		if owned {
+		if owned && !selfDisabled {
 			current.Enabled = true
 		}
 		if current.Enabled {
@@ -1450,6 +1555,12 @@ func sameSchedule(a, b Job) bool {
 		a.AtSeconds == b.AtSeconds &&
 		a.EverySeconds == b.EverySeconds &&
 		a.CronExpr == b.CronExpr
+}
+
+func sameOrigin(a, b Job) bool {
+	return a.OriginChatID == b.OriginChatID &&
+		a.OriginChatType == b.OriginChatType &&
+		a.OriginThreadID == b.OriginThreadID
 }
 
 func formatJobError(err error) string {

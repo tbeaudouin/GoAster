@@ -6,14 +6,15 @@ rejects changed or stopped jobs, and retains interrupted executions for
 review. Scoped cron management remains available to the originating
 conversation.
 
-An approved waiting migration is an ordinary private, threadless recurring
-job with `every_seconds: 1800` and `max_runs: 1`. Its turn can invoke the
-one-shot create capability once. The job is rearmed only for the definite
-`creation_state: "not_created"` and `code: "no_capacity"` result; a second
-tool call, session/provider error, delivery failure, or uncertain result
-stops the job for review. Delivered success and `target_exists` complete
-normally without retry; other create results require review. The turn
-cannot add or change jobs after the create attempt begins.
+An immediate top-level `creation_state: "not_created"` and `code:
+"no_capacity"` result creates one ordinary private recurring job with
+`every_seconds: 1800` and `max_runs: 1`. Its turn can invoke the one-shot
+create capability once. The same job silently waits only on that exact result;
+a second tool call, session/provider error, delivery failure, or uncertain
+result disables the job for review. Delivered success and `target_exists`
+disable the job without adoption; other create results also disable/report.
+The scheduled-only self-disable tool has no target ID and remains available
+after the create attempt begins, while ordinary cron mutations remain blocked.
 
 These rules share the generic scheduler's persistence and claim mechanisms;
 there is no separate migration scheduler or migration lifecycle API. Existing

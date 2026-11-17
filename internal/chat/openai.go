@@ -1473,7 +1473,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		callItems := make([]codexInputItem, 0, len(response.ToolCalls))
 		outputItems := make([]codexInputItem, 0, len(response.ToolCalls))
 		for _, call := range response.ToolCalls {
-			handler, ok := p.tools.handler(call.Name)
+			handler, ok := p.tools.handlerFor(call.Name, ctx)
 			if !ok {
 				return "", status, fmt.Errorf("Codex requested unsupported tool %q", call.Name)
 			}
@@ -1628,7 +1628,7 @@ func toolInstructions(ctx context.Context) (string, error) {
 	if kind == "" {
 		kind = "unknown"
 	}
-	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation. Scheduled migration turns follow their exact cron instructions and cannot schedule another job."
+	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation. Scheduled migration turns follow their exact literal create instructions, cannot add another job, and quietly keep the same job only for the exact no_capacity result. The scheduled-only self-disable capability has no supplied target ID."
 	if metadata == "" {
 		instructions += "\n\nNo runtime skills are available. Do not perform a skill-dependent workflow; tell the user starter skills are missing."
 	} else {
@@ -1731,7 +1731,7 @@ func codexInputFromHistory(ctx context.Context, history []ChatMessage) ([]codexI
 func (p *CodexProvider) requestCodex(ctx context.Context, credential Credential, model string, input []codexInputItem, allowTools bool) (codexParsedResponse, int, error) {
 	tools := []codexTool{}
 	if allowTools {
-		tools = p.tools.definitions()
+		tools = p.tools.definitionsFor(ctx)
 	}
 	instructions := openAIInstructions
 	if allowTools {

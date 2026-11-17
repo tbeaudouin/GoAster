@@ -11,7 +11,10 @@ import (
 	"goaster/internal/scheduler"
 )
 
-const cronToolName = "cron"
+const (
+	cronToolName            = "cron"
+	cronSelfDisableToolName = "cron_disable_self"
+)
 
 // CronScheduler is the narrow scheduler surface exposed to the model tool.
 // Keeping the registrar independent of the concrete scheduler also makes the
@@ -23,6 +26,55 @@ type CronScheduler interface {
 	Update(string, scheduler.Patch) (scheduler.Job, error)
 	Remove(string) error
 	SetEnabled(string, bool) (scheduler.Job, error)
+}
+
+// CronSelfDisabler uses the scheduler's private execution owner instead of a
+// model-supplied job ID. The expected origin contains only transport identity
+// and is checked atomically with the disable operation.
+type CronSelfDisabler interface {
+	DisableOwnExecution(context.Context, scheduler.Job) (scheduler.Job, error)
+}
+
+type scheduledCronJobIDKey struct{}
+
+// WithScheduledCronJobID carries the runtime's claimed job ID into the
+// scheduled session. It is informational context; authorization remains bound
+// to the scheduler execution owner.
+func WithScheduledCronJobID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, scheduledCronJobIDKey{}, strings.TrimSpace(id))
+}
+
+// ScheduledCronJobID returns the runtime-injected job ID only when it matches
+// the scheduler's live internal execution owner.
+func ScheduledCronJobID(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	bound, ok := scheduler.ScheduledExecutionJobID(ctx)
+	if !ok {
+		return "", false
+	}
+	injected, ok := ctx.Value(scheduledCronJobIDKey{}).(string)
+	injected = strings.TrimSpace(injected)
+	if !ok || injected == "" || injected != bound {
+		return "", false
+	}
+	return bound, true
+}
+
+func genuineScheduledCronContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	scheduled, ok := ctx.Value(scheduledTurnKey{}).(bool)
+	if !ok || !scheduled {
+		return false
+	}
+	_, ok = ScheduledCronJobID(ctx)
+	return ok
 }
 
 // ScheduledDelivery is a completed generic cron reply waiting for the
@@ -96,6 +148,78 @@ func RegisterCronTool(registrar ToolRegistrar, jobs CronScheduler) error {
 	})
 }
 
+// RegisterCronSelfDisableTool exposes the self-only scheduled capability. It
+// is registered with the provider once, but the provider hides it from normal
+// turns and rejects forged calls outside a genuine scheduler context.
+func RegisterCronSelfDisableTool(registrar ToolRegistrar, jobs CronScheduler) error {
+	if registrar == nil {
+		return fmt.Errorf("cron self-disable tool registrar is nil")
+	}
+	if jobs == nil {
+		return fmt.Errorf("cron scheduler is nil")
+	}
+	if _, ok := jobs.(CronSelfDisabler); !ok {
+		return fmt.Errorf("cron scheduler does not support self-disable")
+	}
+	return registrar.RegisterTool(Tool{
+		Name:          cronSelfDisableToolName,
+		Description:   "Disable only the currently executing scheduled cron job. The job identity and conversation/topic are bound internally; do not provide a job ID or target another job.",
+		Parameters:    map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		ScheduledOnly: true,
+		Handler: func(ctx context.Context, arguments string) (string, error) {
+			return executeCronSelfDisableTool(ctx, arguments, jobs)
+		},
+	})
+}
+
+func executeCronSelfDisableTool(ctx context.Context, arguments string, jobs CronScheduler) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if !genuineScheduledCronContext(ctx) {
+		return "", fmt.Errorf("cron self-disable is available only during the currently executing scheduled job")
+	}
+	if err := parseCronSelfDisableArguments(arguments); err != nil {
+		return "", err
+	}
+	origin, scoped, err := cronOrigin(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !scoped || origin.OriginChatType == "" || origin.OriginChatType == "unknown" {
+		return "", fmt.Errorf("cron self-disable requires an authenticated conversation identity")
+	}
+	disabler, ok := jobs.(CronSelfDisabler)
+	if !ok {
+		return "", fmt.Errorf("cron scheduler does not support self-disable")
+	}
+	job, err := disabler.DisableOwnExecution(ctx, origin)
+	if err != nil {
+		return "", err
+	}
+	return encodeCronToolResult(struct {
+		Disabled bool   `json:"disabled"`
+		ID       string `json:"id"`
+	}{Disabled: !job.Enabled, ID: job.ID})
+}
+
+func parseCronSelfDisableArguments(arguments string) error {
+	decoder := json.NewDecoder(strings.NewReader(arguments))
+	decoder.DisallowUnknownFields()
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil || fields == nil {
+		return fmt.Errorf("cron self-disable arguments must be an empty JSON object")
+	}
+	if len(fields) != 0 {
+		return fmt.Errorf("cron self-disable does not accept arguments")
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("cron self-disable arguments contain more than one JSON value")
+	}
+	return nil
+}
+
 type cronToolArguments struct {
 	Action         string  `json:"action"`
 	ID             string  `json:"id,omitempty"`
@@ -120,8 +244,13 @@ func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) 
 		return "", err
 	}
 	action := strings.ToLower(strings.TrimSpace(parsed.Action))
-	if started, ok := ctx.Value(scheduledMigrationStartedKey{}).(func() bool); ok && started() && action != "list" && action != "get" {
-		return "", fmt.Errorf("scheduled migration cannot change cron jobs after an attempt")
+	if started, ok := ctx.Value(scheduledMigrationStartedKey{}).(func() bool); ok {
+		if action == "add" {
+			return "", fmt.Errorf("scheduled migration cannot add cron jobs")
+		}
+		if started() && action != "list" && action != "get" {
+			return "", fmt.Errorf("scheduled migration cannot change cron jobs after an attempt")
+		}
 	}
 	switch action {
 	case "add":

@@ -73,29 +73,29 @@ for phrase in (
 # Validate each active file both before and after packaging. Checking the files
 # separately catches stale metadata or authorization guidance alongside SKILL.
 requirements = {
-    "META.md": ("one exact migration server", "private", "paired owner"),
+    "META.md": ("one exact migration server", "private", "paired owner", "30 minutes"),
     "AUTH.md": (
         "paired private Telegram conversation", "never request a pasted provider token",
         "one private spending approval", "server_name", "server_type", "locations",
-        "immediate", "eventual", "Follow step 4", "verify private delivery is available",
+        "immediate first create", "capacity-only retries every 30 minutes", "now versus waiting", "four-step",
+        "verify private delivery is available",
         "revalidated paired owner", "separate private messages", "id_ed25519",
-        "protected environment storage is allowed for the token", "do not automatically resend",
+        "protected environment is the intended token storage", "do not automatically resend",
     ),
     "SKILL.md": (
         "paired private Telegram", ".goaster/env", "HCLOUD_TOKEN", "`/get-env`", "`ACCEPT`",
-        "latest official public Hetzner catalogue", "rough price", "private spending approval",
-        'action: "create"', "exact approved `server_name`", "`server_type`", "`locations`",
-        "make no immediate create call", "every_seconds: 1800", "max_runs: 1",
+        "official public Hetzner catalogue", "rough price", "private spending approval",
+        'action: "create"', "approved exact", "`server_type`", "`locations`",
+        "top-level pair", "every_seconds: 1800", "max_runs: 1",
         'creation_state: "not_created"', 'code: "no_capacity"', "never add a scheduled job from a scheduled turn",
-        "duplicate charges", "revalidating the paired recipient before each delivery",
+        "cron_disable_self", "revalidated paired owner", "revalidating the paired recipient before each delivery",
     ),
 }
 expected_migration_sections = (
-    "## 1. Check the token",
-    "## 2. Choose the server",
-    "## 3. Get approval for one exact choice",
-    "## 4. Create or arrange a retry",
-    "## 5. Deliver the setup privately",
+    "## 1. Check access privately",
+    "## 2. Choose the exact server",
+    "## 3. Propose and approve one exact create",
+    "## 4. Create, retry, and hand off safely",
 )
 for label, base in (("source", root), ("installed", installed_root)):
     for filename, phrases in requirements.items():
@@ -108,7 +108,7 @@ for label, base in (("source", root), ("installed", installed_root)):
         if filename == "SKILL.md":
             sections = tuple(line for line in raw.splitlines() if line.startswith("## "))
             if sections != expected_migration_sections:
-                raise SystemExit(f"{label} migration SKILL.md must keep the five numbered sections: {sections!r}")
+                raise SystemExit(f"{label} migration SKILL.md must keep the four numbered sections: {sections!r}")
         for forbidden in ("scheduler resumption are enabled", "preserve it for manual owner cleanup", "30-minute availability monitor", "/migration/v1/machines/", "operation_capability", "GoAsterWeb/", "../../docs/", "../docs/"):
             if forbidden in content:
                 raise SystemExit(f"{label} migration {filename} retained retired guidance: {forbidden!r}")
