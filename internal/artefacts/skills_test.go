@@ -120,17 +120,22 @@ func TestInstallBundledStartersOnce(t *testing.T) {
 }
 
 func TestBundledMigrationAvailabilityGuidanceIsCurrent(t *testing.T) {
-	for _, path := range []string{
-		filepath.Join("..", "..", "skills", "hetzner-auth", "SKILL.md"),
-		filepath.Join("..", "..", "skills", "hetzner-auth", "AUTH.md"),
-		filepath.Join("..", "..", "skills", "goaster-migration", "SKILL.md"),
+	hetznerAuthPhrases := []string{"GET /v1/server_types?name=<url-encoded-exact-type>", "server_types[]", "locations[].available", "removed 2026-10-01", "capacity guarantee"}
+	for path, phrases := range map[string][]string{
+		filepath.Join("..", "..", "skills", "hetzner-auth", "SKILL.md"): hetznerAuthPhrases,
+		filepath.Join("..", "..", "skills", "hetzner-auth", "AUTH.md"):  hetznerAuthPhrases,
+		filepath.Join("..", "..", "skills", "goaster-migration", "SKILL.md"): {
+			"GET /v1/server_types?name=<requested-server-type>",
+			"server_types[].locations[].available",
+			"Do not use the retired datacenters endpoint.",
+		},
 	} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		content := strings.Join(strings.Fields(string(data)), " ")
-		for _, phrase := range []string{"GET /v1/server_types?name=<url-encoded-exact-type>", "server_types[]", "locations[].available", "removed 2026-10-01", "capacity guarantee"} {
+		for _, phrase := range phrases {
 			if !strings.Contains(content, phrase) {
 				t.Errorf("%s missing current availability guidance %q", path, phrase)
 			}

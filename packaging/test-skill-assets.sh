@@ -83,19 +83,39 @@ requirements = {
         "protected environment is the intended token storage", "do not automatically resend",
     ),
     "SKILL.md": (
-        "paired private Telegram", ".goaster/env", "HCLOUD_TOKEN", "`/get-env`", "`ACCEPT`",
-        "official public Hetzner catalogue", "rough price", "private spending approval",
-        'action: "create"', "approved exact", "`server_type`", "`locations`",
-        "top-level pair", "every_seconds: 1800", "max_runs: 1",
-        'creation_state: "not_created"', 'code: "no_capacity"', "never add a scheduled job from a scheduled turn",
-        "cron_disable_self", "revalidated paired owner", "revalidating the paired recipient before each delivery",
+        "Use this workflow only in the paired owner’s private Telegram conversation.",
+        "Check the protected <real user home>/.goaster/env first, then process HCLOUD_TOKEN.",
+        "Never display the token or ask the user to paste it into chat.",
+        "Keep tokens out of conversation text, model input, tool output, logs and extra local copies.",
+        "If the check fails, report availability as unknown rather than unavailable.",
+        "Pricing is informational only. Do not send a target price, impose a price ceiling, or choose locations based on price.",
+        "The user may leave the location open.",
+        "Before requesting approval, check Hetzner’s latest official public pricing",
+        "Obtain one explicit spending approval in the paired private conversation",
+        "Always try immediately first.",
+        "A changed choice requires fresh approval.",
+        'action: "create"', "The create action generates its SSH key pair internally",
+        "sends only the public key to GoAsterWeb.",
+        "Do not place private keys in the conversation or cron instructions.",
+        "The model receives creation and delivery status, not the private key or secret-bearing link.",
+        "Do not claim that setup or migration is complete merely because the server was created.",
+        'creation_state: "not_created"', 'code: "no_capacity"',
+        "create one ordinary recurring cron job, once, with a 30-minute interval.",
+        "Do not create another job for the same request.",
+        "Never create or schedule another cron job.",
+        "Do nothing. Send no notification and make no cron changes.",
+        "For every other error, uncertain creation outcome, or failed, partial or unknown delivery:",
+        "Disable this job.",
+        "Do not run overlapping attempts.",
+        "Do not automatically retry creation after an uncertain outcome.",
+        "Ask for one explicit confirmation before a fresh attempt.",
     ),
 }
 expected_migration_sections = (
-    "## 1. Check access privately",
-    "## 2. Choose the exact server",
-    "## 3. Propose and approve one exact create",
-    "## 4. Create, retry, and hand off safely",
+    "1. Check the Hetzner token",
+    "2. Choose the server",
+    "3. Get approval for one exact choice",
+    "4. Create or arrange a retry",
 )
 for label, base in (("source", root), ("installed", installed_root)):
     for filename, phrases in requirements.items():
@@ -106,7 +126,8 @@ for label, base in (("source", root), ("installed", installed_root)):
             if phrase not in content:
                 raise SystemExit(f"{label} migration {filename} missing guidance: {phrase!r}")
         if filename == "SKILL.md":
-            sections = tuple(line for line in raw.splitlines() if line.startswith("## "))
+            section_pattern = r"^[1-4]\. (?:Check the Hetzner token|Choose the server|Get approval for one exact choice|Create or arrange a retry)$"
+            sections = tuple(line for line in raw.splitlines() if re.match(section_pattern, line))
             if sections != expected_migration_sections:
                 raise SystemExit(f"{label} migration SKILL.md must keep the four numbered sections: {sections!r}")
         for forbidden in ("scheduler resumption are enabled", "preserve it for manual owner cleanup", "30-minute availability monitor", "/migration/v1/machines/", "operation_capability", "GoAsterWeb/", "../../docs/", "../docs/"):
@@ -121,10 +142,18 @@ availability_requirements = (
     "capacity guarantee",
 )
 for label, base in (("source", root), ("installed", installed_root)):
-    for filename in ("SKILL.md", "AUTH.md"):
-        path = base / "skills" / ("goaster-migration" if filename == "SKILL.md" else "hetzner-auth") / filename
+    for filename, skill_name, phrases in (
+        ("SKILL.md", "goaster-migration", (
+            "GET /v1/server_types?name=<requested-server-type>",
+            "server_types[].locations[].available",
+            "Do not use the retired datacenters endpoint.",
+            "An availability check does not reserve capacity.",
+        )),
+        ("AUTH.md", "hetzner-auth", availability_requirements),
+    ):
+        path = base / "skills" / skill_name / filename
         content = " ".join(path.read_text(encoding="utf-8").split())
-        for phrase in availability_requirements:
+        for phrase in phrases:
             if phrase not in content:
                 raise SystemExit(f"{label} {path.parent.name} {filename} missing current availability guidance: {phrase!r}")
         for forbidden in ("Use GET /v1/datacenters", "call GET /v1/datacenters", "Use the migration availability endpoint", "Use the migration availability tool"):
