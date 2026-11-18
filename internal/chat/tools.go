@@ -23,6 +23,9 @@ type Tool struct {
 	// ScheduledOnly keeps a runtime tool out of ordinary model requests. The
 	// provider also checks this boundary when dispatching a forged call.
 	ScheduledOnly bool
+	// ScheduledParameters narrows a tool schema for a genuine scheduled turn
+	// while keeping the same handler available for allowed management actions.
+	ScheduledParameters map[string]any
 }
 
 // ToolRegistrar is the small seam skills can use to provide model tools
@@ -32,9 +35,10 @@ type ToolRegistrar interface {
 }
 
 type registeredTool struct {
-	definition    codexTool
-	handler       ToolHandler
-	scheduledOnly bool
+	definition          codexTool
+	scheduledParameters map[string]any
+	handler             ToolHandler
+	scheduledOnly       bool
 }
 
 type toolRegistry struct {
@@ -49,14 +53,14 @@ func (r *toolRegistry) registerTool(tool Tool) error {
 		Name:        tool.Name,
 		Description: tool.Description,
 		Parameters:  tool.Parameters,
-	}, tool.Handler, tool.ScheduledOnly)
+	}, tool.Handler, tool.ScheduledOnly, tool.ScheduledParameters)
 }
 
 func (r *toolRegistry) register(definition codexTool, handler ToolHandler) error {
-	return r.registerVisibility(definition, handler, false)
+	return r.registerVisibility(definition, handler, false, nil)
 }
 
-func (r *toolRegistry) registerVisibility(definition codexTool, handler ToolHandler, scheduledOnly bool) error {
+func (r *toolRegistry) registerVisibility(definition codexTool, handler ToolHandler, scheduledOnly bool, scheduledParameters map[string]any) error {
 	definition.Name = strings.TrimSpace(definition.Name)
 	definition.Description = strings.TrimSpace(definition.Description)
 	if definition.Name == "" {
@@ -86,7 +90,12 @@ func (r *toolRegistry) registerVisibility(definition codexTool, handler ToolHand
 	if _, exists := r.byName[definition.Name]; exists {
 		return fmt.Errorf("tool %q is already registered", definition.Name)
 	}
-	r.tools = append(r.tools, registeredTool{definition: definition, handler: handler, scheduledOnly: scheduledOnly})
+	r.tools = append(r.tools, registeredTool{
+		definition:          definition,
+		scheduledParameters: scheduledParameters,
+		handler:             handler,
+		scheduledOnly:       scheduledOnly,
+	})
 	r.byName[definition.Name] = handler
 	return nil
 }
@@ -98,12 +107,17 @@ func (r *toolRegistry) definitions() []codexTool {
 func (r *toolRegistry) definitionsFor(ctx context.Context) []codexTool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	scheduled := genuineScheduledCronContext(ctx)
 	definitions := make([]codexTool, 0, len(r.tools))
 	for _, tool := range r.tools {
-		if tool.scheduledOnly && !genuineScheduledCronContext(ctx) {
+		if tool.scheduledOnly && !scheduled {
 			continue
 		}
-		definitions = append(definitions, tool.definition)
+		definition := tool.definition
+		if scheduled && tool.scheduledParameters != nil {
+			definition.Parameters = tool.scheduledParameters
+		}
+		definitions = append(definitions, definition)
 	}
 	return definitions
 }
@@ -115,8 +129,9 @@ func (r *toolRegistry) handler(name string) (ToolHandler, bool) {
 func (r *toolRegistry) handlerFor(name string, ctx context.Context) (ToolHandler, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	scheduled := genuineScheduledCronContext(ctx)
 	for _, tool := range r.tools {
-		if tool.definition.Name != name || tool.scheduledOnly && !genuineScheduledCronContext(ctx) {
+		if tool.definition.Name != name || tool.scheduledOnly && !scheduled {
 			continue
 		}
 		handler, ok := r.byName[name]

@@ -537,12 +537,8 @@ func TestScheduledCronManagementAndMigrationGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.WithValue(context.Background(), scheduledTurnKey{}, true)
-	result, err := executeCronTool(ctx, `{"action":"add","every_seconds":60,"message":"ordinary"}`, jobs)
+	job, err := jobs.Add(scheduler.Job{Kind: scheduler.ScheduleEvery, EverySeconds: 60, Message: "ordinary"})
 	if err != nil {
-		t.Fatal(err)
-	}
-	var job scheduler.Job
-	if err := json.Unmarshal([]byte(result), &job); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := executeCronTool(ctx, `{"action":"disable","id":"`+job.ID+`"}`, jobs); err != nil {
@@ -569,9 +565,11 @@ func TestCronSelfDisableIsScheduledOnlyBoundAndDurable(t *testing.T) {
 	var selfHandler ToolHandler
 	var cronHandler ToolHandler
 	var handlerForContext func(context.Context) (ToolHandler, bool)
+	var definitionsForContext func(context.Context) []codexTool
 	var firstID string
 	var staleContext context.Context
 	var executions int
+	var commandScheduler CronScheduler
 	jobs, err := scheduler.New(scheduler.Options{
 		Path: filepath.Join(t.TempDir(), "jobs.json"),
 		Now:  func() time.Time { return clock },
@@ -594,6 +592,42 @@ func TestCronSelfDisableIsScheduledOnlyBoundAndDurable(t *testing.T) {
 			if _, ok := handlerForContext(scheduled); !ok {
 				return errors.New("self-disable tool was not exposed to scheduled turn")
 			}
+			if definitionsForContext == nil {
+				return errors.New("scheduled tool definitions lookup is unavailable")
+			}
+			cronDefinition, ok := findToolDefinition(definitionsForContext(scheduled), cronToolName)
+			if !ok {
+				return errors.New("cron tool was not exposed to scheduled turn")
+			}
+			properties, ok := cronDefinition.Parameters["properties"].(map[string]any)
+			if !ok {
+				return errors.New("scheduled cron schema has no properties")
+			}
+			action, ok := properties["action"].(map[string]any)
+			if !ok {
+				return errors.New("scheduled cron schema has no action")
+			}
+			actions, ok := action["enum"].([]string)
+			if !ok {
+				return errors.New("scheduled cron schema action enum is malformed")
+			}
+			for _, wanted := range []string{"list", "get", "update", "remove", "enable", "disable"} {
+				found := false
+				for _, candidate := range actions {
+					if candidate == wanted {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("scheduled cron schema removed management action %q", wanted)
+				}
+			}
+			for _, candidate := range actions {
+				if candidate == "add" {
+					return errors.New("scheduled cron schema exposed add")
+				}
+			}
 
 			forgedID := WithScheduledCronJobID(scheduled, "other-job")
 			if _, ok := ScheduledCronJobID(forgedID); ok {
@@ -610,8 +644,36 @@ func TestCronSelfDisableIsScheduledOnlyBoundAndDurable(t *testing.T) {
 				return errors.New("model-supplied target ID was accepted")
 			}
 
-			if _, err := cronHandler(scheduled, `{"action":"add","every_seconds":3600,"message":"ordinary scheduled management"}`); err != nil {
-				return fmt.Errorf("ordinary scheduled add: %w", err)
+			addArguments := `{"action":"add","every_seconds":3600,"message":"ordinary scheduled management"}`
+			if _, err := cronHandler(scheduled, addArguments); err == nil {
+				return errors.New("ordinary scheduled add unexpectedly succeeded through direct handler dispatch")
+			}
+			if _, err := executeCronTool(scheduled, addArguments, commandScheduler); err == nil {
+				return errors.New("ordinary scheduled add unexpectedly succeeded at the command boundary")
+			}
+			listResult, err := cronHandler(scheduled, `{"action":"list"}`)
+			if err != nil {
+				return fmt.Errorf("scheduled list: %w", err)
+			}
+			var listed struct {
+				Jobs []scheduler.Job `json:"jobs"`
+			}
+			if err := json.Unmarshal([]byte(listResult), &listed); err != nil {
+				return fmt.Errorf("decode scheduled list: %w", err)
+			}
+			if len(listed.Jobs) != 1 || listed.Jobs[0].ID != job.ID {
+				return fmt.Errorf("scheduled list = %+v", listed.Jobs)
+			}
+			if _, err := cronHandler(scheduled, fmt.Sprintf(`{"action":"get","id":%q}`, job.ID)); err != nil {
+				return fmt.Errorf("scheduled get: %w", err)
+			}
+			updatedResult, err := cronHandler(scheduled, fmt.Sprintf(`{"action":"update","id":%q,"message":"updated scheduled management"}`, job.ID))
+			if err != nil {
+				return fmt.Errorf("scheduled update: %w", err)
+			}
+			var updated scheduler.Job
+			if err := json.Unmarshal([]byte(updatedResult), &updated); err != nil || updated.Message != "updated scheduled management" {
+				return fmt.Errorf("scheduled update result = %s, error = %v", updatedResult, err)
 			}
 			before := WithScheduledMigrationStarted(scheduled, func() bool { return false })
 			if _, err := cronHandler(before, `{"action":"add","every_seconds":60,"message":"recursive"}`); err == nil {
@@ -632,6 +694,7 @@ func TestCronSelfDisableIsScheduledOnlyBoundAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	commandScheduler = jobs
 	provider := NewCodexProvider(CredentialStore{})
 	if err := RegisterCronTool(provider, jobs); err != nil {
 		t.Fatal(err)
@@ -646,6 +709,35 @@ func TestCronSelfDisableIsScheduledOnlyBoundAndDurable(t *testing.T) {
 	}
 	handlerForContext = func(ctx context.Context) (ToolHandler, bool) {
 		return provider.tools.handlerFor(cronSelfDisableToolName, ctx)
+	}
+	definitionsForContext = func(ctx context.Context) []codexTool {
+		return provider.tools.definitionsFor(ctx)
+	}
+	normalCronDefinition, ok := findToolDefinition(provider.tools.definitions(), cronToolName)
+	if !ok {
+		t.Fatal("cron tool was not exposed during a normal turn")
+	}
+	normalProperties, ok := normalCronDefinition.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("normal cron schema has no properties")
+	}
+	normalAction, ok := normalProperties["action"].(map[string]any)
+	if !ok {
+		t.Fatal("normal cron schema has no action")
+	}
+	normalActions, ok := normalAction["enum"].([]string)
+	if !ok {
+		t.Fatal("normal cron schema action enum is malformed")
+	}
+	hasNormalAdd := false
+	for _, action := range normalActions {
+		if action == "add" {
+			hasNormalAdd = true
+			break
+		}
+	}
+	if !hasNormalAdd {
+		t.Fatal("normal cron schema omitted add")
 	}
 	if _, ok := provider.tools.handlerFor(cronSelfDisableToolName, context.Background()); ok {
 		t.Fatal("self-disable tool was exposed during a normal turn")

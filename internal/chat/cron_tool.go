@@ -98,54 +98,63 @@ func RegisterCronTool(registrar ToolRegistrar, jobs CronScheduler) error {
 		return fmt.Errorf("cron scheduler is nil")
 	}
 	return registrar.RegisterTool(Tool{
-		Name:        cronToolName,
-		Description: "Schedule chat messages for a later time or recurring interval in this conversation only. Manage only local GoAster chat turns; it does not schedule shell commands or route to channels. A running job cannot be removed until its run finishes. If a job requires review, reconcile external state and authentication before deciding whether to enable it. If max_runs is reached, update it to 0 or above run_count, then explicitly enable the job; editing the limit does not clear review. Enabling schedules a new run.",
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"action": map[string]any{
-					"type": "string",
-					"enum": []string{"add", "list", "get", "update", "remove", "enable", "disable"},
-				},
-				"id": map[string]any{
-					"type":        "string",
-					"description": "Job ID returned by add or list",
-				},
-				"at_seconds": map[string]any{
-					"type":        "integer",
-					"minimum":     1,
-					"description": "Positive number of seconds from now for a one-time chat turn",
-				},
-				"every_seconds": map[string]any{
-					"type":        "integer",
-					"minimum":     1,
-					"description": "Positive interval in seconds for a recurring chat turn",
-				},
-				"cron_expr": map[string]any{
-					"type":        "string",
-					"description": "Five-field cron expression, or six fields including seconds",
-				},
-				"message": map[string]any{
-					"type":        "string",
-					"description": "Message GoAster should send through the existing chat session",
-				},
-				"max_runs": map[string]any{
-					"type":        "integer",
-					"minimum":     0,
-					"description": "Maximum executions; zero means unlimited. During a run, a positive limit must exceed the current run_count.",
-				},
-				"delete_after_run": map[string]any{
-					"type":        "boolean",
-					"description": "Delete the job after its next execution; at jobs always have this behavior",
-				},
-			},
-			"required":             []string{"action"},
-			"additionalProperties": false,
-		},
+		Name:                cronToolName,
+		Description:         "Schedule chat messages for a later time or recurring interval in this conversation only. Manage only local GoAster chat turns; it does not schedule shell commands or route to channels. A running job cannot be removed until its run finishes. If a job requires review, reconcile external state and authentication before deciding whether to enable it. If max_runs is reached, update it to 0 or above run_count, then explicitly enable the job; editing the limit does not clear review. Enabling schedules a new run. Scheduled turns can inspect and manage existing jobs but cannot add another job.",
+		Parameters:          cronToolParameters(false),
+		ScheduledParameters: cronToolParameters(true),
 		Handler: func(ctx context.Context, arguments string) (string, error) {
 			return executeCronTool(ctx, arguments, jobs)
 		},
 	})
+}
+
+func cronToolParameters(scheduled bool) map[string]any {
+	actions := []string{"list", "get", "update", "remove", "enable", "disable"}
+	if !scheduled {
+		actions = append([]string{"add"}, actions...)
+	}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"action": map[string]any{
+				"type": "string",
+				"enum": actions,
+			},
+			"id": map[string]any{
+				"type":        "string",
+				"description": "Job ID returned by add or list",
+			},
+			"at_seconds": map[string]any{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "Positive number of seconds from now for a one-time chat turn",
+			},
+			"every_seconds": map[string]any{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "Positive interval in seconds for a recurring chat turn",
+			},
+			"cron_expr": map[string]any{
+				"type":        "string",
+				"description": "Five-field cron expression, or six fields including seconds",
+			},
+			"message": map[string]any{
+				"type":        "string",
+				"description": "Message GoAster should send through the existing chat session",
+			},
+			"max_runs": map[string]any{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "Maximum executions; zero means unlimited. During a run, a positive limit must exceed the current run_count.",
+			},
+			"delete_after_run": map[string]any{
+				"type":        "boolean",
+				"description": "Delete the job after its next execution; at jobs always have this behavior",
+			},
+		},
+		"required":             []string{"action"},
+		"additionalProperties": false,
+	}
 }
 
 // RegisterCronSelfDisableTool exposes the self-only scheduled capability. It
@@ -251,6 +260,9 @@ func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) 
 		if started() && action != "list" && action != "get" {
 			return "", fmt.Errorf("scheduled migration cannot change cron jobs after an attempt")
 		}
+	}
+	if action == "add" && scheduler.IsScheduledExecution(ctx) {
+		return "", fmt.Errorf("scheduled cron turns cannot add cron jobs")
 	}
 	switch action {
 	case "add":
