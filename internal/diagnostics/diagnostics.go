@@ -42,11 +42,52 @@ func Error(operation string, err error, fields ...Field) {
 	if err == nil || expectedOnly(err, 0) {
 		return
 	}
+	// Attempt histories can be joined with other failures. Give each attempt
+	// its own bounded record so later attempts cannot lose fields to the cap.
+	var attempts []error
+	otherLeaf := false
+	var separate func(error, int)
+	separate = func(e error, depth int) {
+		if e == nil || depth > 32 {
+			return
+		}
+		if _, ok := e.(interface{ DiagnosticSeparateRecord() }); ok {
+			attempts = append(attempts, e)
+			return
+		}
+		if joined, ok := e.(interface{ Unwrap() []error }); ok {
+			for _, child := range joined.Unwrap() {
+				separate(child, depth+1)
+			}
+			return
+		}
+		if child := errors.Unwrap(e); child != nil {
+			separate(child, depth+1)
+		} else {
+			otherLeaf = true
+		}
+	}
+	separate(err, 0)
+	if len(attempts) > 0 {
+		for _, attempt := range attempts {
+			errorRecord(operation, attempt, nil, false)
+		}
+		if !otherLeaf {
+			return
+		}
+	}
+	errorRecord(operation, err, fields, len(attempts) > 0)
+}
+
+func errorRecord(operation string, err error, fields []Field, skipAttempts bool) {
 	record := "ERROR operation=" + token(operation)
 	var causes []string
 	var walk func(error, int)
 	walk = func(e error, depth int) {
 		if e == nil || depth > 32 || len(causes) >= 32 {
+			return
+		}
+		if _, ok := e.(interface{ DiagnosticSeparateRecord() }); ok && skipAttempts {
 			return
 		}
 		name := reflect.TypeOf(e).String()
@@ -118,7 +159,7 @@ func Error(operation string, err error, fields ...Field) {
 	}
 	walk(err, 0)
 	for i, field := range fields {
-		if i >= 16 {
+		if i >= 32 {
 			break
 		}
 		value := ""
@@ -135,6 +176,12 @@ func Error(operation string, err error, fields ...Field) {
 			if len(field.Value) <= 96 && token(field.Value) == field.Value {
 				value = field.Value
 			}
+		case "model_detail", "status_detail", "backend_type_detail", "backend_code_detail", "request_id_detail":
+			value = safeDetailState(field.Value)
+		case "attempt", "attempts":
+			value = safeAttempt(field.Value)
+		case "retry_decision":
+			value = safeRetryDecision(field.Value)
 		case "reason":
 			value = knownDescription(field.Value)
 		case "backend_message":
@@ -402,6 +449,33 @@ func token(s string) string {
 	}
 	return b.String()
 }
+
+func safeDetailState(value string) string {
+	switch value {
+	case "absent", "unrecognized", "present":
+		return value
+	default:
+		return ""
+	}
+}
+
+func safeAttempt(value string) string {
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 1 || number > 2 {
+		return ""
+	}
+	return strconv.Itoa(number)
+}
+
+func safeRetryDecision(value string) string {
+	switch value {
+	case "not_retryable", "retry_scheduled", "retry_exhausted", "retry_canceled", "retry_wait_failed":
+		return value
+	default:
+		return ""
+	}
+}
+
 func expectedOnly(err error, depth int) bool {
 	if err == nil {
 		return true
@@ -478,6 +552,7 @@ func knownDescription(message string) string {
 	// interpolate a value from an arbitrary error string.
 	switch message {
 	case "Codex backend request failed", "Codex stream failed", "Codex response failed: backend returned an error", "device code request failed", "device authentication failed", "token exchange failed", "saved refresh token was rejected", "token refresh failed", "Telegram rejected message formatting",
+		"temporary HTTP status", "transient network error", "quota exhausted", "authentication error", "ordinary HTTP status", "request canceled", "request deadline exceeded", "malformed response", "received stream failure", "TLS or configuration error", "non-transient transport error",
 		"OpenAI subscription authentication required: credentials were not found", "OpenAI subscription authentication required", "request authentication failed",
 		"OpenAI subscription authentication required: credential file has no access token",
 		"OpenAI subscription authentication required: saved credentials have no refresh token",

@@ -160,8 +160,8 @@ func TestSessionDiagnosticOwnsProviderFailureBoundary(t *testing.T) {
 	if requestErr == nil {
 		t.Fatal("session request unexpectedly succeeded")
 	}
-	if strings.Count(log, "ERROR operation=") != 1 || !strings.Contains(log, "ERROR operation=agent.chat") || strings.Contains(log, "ERROR operation=chat.provider") {
-		t.Fatalf("diagnostics = %q, want one outer boundary record", log)
+	if strings.Count(log, "ERROR operation=agent.chat") != 2 || strings.Count(log, "ERROR operation=") != 2 || strings.Contains(log, "ERROR operation=chat.provider") {
+		t.Fatalf("diagnostics = %q, want one outer boundary record per attempt", log)
 	}
 }
 

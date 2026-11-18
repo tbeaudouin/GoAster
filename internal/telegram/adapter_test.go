@@ -400,7 +400,7 @@ func TestPairCommandIsPrimaryAndRejectsInvalidPairingMessages(t *testing.T) {
 		t.Fatal("a consumed code or legacy command authorized another user")
 	}
 	a.handle(context.Background(), privateMessage(42, "/start"))
-	if len(sent) != 4 || sent[3] != "The remote agent is not ready; check its remote authentication. You can still use /m to view or select a model and /clear to clear this chat's history." {
+	if len(sent) != 4 || sent[3] != "The remote agent is not ready; check the remote agent status. You can still use /m to view or select a model and /clear to clear this chat's history." {
 		t.Fatalf("normal /start did not retain paired-user behavior: %q", sent)
 	}
 }
@@ -1386,7 +1386,7 @@ func TestTelegramSendAndEditFallbackToPlainTextAfterFormattingRejection(t *testi
 func TestTelegramDisplaysSafeSkillRecoveryForDirectAndStreamErrors(t *testing.T) {
 	const guidance = "Some actions may already have completed. Check their results before continuing or repeating any action. Skill guidance could not be loaded or restored. Check the installed skill files; use /clear if the selection cannot be restored."
 	const warning = "OpenAI authentication failed after a tool started. Actions may already have completed and tool results may be unavailable. Check and reconcile external state, then resolve OpenAI authentication before retrying."
-	const fallback = "The remote agent could not answer"
+	const fallback = "The remote agent could not answer. Check the agent status and try again."
 	for _, tc := range []struct {
 		name, body, header, want string
 		status                   int
@@ -1446,6 +1446,9 @@ func TestTelegramDisplaysSafeSkillRecoveryForDirectAndStreamErrors(t *testing.T)
 			a.handle(context.Background(), privateMessage(42, "run"))
 			if !strings.Contains(sent, tc.want) || strings.Contains(sent, "fake-secret") || len(sent) > 512 {
 				t.Fatalf("Telegram recovery message = %q", sent)
+			}
+			if tc.want == fallback && strings.Contains(strings.ToLower(sent), "auth") {
+				t.Fatalf("generic agent failure was presented as authentication: %q", sent)
 			}
 			if tc.failEdit && (failedEdits != 1 || len(delivered) != 2 || delivered[1] != warning) {
 				t.Fatalf("failed progress edit: edits=%d delivered=%q", failedEdits, delivered)

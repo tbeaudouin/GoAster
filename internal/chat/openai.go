@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"goaster/internal/artefacts"
@@ -47,9 +51,36 @@ const (
 	maxCodexWebFetchCalls  = 5
 	maxCodexSkillLoads     = 10
 	maxCodexSkillBytes     = 512 << 10
+	openAIModelAttempts    = 2
+	openAITransientDelay   = 100 * time.Millisecond
 )
 
 var ErrLoginRequired = errors.New("OpenAI subscription authentication required")
+
+var (
+	errCodexResponseMissing     = errors.New("Codex response is missing")
+	errCodexResponseBodyMissing = errors.New("Codex response body is missing")
+)
+
+const (
+	codexRetryReasonTemporaryStatus  = "temporary HTTP status"
+	codexRetryReasonTransientNetwork = "transient network error"
+	codexRetryReasonQuota            = "quota exhausted"
+	codexRetryReasonAuthentication   = "authentication error"
+	codexRetryReasonOrdinaryStatus   = "ordinary HTTP status"
+	codexRetryReasonCanceled         = "request canceled"
+	codexRetryReasonDeadline         = "request deadline exceeded"
+	codexRetryReasonMalformed        = "malformed response"
+	codexRetryReasonStream           = "received stream failure"
+	codexRetryReasonTLSConfig        = "TLS or configuration error"
+	codexRetryReasonTransport        = "non-transient transport error"
+
+	codexRetryDecisionNoRetry   = "not_retryable"
+	codexRetryDecisionScheduled = "retry_scheduled"
+	codexRetryDecisionExhausted = "retry_exhausted"
+	codexRetryDecisionCanceled  = "retry_canceled"
+	codexRetryDecisionWaitError = "retry_wait_failed"
+)
 
 type authenticationError uint8
 
@@ -586,6 +617,9 @@ type backendError struct {
 	prefix                string
 	status                int
 	kind, code, requestID string
+	kindState             string
+	codeState             string
+	requestIDState        string
 	message               string
 }
 
@@ -595,7 +629,7 @@ func (err backendError) Error() string {
 		message += fmt.Sprintf(" with status %d %s", err.status, http.StatusText(err.status))
 	}
 	for _, field := range err.DiagnosticFields() {
-		if field.Key != "status" && field.Key != "reason" {
+		if field.Key != "status" && field.Key != "reason" && !strings.HasSuffix(field.Key, "_detail") {
 			message += " " + field.Key + "=" + field.Value
 		}
 	}
@@ -611,12 +645,18 @@ func (err backendError) DiagnosticFields() []diagnostics.Field {
 	}
 	if err.kind != "" {
 		fields = append(fields, diagnostics.Field{Key: "backend_type", Value: err.kind})
+	} else {
+		fields = append(fields, diagnostics.Field{Key: "backend_type_detail", Value: backendDetailState(err.kindState)})
 	}
 	if err.code != "" {
 		fields = append(fields, diagnostics.Field{Key: "backend_code", Value: err.code})
+	} else {
+		fields = append(fields, diagnostics.Field{Key: "backend_code_detail", Value: backendDetailState(err.codeState)})
 	}
 	if err.requestID != "" {
 		fields = append(fields, diagnostics.Field{Key: "request_id", Value: err.requestID})
+	} else {
+		fields = append(fields, diagnostics.Field{Key: "request_id_detail", Value: backendDetailState(err.requestIDState)})
 	}
 	return fields
 }
@@ -626,13 +666,59 @@ func newBackendError(prefix string, status int, body []byte, requestID string) e
 	}
 	_ = json.Unmarshal(body, &envelope)
 	var detail codexEventError
+	typePresent := false
+	codePresent := false
+	var rawDetail map[string]json.RawMessage
+	if json.Unmarshal(envelope.Error, &rawDetail) == nil {
+		_, typePresent = rawDetail["type"]
+		_, codePresent = rawDetail["code"]
+	}
 	if json.Unmarshal(envelope.Error, &detail) != nil {
 		var code string
 		if json.Unmarshal(envelope.Error, &code) == nil {
 			detail.Code = code
+			codePresent = strings.TrimSpace(code) != ""
 		}
 	}
-	return backendError{prefix: prefix, status: status, message: diagnostics.RemoteMessage(detail.Message), kind: diagnostics.BackendValue(detail.Type), code: diagnostics.BackendValue(detail.Code), requestID: diagnostics.RequestID(requestID)}
+	kind := diagnostics.BackendValue(detail.Type)
+	code := diagnostics.BackendValue(detail.Code)
+	return backendError{
+		prefix:         prefix,
+		status:         status,
+		message:        diagnostics.RemoteMessage(detail.Message),
+		kind:           kind,
+		code:           code,
+		requestID:      diagnostics.RequestID(requestID),
+		kindState:      backendDetailStateForValue(detail.Type, kind, typePresent),
+		codeState:      backendDetailStateForValue(detail.Code, code, codePresent),
+		requestIDState: backendDetailStateForValue(requestID, diagnostics.RequestID(requestID), strings.TrimSpace(requestID) != ""),
+	}
+}
+
+func backendDetailState(state string) string {
+	if state == "unrecognized" {
+		return state
+	}
+	return "absent"
+}
+
+func backendDetailStateForValue(raw, safe string, present bool) string {
+	if safe != "" {
+		return "present"
+	}
+	if !present || strings.TrimSpace(raw) == "" {
+		return "absent"
+	}
+	return "unrecognized"
+}
+
+func backendErrorWithRequestID(prefix, requestID string) backendError {
+	safeRequestID := diagnostics.RequestID(requestID)
+	return backendError{
+		prefix:         prefix,
+		requestID:      safeRequestID,
+		requestIDState: backendDetailStateForValue(requestID, safeRequestID, strings.TrimSpace(requestID) != ""),
+	}
 }
 
 func readLimited(reader io.Reader) ([]byte, error) {
@@ -779,6 +865,212 @@ func providerFailureInfo(err error) (string, int, bool) {
 	}
 	return phase, failure.status, true
 }
+
+type codexAttemptFailure struct {
+	cause         error
+	model         string
+	modelState    string
+	status        int
+	attempt       int
+	attempts      int
+	retryDecision string
+	reason        string
+}
+
+func (err codexAttemptFailure) Error() string {
+	if err.cause == nil {
+		return "Codex request failed"
+	}
+	return err.cause.Error()
+}
+
+func (err codexAttemptFailure) Unwrap() error { return err.cause }
+
+func (err codexAttemptFailure) DiagnosticSeparateRecord() {}
+
+func (err codexAttemptFailure) DiagnosticFields() []diagnostics.Field {
+	fields := []diagnostics.Field{
+		{Key: "attempt", Value: strconv.Itoa(err.attempt)},
+		{Key: "attempts", Value: strconv.Itoa(err.attempts)},
+		{Key: "retry_decision", Value: err.retryDecision},
+		{Key: "reason", Value: err.reason},
+	}
+	if err.status == 0 {
+		fields = append(fields, diagnostics.Field{Key: "status_detail", Value: "absent"})
+	}
+	var backend backendError
+	if !errors.As(err.cause, &backend) {
+		fields = append(fields,
+			diagnostics.Field{Key: "backend_type_detail", Value: "absent"},
+			diagnostics.Field{Key: "backend_code_detail", Value: "absent"},
+			diagnostics.Field{Key: "request_id_detail", Value: "absent"},
+		)
+	}
+	if err.model != "" {
+		fields = append(fields, diagnostics.Field{Key: "configured_model", Value: err.model})
+	} else {
+		fields = append(fields, diagnostics.Field{Key: "model_detail", Value: err.modelState})
+	}
+	return fields
+}
+
+func joinCodexAttemptFailures(failures []codexAttemptFailure) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	causes := make([]error, len(failures))
+	for index, failure := range failures {
+		causes[index] = failure
+	}
+	if len(causes) == 1 {
+		return causes[0]
+	}
+	return errors.Join(causes...)
+}
+
+func logCodexAttemptFailures(failures []codexAttemptFailure) {
+	for _, failure := range failures {
+		diagnostics.Error("chat.provider", failure)
+	}
+}
+
+func codexAttemptDiagnosticOwner(ctx context.Context) bool {
+	owned, _ := ctx.Value(codexAttemptDiagnosticOwnerKey{}).(bool)
+	return owned
+}
+
+func codexDiagnosticModel(model string) string {
+	for _, field := range configuredModelDiagnostic(ModelRegistry{}, model) {
+		if field.Key == "configured_model" {
+			return field.Value
+		}
+	}
+	return ""
+}
+
+func codexModelDetailState(model string) string {
+	if strings.TrimSpace(model) == "" {
+		return "absent"
+	}
+	return "unrecognized"
+}
+
+func codexHTTPStatusRetryable(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func codexBackendDetails(err error) (string, string, bool) {
+	var backend backendError
+	if !errors.As(err, &backend) {
+		return "", "", false
+	}
+	return backend.kind, backend.code, true
+}
+
+func codexBackendAuthentication(kind, code string) bool {
+	switch kind {
+	case "authentication_error", "auth_error", "permission_error", "invalid_authentication", "invalid_api_key", "token_expired", "invalid_token", "invalid_grant", "invalid_client", "access_denied", "unauthorized", "forbidden":
+		return true
+	}
+	switch code {
+	case "authentication_error", "auth_error", "permission_error", "invalid_authentication", "invalid_api_key", "token_expired", "invalid_token", "invalid_grant", "invalid_client", "access_denied", "unauthorized", "forbidden":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexQuotaExhausted(kind, code string) bool {
+	return kind == "insufficient_quota" || code == "insufficient_quota"
+}
+
+func codexTLSOrConfigurationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var recordHeader tls.RecordHeaderError
+	var alert tls.AlertError
+	var invalidCertificate x509.CertificateInvalidError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	if errors.As(err, &recordHeader) || errors.As(err, &alert) ||
+		errors.As(err, &invalidCertificate) || errors.As(err, &unknownAuthority) || errors.As(err, &hostname) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"tls:", "tls handshake", "x509:", "certificate", "unsupported protocol scheme", "no protocol scheme", "invalid url",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexTransientNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || codexTLSOrConfigurationError(err) {
+		return false
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+		return true
+	}
+	for _, cause := range []error{
+		syscall.ECONNABORTED, syscall.ECONNREFUSED, syscall.ECONNRESET, syscall.EHOSTUNREACH,
+		syscall.ENETDOWN, syscall.ENETRESET, syscall.ENETUNREACH, syscall.EPIPE, syscall.ETIMEDOUT,
+	} {
+		if errors.Is(err, cause) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexRetryDecision(ctx context.Context, status int, err error) (bool, string) {
+	if ctxErr := ctx.Err(); ctxErr != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(ctxErr, context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			return false, codexRetryReasonDeadline
+		}
+		return false, codexRetryReasonCanceled
+	}
+	if errors.Is(err, errCodexResponseMissing) || errors.Is(err, errCodexResponseBodyMissing) {
+		return false, codexRetryReasonMalformed
+	}
+	if phase, _, ok := providerFailureInfo(err); ok && phase == "stream" {
+		return false, codexRetryReasonStream
+	}
+	kind, code, hasBackend := codexBackendDetails(err)
+	if hasBackend && codexQuotaExhausted(kind, code) {
+		return false, codexRetryReasonQuota
+	}
+	if hasBackend && codexBackendAuthentication(kind, code) {
+		return false, codexRetryReasonAuthentication
+	}
+	if status == http.StatusUnauthorized {
+		return false, codexRetryReasonAuthentication
+	}
+	if status != 0 {
+		if codexHTTPStatusRetryable(status) {
+			return true, codexRetryReasonTemporaryStatus
+		}
+		return false, codexRetryReasonOrdinaryStatus
+	}
+	if codexTransientNetworkError(err) {
+		return true, codexRetryReasonTransientNetwork
+	}
+	if codexTLSOrConfigurationError(err) {
+		return false, codexRetryReasonTLSConfig
+	}
+	return false, codexRetryReasonTransport
+}
+
+type codexAttemptDiagnosticOwnerKey struct{}
 
 type CodexProvider struct {
 	auth            *OpenAIAuthenticator
@@ -928,9 +1220,10 @@ func (p *CodexProvider) modelReply(ctx context.Context, model string, history []
 		if errors.Is(err, ErrLoginRequired) {
 			return "", fmt.Errorf("%w; restart GoAster to authenticate", err)
 		}
-		return "", authenticationRequestError{cause: fmt.Errorf("OpenAI subscription authentication failed: %w", err)}
+		return "", fmt.Errorf("OpenAI subscription credential lookup failed: %w", err)
 	}
-	reply, status, err := p.requestReply(ctx, credential, model, history, allowTools)
+	requestContext := context.WithValue(ctx, codexAttemptDiagnosticOwnerKey{}, true)
+	reply, status, err := p.requestReply(requestContext, credential, model, history, allowTools)
 	if status == http.StatusUnauthorized {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if PostToolAuthenticationReviewMessage(err) != "" {
@@ -946,9 +1239,13 @@ func (p *CodexProvider) modelReply(ctx context.Context, model string, history []
 		firstUnauthorizedErr := err
 		refreshed, refreshErr := p.auth.Refresh(ctx)
 		if refreshErr != nil {
-			return "", authenticationRequestError{cause: fmt.Errorf("OpenAI session expired; restart GoAster to authenticate: %w", errors.Join(firstUnauthorizedErr, refreshErr))}
+			combinedErr := errors.Join(firstUnauthorizedErr, refreshErr)
+			if errors.Is(refreshErr, ErrLoginRequired) {
+				return "", authenticationRequestError{cause: fmt.Errorf("OpenAI session expired; restart GoAster to authenticate: %w", combinedErr)}
+			}
+			return "", fmt.Errorf("OpenAI credential refresh failed: %w", combinedErr)
 		}
-		retryReply, retryStatus, retryErr := p.requestReply(ctx, refreshed, model, history, allowTools)
+		retryReply, retryStatus, retryErr := p.requestReply(requestContext, refreshed, model, history, allowTools)
 		if retryErr != nil {
 			status = retryStatus
 			combinedErr := errors.Join(firstUnauthorizedErr, retryErr)
@@ -958,6 +1255,7 @@ func (p *CodexProvider) modelReply(ctx context.Context, model string, history []
 				err = combinedErr
 			}
 		} else {
+			diagnostics.Error("chat.provider", firstUnauthorizedErr)
 			reply, status, err = retryReply, retryStatus, nil
 		}
 	}
@@ -1759,50 +2057,107 @@ func (p *CodexProvider) requestCodex(ctx context.Context, credential Credential,
 	if err != nil {
 		return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, fmt.Errorf("encode Codex request: %w", err))
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.backendURL, bytes.NewReader(payload))
-	if err != nil {
-		return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, fmt.Errorf("build Codex request: %w", err))
-	}
-	request.Header.Set("Authorization", "Bearer "+credential.AccessToken)
-	if credential.AccountID != "" {
-		request.Header.Set("ChatGPT-Account-ID", credential.AccountID)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "text/event-stream")
-	request.Header.Set("User-Agent", "goaster")
-	request.Header.Set("originator", openAIOriginator)
-	request.Header.Set("OpenAI-Beta", "responses=experimental")
-	release, err := providerCalls.acquire(ctx)
-	if err != nil {
-		return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, err)
-	}
-	defer release()
-	response, err := p.client().Do(request)
-	if err != nil {
-		return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, fmt.Errorf("Codex request: %w", err))
-	}
-	if response == nil {
-		return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, errors.New("Codex response is missing"))
-	}
-	if response.Body == nil {
-		return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, errors.New("Codex response body is missing"))
-	}
-	defer response.Body.Close()
-	body, readErr := readLimited(response.Body)
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if readErr != nil {
-			return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, fmt.Errorf("%w: read Codex response: %w", newBackendError("Codex backend request failed", response.StatusCode, body, response.Header.Get("x-request-id")), readErr))
+	requestAttempt := func(ctx context.Context, credential Credential, payload []byte) (codexParsedResponse, int, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.backendURL, bytes.NewReader(payload))
+		if err != nil {
+			return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, fmt.Errorf("build Codex request: %w", err))
 		}
-		return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, newBackendError("Codex backend request failed", response.StatusCode, body, response.Header.Get("x-request-id")))
+		request.Header.Set("Authorization", "Bearer "+credential.AccessToken)
+		if credential.AccountID != "" {
+			request.Header.Set("ChatGPT-Account-ID", credential.AccountID)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Accept", "text/event-stream")
+		request.Header.Set("User-Agent", "goaster")
+		request.Header.Set("originator", openAIOriginator)
+		request.Header.Set("OpenAI-Beta", "responses=experimental")
+		release, err := providerCalls.acquire(ctx)
+		if err != nil {
+			return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, err)
+		}
+		defer release()
+		response, err := p.client().Do(request)
+		if err != nil {
+			return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, fmt.Errorf("Codex request: %w", err))
+		}
+		if response == nil {
+			return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, errCodexResponseMissing)
+		}
+		if response.Body == nil {
+			return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, errCodexResponseBodyMissing)
+		}
+		body, readErr := readLimited(response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			backend := newBackendError("Codex backend request failed", response.StatusCode, body, response.Header.Get("x-request-id"))
+			if readErr != nil {
+				return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, fmt.Errorf("%w: read Codex response: %w", backend, readErr))
+			}
+			return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, backend)
+		}
+		if readErr != nil {
+			return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("stream", response.StatusCode, fmt.Errorf("read Codex response: %w", readErr))
+		}
+		parsed, err := parseCodexResponseResult(body)
+		if err != nil {
+			return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("stream", response.StatusCode, errors.Join(err, backendErrorWithRequestID("Codex stream failed", response.Header.Get("x-request-id"))))
+		}
+		return parsed, response.StatusCode, nil
 	}
-	if readErr != nil {
-		return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("stream", response.StatusCode, fmt.Errorf("read Codex response: %w", readErr))
+	failures := make([]codexAttemptFailure, 0, openAIModelAttempts)
+	finish := func(status int, extra error) (codexParsedResponse, int, error) {
+		for index := range failures {
+			failures[index].attempts = len(failures)
+		}
+		if !codexAttemptDiagnosticOwner(ctx) {
+			logCodexAttemptFailures(failures)
+		}
+		return codexParsedResponse{}, status, errors.Join(joinCodexAttemptFailures(failures), extra)
 	}
-	parsed, err := parseCodexResponseResult(body)
-	if err != nil {
-		return codexParsedResponse{}, response.StatusCode, wrapProviderFailure("stream", response.StatusCode, errors.Join(err, backendError{prefix: "Codex stream failed", requestID: diagnostics.RequestID(response.Header.Get("x-request-id"))}))
+	for attempt := 1; attempt <= openAIModelAttempts; attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if len(failures) == 0 {
+				return codexParsedResponse{}, 0, wrapProviderFailure("pre-stream", 0, ctxErr)
+			}
+			failures[len(failures)-1].retryDecision = codexRetryDecisionCanceled
+			return finish(failures[len(failures)-1].status, ctxErr)
+		}
+		response, status, err := requestAttempt(ctx, credential, payload)
+		if err == nil {
+			for index := range failures {
+				failures[index].attempts = attempt
+			}
+			logCodexAttemptFailures(failures)
+			return response, status, nil
+		}
+		retry, reason := codexRetryDecision(ctx, status, err)
+		decision := codexRetryDecisionNoRetry
+		if retry {
+			decision = codexRetryDecisionScheduled
+			if attempt == openAIModelAttempts {
+				decision = codexRetryDecisionExhausted
+			}
+		}
+		failures = append(failures, codexAttemptFailure{
+			cause: err, model: codexDiagnosticModel(model), modelState: codexModelDetailState(model),
+			status: status, attempt: attempt, retryDecision: decision, reason: reason,
+		})
+		if !retry || attempt == openAIModelAttempts {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				failures[len(failures)-1].retryDecision = codexRetryDecisionCanceled
+				return finish(status, ctxErr)
+			}
+			return finish(status, nil)
+		}
+		if waitErr := sleepContext(ctx, openAITransientDelay); waitErr != nil {
+			failures[len(failures)-1].retryDecision = codexRetryDecisionWaitError
+			if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
+				failures[len(failures)-1].retryDecision = codexRetryDecisionCanceled
+			}
+			return finish(status, waitErr)
+		}
 	}
-	return parsed, response.StatusCode, nil
+	return codexParsedResponse{}, 0, errors.New("Codex request attempts exhausted")
 }
 
 func (p *CodexProvider) webSearchHTTPClient() *http.Client {
@@ -2078,7 +2433,16 @@ func parseCodexStreamResponse(body []byte) (codexParsedResponse, error) {
 			if detail.Type == "" && detail.Code == "" && event.Response != nil {
 				detail = event.Response.Error
 			}
-			return backendError{prefix: "Codex response failed: backend returned an error", message: diagnostics.RemoteMessage(detail.Message), kind: diagnostics.BackendValue(detail.Type), code: diagnostics.BackendValue(detail.Code)}
+			kind := diagnostics.BackendValue(detail.Type)
+			code := diagnostics.BackendValue(detail.Code)
+			return backendError{
+				prefix:    "Codex response failed: backend returned an error",
+				message:   diagnostics.RemoteMessage(detail.Message),
+				kind:      kind,
+				code:      code,
+				kindState: backendDetailStateForValue(detail.Type, kind, strings.TrimSpace(detail.Type) != ""),
+				codeState: backendDetailStateForValue(detail.Code, code, strings.TrimSpace(detail.Code) != ""),
+			}
 		case "response.completed":
 			sawCompletion = true
 			if err := processResponse(event.Response); err != nil {

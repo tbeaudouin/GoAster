@@ -582,7 +582,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 			if a.agentEndpointAvailable(ctx, "/healthz") {
 				a.send(ctx, m.Chat.ID, "To see all available shortcut commands, use /help.")
 			} else {
-				a.send(ctx, m.Chat.ID, "Paired. The remote agent is not ready; check its remote authentication. You can still use /m to view or select a model and /clear to clear this chat's history.")
+				a.send(ctx, m.Chat.ID, "Paired. The remote agent is not ready; check the remote agent status. You can still use /m to view or select a model and /clear to clear this chat's history.")
 			}
 		}
 		return
@@ -679,7 +679,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		if a.agentEndpointAvailable(ctx, "/healthz") {
 			a.send(ctx, m.Chat.ID, "To see all available shortcut commands, use /help.")
 		} else {
-			a.send(ctx, m.Chat.ID, "The remote agent is not ready; check its remote authentication. You can still use /m to view or select a model and /clear to clear this chat's history.")
+			a.send(ctx, m.Chat.ID, "The remote agent is not ready; check the remote agent status. You can still use /m to view or select a model and /clear to clear this chat's history.")
 		}
 		return
 	}
@@ -933,7 +933,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 			sendFinal(modelErr.message)
 			return
 		}
-		sendFinal("The remote agent could not answer. Check its remote authentication.")
+		sendFinal("The remote agent could not answer. Check the agent status and try again.")
 		return
 	}
 	// Telegram limits message size. Chunks also handle non-BMP characters.

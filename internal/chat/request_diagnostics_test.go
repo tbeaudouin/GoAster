@@ -553,8 +553,8 @@ func TestModelUncertaintyInstructionRemainsAfterSessionReload(t *testing.T) {
 	requestsMu.Lock()
 	gotRequests := append([]codexRequest(nil), requests...)
 	requestsMu.Unlock()
-	if len(gotRequests) != 6 {
-		t.Fatalf("model requests = %d, want 6", len(gotRequests))
+	if len(gotRequests) != 7 {
+		t.Fatalf("model requests = %d, want 7", len(gotRequests))
 	}
 	for _, request := range gotRequests {
 		if !strings.Contains(request.Instructions, "If an earlier attempt may have failed or been interrupted") || !strings.Contains(request.Instructions, "Before continuing or retrying, check whether any actions completed and verify external state.") || !strings.Contains(request.Instructions, requestMigrationRetryException) || !strings.Contains(request.Instructions, "Conversation history may omit failed or interrupted attempts, even after a restart.") || !strings.Contains(request.Instructions, "do not suppress them because previous scheduled runs occurred") || strings.Contains(request.Instructions, "Verify external state before repeating.") {
@@ -568,14 +568,14 @@ func TestModelUncertaintyInstructionRemainsAfterSessionReload(t *testing.T) {
 			}
 		}
 	}
-	resumedInput, err := json.Marshal(gotRequests[3].Input)
+	resumedInput, err := json.Marshal(gotRequests[4].Input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(resumedInput), "first question") || !strings.Contains(string(resumedInput), "second question") || strings.Contains(string(resumedInput), "failed action") || strings.Contains(string(resumedInput), "TOOL_OUTPUT_NOT_PERSISTED") {
 		t.Fatalf("reloaded history did not reflect the failed attempt: %s", resumedInput)
 	}
-	for _, request := range gotRequests[4:] {
+	for _, request := range gotRequests[5:] {
 		input, err := json.Marshal(request.Input)
 		if err != nil || !strings.Contains(string(input), "regular scheduled repeat") {
 			t.Fatalf("scheduled repeat was not sent: %s, %v", input, err)

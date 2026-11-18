@@ -747,11 +747,11 @@ func TestCodexProviderPreservesBackendErrorsThroughPublicFlows(t *testing.T) {
 		provider.auth.AuthBaseURL = server.URL
 		provider.auth.HTTPClient = server.Client()
 		_, err := NewSession(Config{Model: "gpt-test"}, provider).Reply(context.Background(), "hello")
-		if err == nil || !errors.Is(err, errRequestAuthentication) || !strings.Contains(err.Error(), "status 401") ||
+		if err == nil || errors.Is(err, ErrLoginRequired) || errors.Is(err, errRequestAuthentication) || !strings.Contains(err.Error(), "status 401") ||
 			!strings.Contains(err.Error(), "status 502 Bad Gateway") || strings.Contains(err.Error(), "private access detail") || strings.Contains(err.Error(), "private refresh detail") {
 			t.Fatalf("refresh failure error = %v, want safe initial and refresh errors", err)
 		}
-		if diagnostic := requestFailureDiagnostic(err); strings.Contains(diagnostic, "private access detail") || strings.Contains(diagnostic, "private refresh detail") {
+		if diagnostic := requestFailureDiagnostic(err); strings.Contains(diagnostic, requestFailureAuthentication) || strings.Contains(diagnostic, "private access detail") || strings.Contains(diagnostic, "private refresh detail") {
 			t.Fatalf("refresh failure diagnostic = %q", diagnostic)
 		}
 		if backendRequests.Load() != 1 || refreshRequests.Load() != 1 {
@@ -803,7 +803,7 @@ func TestCodexProviderPreservesBackendErrorsThroughPublicFlows(t *testing.T) {
 		if diagnostic := requestFailureDiagnostic(err); strings.Contains(diagnostic, "private access detail") || strings.Contains(diagnostic, "private retry detail") {
 			t.Fatalf("retry failure diagnostic = %q", diagnostic)
 		}
-		if backendRequests.Load() != 2 || refreshRequests.Load() != 1 {
+		if backendRequests.Load() != 3 || refreshRequests.Load() != 1 {
 			t.Fatalf("401 retry failure requests = %d, refreshes = %d", backendRequests.Load(), refreshRequests.Load())
 		}
 	})
@@ -1316,8 +1316,8 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	checkLineError(rejectedRefreshError)
 	refreshStatus.Store(http.StatusInternalServerError)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	refreshFailureError := "OpenAI session expired; restart GoAster to authenticate: Codex backend request failed with status 401 Unauthorized\ntoken refresh failed with status 500 Internal Server Error"
-	if errors.Is(err, ErrLoginRequired) || !errors.Is(err, errRequestAuthentication) || err.Error() != refreshFailureError || !strings.Contains(requestFailureDiagnostic(err), refreshFailureError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
+	refreshFailureError := "OpenAI credential refresh failed: Codex backend request failed with status 401 Unauthorized\ntoken refresh failed with status 500 Internal Server Error"
+	if errors.Is(err, ErrLoginRequired) || errors.Is(err, errRequestAuthentication) || err.Error() != refreshFailureError || !strings.Contains(requestFailureDiagnostic(err), refreshFailureError) || strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("refresh failure error = %v", err)
 	}
 	checkLineError(refreshFailureError)
