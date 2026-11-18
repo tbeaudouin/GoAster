@@ -1,6 +1,7 @@
 package artefacts
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -11,6 +12,20 @@ import (
 	"testing"
 	"time"
 )
+
+func TestGoasterMigrationSkillMatchesApprovedWording(t *testing.T) {
+	actual, err := os.ReadFile(filepath.Join("..", "..", "skills", "goaster-migration", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := os.ReadFile(filepath.Join("testdata", "goaster-migration-approved.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, approved) {
+		t.Fatal("skills/goaster-migration/SKILL.md changed from approved wording")
+	}
+}
 
 func TestInstallBundledStartersOnce(t *testing.T) {
 	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
