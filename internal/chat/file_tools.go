@@ -156,6 +156,7 @@ var fileToolArgumentNames = map[string]map[string]bool{
 	editFileCodexTool.Name:   {"path": true, "old_text": true, "new_text": true},
 	appendFileCodexTool.Name: {"path": true, "content": true},
 	listDirCodexTool.Name:    {"path": true},
+	sendFileToolName:         {"path": true, "filename": true},
 }
 
 func parseFileToolArguments(toolName, arguments string) (map[string]json.RawMessage, error) {

@@ -1127,6 +1127,10 @@ func (a *adapter) sendMessage(ctx context.Context, chatID int64, text string) (i
 }
 
 func sendDocument(ctx context.Context, client httpDoer, apiBase, token string, chatID int64, filename string, data []byte, fields ...diagnostics.Field) error {
+	return sendDocumentWithThread(ctx, client, apiBase, token, chatID, telegramThreadID(ctx), filename, data, fields...)
+}
+
+func sendDocumentWithThread(ctx context.Context, client httpDoer, apiBase, token string, chatID, threadID int64, filename string, data []byte, fields ...diagnostics.Field) error {
 	if client == nil {
 		return telegramFailure("sendDocument", errors.New("Telegram client is unavailable"), "", 0, "", fields...)
 	}
@@ -1135,7 +1139,7 @@ func sendDocument(ctx context.Context, client httpDoer, apiBase, token string, c
 	if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
 		return telegramFailure("sendDocument", fmt.Errorf("encode chat ID: %w", err), "", 0, "", fields...)
 	}
-	if threadID := telegramThreadID(ctx); threadID != 0 {
+	if threadID != 0 {
 		if err := writer.WriteField("message_thread_id", strconv.FormatInt(threadID, 10)); err != nil {
 			return telegramFailure("sendDocument", fmt.Errorf("encode thread ID: %w", err), "", 0, "", fields...)
 		}
@@ -1174,9 +1178,10 @@ func callMultipart(ctx context.Context, client httpDoer, apiBase, token, method,
 	}
 	defer resp.Body.Close()
 	var envelope struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
-		ErrorCode   int    `json:"error_code"`
+		OK          bool            `json:"ok"`
+		Description string          `json:"description"`
+		ErrorCode   int             `json:"error_code"`
+		Result      json.RawMessage `json:"result"`
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if readErr != nil {
@@ -1194,6 +1199,12 @@ func callMultipart(ctx context.Context, client httpDoer, apiBase, token, method,
 			return telegramFailure(method, fmt.Errorf("decode Telegram response: %w", decodeErr), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
 		}
 		return telegramFailure(method, telegramAPIError{method: method, status: resp.Status, errorCode: envelope.ErrorCode, description: envelope.Description}, resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
+	}
+	var message struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := json.Unmarshal(envelope.Result, &message); err != nil || message.MessageID <= 0 {
+		return telegramFailure(method, errors.New("Telegram response did not contain a confirmed message"), resp.Status, envelope.ErrorCode, resp.Header.Get("x-request-id"), fields...)
 	}
 	return nil
 }
@@ -1215,6 +1226,9 @@ func (a *adapter) editMessage(ctx context.Context, chatID, messageID int64, text
 }
 
 func toolFeedbackText(name, arguments string) string {
+	if name == "send_file" {
+		return "🔧 `send_file`\nPreparing the selected file for Telegram delivery."
+	}
 	preview := truncateRunes(strings.TrimSpace(arguments), telegramToolFeedbackMaxChars)
 	if preview == "" {
 		return fmt.Sprintf("🔧 `%s`", name)

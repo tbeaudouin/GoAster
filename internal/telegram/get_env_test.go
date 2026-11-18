@@ -78,7 +78,7 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 				}
 				documentBodies = append(documentBodies, documentBody)
 				documentContentTypes = append(documentContentTypes, r.Header.Get("Content-Type"))
-				return response(http.StatusOK, `{"ok":true,"result":true}`), nil
+				return response(http.StatusOK, `{"ok":true,"result":{"message_id":1}}`), nil
 			case strings.HasSuffix(r.URL.Path, "/sendMessage"):
 				messageCount++
 				return response(http.StatusOK, `{"ok":true,"result":{}}`), nil
@@ -183,7 +183,7 @@ func TestTelegramGetEnvironmentCommandNamesAndBotMentions(t *testing.T) {
 				t.Fatalf("unexpected Telegram request %s", r.URL.Path)
 			}
 			documentCount++
-			return response(http.StatusOK, `{"ok":true,"result":true}`), nil
+			return response(http.StatusOK, `{"ok":true,"result":{"message_id":1}}`), nil
 		}),
 		agent: doerFunc(func(*http.Request) (*http.Response, error) {
 			t.Fatal("get environment command reached the agent")
@@ -209,7 +209,7 @@ func TestTelegramRemovedCommandsAreIgnored(t *testing.T) {
 		client: doerFunc(func(r *http.Request) (*http.Response, error) {
 			if strings.HasSuffix(r.URL.Path, "/sendDocument") {
 				documentCount++
-				return response(http.StatusOK, `{"ok":true,"result":true}`), nil
+				return response(http.StatusOK, `{"ok":true,"result":{"message_id":1}}`), nil
 			}
 			if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
 				t.Fatalf("unexpected Telegram request %s", r.URL.Path)
@@ -252,7 +252,7 @@ func TestTelegramGetEnvironmentRequiresAuthorizedPrivateConversation(t *testing.
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/sendDocument"):
 				documentCount++
-				return response(http.StatusOK, `{"ok":true,"result":true}`), nil
+				return response(http.StatusOK, `{"ok":true,"result":{"message_id":1}}`), nil
 			case strings.HasSuffix(r.URL.Path, "/sendMessage"):
 				var payload struct {
 					ChatID int64  `json:"chat_id"`

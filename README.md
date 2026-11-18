@@ -119,6 +119,13 @@ register command names with hyphens. The command may include Telegram's
 `@bot_username` suffix. Telegram receives the file directly as `goaster.env`;
 its contents are not sent to the remote agent, model, command output, or logs.
 
+During an authorized Telegram conversation, the agent can use the model-facing
+`send_file` tool for an ordinary regular file under the private artefact
+workspace. It accepts an optional safe filename, supports binary files such as
+ZIP archives up to 8 MiB, and inherits the current chat and exact forum topic;
+the model cannot choose a destination or token. See
+[the offline validation and live-acceptance notes](docs/send-file-validation-20261118.md).
+
 For a central migration, use a private conversation and follow the bundled
 four-step journey: privately check protected `~/.goaster/env` before process
 `HCLOUD_TOKEN`; if missing, use `/get-env`, local `goaster.env`, same-message

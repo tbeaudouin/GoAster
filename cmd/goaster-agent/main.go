@@ -171,6 +171,10 @@ func newAgentProvider(store chat.CredentialStore) (*chat.CodexProvider, command.
 		closeErr := backgroundManager.Close()
 		return nil, command.BackgroundCommandManager{}, errors.Join(fmt.Errorf("register background command tool: %w", err), closeErr)
 	}
+	if err := chat.RegisterSendFileTool(provider, telegram.SendFile); err != nil {
+		closeErr := backgroundManager.Close()
+		return nil, command.BackgroundCommandManager{}, errors.Join(fmt.Errorf("register send_file tool: %w", err), closeErr)
+	}
 	return provider, backgroundManager, nil
 }
 
@@ -767,6 +771,9 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			return
 		}
 		observer := func(name, arguments string) {
+			if name == "send_file" {
+				arguments = ""
+			}
 			emit("tool_call", "tool_observer", struct {
 				Type      string `json:"type"`
 				Name      string `json:"name"`
