@@ -8,3 +8,5 @@ Parent-confirmed offline checks passed:
 - Staged diff check passed.
 
 This work was offline only. No actual export, delivery, or deployment occurred. These changes affect bundled fresh installs only; the import skill was not delivered by this task.
+
+Follow-up: `goaster-import-memory` is now bundled by the separate import-skill task; see `import-memory-validation-20261119.md`. Real export/import and existing-agent rollout remain unverified.
