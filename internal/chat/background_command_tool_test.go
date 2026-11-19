@@ -73,6 +73,7 @@ func exerciseBackgroundCommandTool(t testing.TB) {
 		t.Fatalf("registered tool = %+v", registered)
 	}
 	if !strings.Contains(registered.Description, "not secret-safe") ||
+		!strings.Contains(registered.Description, "empty strings in fields unused by an action are accepted as absent") ||
 		!strings.Contains(registered.Description, "never use input") ||
 		!strings.Contains(registered.Description, "PTY echo") ||
 		!strings.Contains(registered.Description, "github-login") ||
@@ -236,26 +237,38 @@ func TestBackgroundCommandToolActionValidationResults(t *testing.T) {
 		wantText   string
 	}{
 		{
-			name:       "list rejects empty data",
-			arguments:  `{"action":"list","data":""}`,
+			name:       "list rejects nonempty data",
+			arguments:  `{"action":"list","data":"blocked"}`,
 			wantReason: backgroundCommandReasonForbiddenFields,
 			wantText:   `{"action":"list"}`,
 		},
 		{
-			name:       "start rejects empty keys",
-			arguments:  `{"action":"start","name":"preview","keys":""}`,
+			name:       "start rejects nonempty keys",
+			arguments:  `{"action":"start","name":"preview","keys":"enter"}`,
 			wantReason: backgroundCommandReasonForbiddenFields,
 			wantText:   `{"action":"start","name":"configured-name"}`,
 		},
 		{
 			name:       "start requires name",
-			arguments:  `{"action":"start"}`,
+			arguments:  `{"action":"start","name":"","id":"","data":"","keys":""}`,
+			wantReason: backgroundCommandReasonMissingName,
+			wantText:   `{"action":"list"}`,
+		},
+		{
+			name:       "start requires non-whitespace name",
+			arguments:  `{"action":"start","name":" \t\n"}`,
 			wantReason: backgroundCommandReasonMissingName,
 			wantText:   `{"action":"list"}`,
 		},
 		{
 			name:       "session action requires id",
-			arguments:  `{"action":"status"}`,
+			arguments:  `{"action":"status","name":"","id":"","data":"","keys":""}`,
+			wantReason: backgroundCommandReasonMissingID,
+			wantText:   `{"action":"list"}`,
+		},
+		{
+			name:       "session action requires non-whitespace id",
+			arguments:  `{"action":"status","id":" \t\n"}`,
 			wantReason: backgroundCommandReasonMissingID,
 			wantText:   `{"action":"list"}`,
 		},
@@ -272,16 +285,22 @@ func TestBackgroundCommandToolActionValidationResults(t *testing.T) {
 			wantText:   `"keys":"enter"`,
 		},
 		{
-			name:       "status rejects data",
-			arguments:  `{"action":"status","id":"session-id","data":""}`,
+			name:       "status rejects nonempty data",
+			arguments:  `{"action":"status","id":"session-id","data":"blocked"}`,
 			wantReason: backgroundCommandReasonForbiddenFields,
-			wantText:   "only action and id",
+			wantText:   "name, data, and keys must be empty",
 		},
 		{
 			name:       "unsupported action is not echoed",
 			arguments:  `{"action":"private-unknown-action"}`,
 			wantReason: backgroundCommandReasonUnsupportedAction,
 			wantText:   backgroundCommandActionsMessage,
+		},
+		{
+			name:       "missing action despite other placeholders",
+			arguments:  `{"action":"","name":"","id":"","data":"","keys":""}`,
+			wantReason: backgroundCommandReasonActionRequired,
+			wantText:   `{"action":"list"}`,
 		},
 	}
 	for _, test := range tests {
@@ -315,7 +334,7 @@ func TestBackgroundCommandToolInvalidCallCanBeCorrected(t *testing.T) {
 	manager := command.NewBackgroundCommandManagerAt(path)
 	defer manager.Close()
 
-	invalid, err := executeBackgroundCommandTool(context.Background(), `{"action":"list","keys":""}`, manager)
+	invalid, err := executeBackgroundCommandTool(context.Background(), `{"action":"list","keys":"blocked"}`, manager)
 	if err != nil || !strings.Contains(invalid, `"reason":"forbidden_fields"`) {
 		t.Fatalf("invalid call = %q, error = %v", invalid, err)
 	}
@@ -372,7 +391,7 @@ func TestCodexProviderPassesBackgroundValidationResultToNextRequest(t *testing.T
 		}
 		switch backendRequests.Add(1) {
 		case 1:
-			writeCodexFunctionCall(t, w, "background-invalid", backgroundCommandToolName, `{"action":"list","data":""}`)
+			writeCodexFunctionCall(t, w, "background-invalid", backgroundCommandToolName, `{"action":"list","data":"blocked"}`)
 		case 2:
 			if len(request.Input) != 3 {
 				t.Errorf("follow-up input length = %d, want 3: %+v", len(request.Input), request.Input)
@@ -381,7 +400,7 @@ func TestCodexProviderPassesBackgroundValidationResultToNextRequest(t *testing.T
 				if output.Type != "function_call_output" || output.CallID != "background-invalid" ||
 					!strings.Contains(output.Output, `"status":"invalid_request"`) ||
 					!strings.Contains(output.Output, `"reason":"forbidden_fields"`) ||
-					!strings.Contains(output.Output, "list accepts only action") {
+					!strings.Contains(output.Output, "other declared fields must be empty") {
 					t.Errorf("background validation result did not reach next request: %+v", output)
 				}
 			}
@@ -406,6 +425,96 @@ func TestCodexProviderPassesBackgroundValidationResultToNextRequest(t *testing.T
 	}
 }
 
+func TestCodexProviderAcceptsAllDeclaredBackgroundFieldsWithEmptyPlaceholders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "background-commands.json")
+	config, err := json.Marshal(command.BackgroundCommandConfig{Version: 1, Commands: []command.BackgroundCommandDefinition{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := command.NewBackgroundCommandManagerAt(path)
+	defer manager.Close()
+
+	var backendRequests atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request codexRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode Codex request: %v", err)
+			return
+		}
+		switch backendRequests.Add(1) {
+		case 1:
+			registered := codexTool{}
+			registeredFound := false
+			for i := range request.Tools {
+				if request.Tools[i].Name == backgroundCommandToolName {
+					registered = request.Tools[i]
+					registeredFound = true
+					break
+				}
+			}
+			if !registeredFound {
+				t.Errorf("Codex request omitted %s tool", backgroundCommandToolName)
+			} else {
+				if registered.Type != "function" {
+					t.Errorf("background tool type = %q, want function", registered.Type)
+				}
+				properties, ok := registered.Parameters["properties"].(map[string]any)
+				if !ok || len(properties) != 5 {
+					t.Errorf("background tool properties = %#v, want five declared string fields", registered.Parameters["properties"])
+				} else {
+					for _, field := range []string{"action", "name", "id", "data", "keys"} {
+						property, ok := properties[field].(map[string]any)
+						if !ok || property["type"] != "string" {
+							t.Errorf("background tool property %q = %#v, want string", field, properties[field])
+						}
+					}
+				}
+				required, ok := registered.Parameters["required"].([]any)
+				if !ok || len(required) != 1 || required[0] != "action" {
+					t.Errorf("background tool required = %#v, want [action]", registered.Parameters["required"])
+				}
+				if registered.Parameters["additionalProperties"] != false {
+					t.Errorf("background tool additionalProperties = %#v, want false", registered.Parameters["additionalProperties"])
+				}
+			}
+			writeCodexFunctionCall(t, w, "background-empty-fields", backgroundCommandToolName,
+				`{"action":"list","name":"","id":"","data":"","keys":""}`)
+		case 2:
+			if len(request.Input) != 3 {
+				t.Errorf("follow-up input length = %d, want 3: %+v", len(request.Input), request.Input)
+			} else {
+				output := request.Input[2]
+				if output.Type != "function_call_output" || output.CallID != "background-empty-fields" ||
+					!strings.Contains(output.Output, `"status":"ok"`) ||
+					!strings.Contains(output.Output, `"commands":[]`) ||
+					!strings.Contains(output.Output, `"sessions":[]`) {
+					t.Errorf("empty-placeholder tool result did not reach next request as success: %+v", output)
+				}
+			}
+			fmt.Fprint(w, `{"output_text":"empty placeholders accepted"}`)
+		default:
+			t.Errorf("unexpected backend request %d", backendRequests.Load())
+			fmt.Fprint(w, `{"output_text":"unexpected"}`)
+		}
+	}))
+	defer backend.Close()
+
+	provider := newShellTestProvider(t, backend)
+	if err := RegisterBackgroundCommandTool(provider, manager); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := provider.Reply(context.Background(), "gpt-test", "list background commands")
+	if err != nil || reply != "empty placeholders accepted" {
+		t.Fatalf("provider reply = %q, error = %v", reply, err)
+	}
+	if backendRequests.Load() != 2 {
+		t.Fatalf("backend requests = %d, want 2", backendRequests.Load())
+	}
+}
+
 func TestBackgroundCommandToolDoesNotRetainPrivateArgumentText(t *testing.T) {
 	privateField := "private-field-name"
 	privateValue := "PRIVATE_ARGUMENT_VALUE"
@@ -421,27 +530,67 @@ func TestBackgroundCommandToolDoesNotRetainPrivateArgumentText(t *testing.T) {
 	}
 }
 
-func TestBackgroundCommandValidationPreservesEmptyIrrelevantFields(t *testing.T) {
-	for _, arguments := range []string{
-		`{"action":"list","name":" ","id":""}`,
-		`{"action":"start","name":"example","id":" "}`,
-		`{"action":"status","id":"x","name":" "}`,
-		`{"action":"output","id":"x","name":""}`,
-		`{"action":"stop","id":"x","name":""}`,
-		`{"action":"poll","id":"x","name":""}`,
-		`{"action":"read","id":"x","name":""}`,
-		`{"action":"kill","id":"x","name":""}`,
-		`{"action":"input","id":"x","name":"","data":""}`,
-		`{"action":"write","id":"x","name":"","data":""}`,
-		`{"action":"send-keys","id":"x","name":"","keys":"enter"}`,
-	} {
-		parsed, err := parseBackgroundCommandToolArguments(arguments)
-		if err == nil {
-			err = validateBackgroundCommandToolArguments(parsed)
-		}
-		if err != nil {
-			t.Errorf("%s rejected: %v", arguments, err)
-		}
+func TestBackgroundCommandValidationAcceptsEmptyIrrelevantFields(t *testing.T) {
+	tests := []struct {
+		action          string
+		arguments       string
+		forbiddenFields []string
+	}{
+		{"list", `{"action":"list","name":"","id":"","data":"","keys":""}`, []string{"name", "id", "data", "keys"}},
+		{"start", `{"action":"start","name":"preview","id":"","data":"","keys":""}`, []string{"id", "data", "keys"}},
+		{"status", `{"action":"status","name":"","id":"session-id","data":"","keys":""}`, []string{"name", "data", "keys"}},
+		{"output", `{"action":"output","name":"","id":"session-id","data":"","keys":""}`, []string{"name", "data", "keys"}},
+		{"stop", `{"action":"stop","name":"","id":"session-id","data":"","keys":""}`, []string{"name", "data", "keys"}},
+		{"poll", `{"action":"poll","name":"","id":"session-id","data":"","keys":""}`, []string{"name", "data", "keys"}},
+		{"read", `{"action":"read","name":"","id":"session-id","data":"","keys":""}`, []string{"name", "data", "keys"}},
+		{"kill", `{"action":"kill","name":"","id":"session-id","data":"","keys":""}`, []string{"name", "data", "keys"}},
+		{"input", `{"action":"input","name":"","id":"session-id","data":"text","keys":""}`, []string{"name", "keys"}},
+		{"write", `{"action":"write","name":"","id":"session-id","data":"text","keys":""}`, []string{"name", "keys"}},
+		{"send-keys", `{"action":"send-keys","name":"","id":"session-id","data":"","keys":"enter"}`, []string{"name", "data"}},
+	}
+	for _, test := range tests {
+		t.Run(test.action, func(t *testing.T) {
+			parsed, err := parseBackgroundCommandToolArguments(test.arguments)
+			if err == nil {
+				err = validateBackgroundCommandToolArguments(parsed)
+			}
+			if err != nil {
+				t.Fatalf("empty irrelevant fields rejected: %v", err)
+			}
+
+			for _, field := range test.forbiddenFields {
+				for _, value := range []string{"blocked", " \t\n"} {
+					arguments := map[string]string{}
+					if err := json.Unmarshal([]byte(test.arguments), &arguments); err != nil {
+						t.Fatalf("decode base arguments: %v", err)
+					}
+					arguments[field] = value
+					encoded, err := json.Marshal(arguments)
+					if err != nil {
+						t.Fatalf("encode forbidden %s: %v", field, err)
+					}
+					parsed, err := parseBackgroundCommandToolArguments(string(encoded))
+					if err == nil {
+						err = validateBackgroundCommandToolArguments(parsed)
+					}
+					argumentErr, ok := err.(backgroundCommandToolArgumentError)
+					if !ok || argumentErr.reason != backgroundCommandReasonForbiddenFields {
+						t.Errorf("nonempty forbidden %s accepted for %s: %v", field, test.action, err)
+					}
+					if err != nil && strings.Contains(err.Error(), value) {
+						t.Errorf("forbidden %s value was echoed for %s: %v", field, test.action, err)
+					}
+				}
+			}
+		})
+	}
+
+	parsed, err := parseBackgroundCommandToolArguments(`{"action":"input","name":"","id":"session-id","data":"","keys":""}`)
+	if err == nil {
+		err = validateBackgroundCommandToolArguments(parsed)
+	}
+	if err != nil {
+		t.Fatalf("explicit empty input data rejected despite being present: %v", err)
 	}
 }
 
