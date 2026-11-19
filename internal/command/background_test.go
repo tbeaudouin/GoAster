@@ -11,12 +11,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	appconfig "goaster/config"
+)
+
+const (
+	backgroundLegacyPTYKeys  = "up,down,left,right,y,N,comma"
+	backgroundLegacyPTYBytes = "\x1b[A\x1b[B\x1b[D\x1b[CyN,"
 )
 
 // This helper runs in a separate copy of the test binary, without a shell.
@@ -95,6 +101,27 @@ func backgroundTestHelper() {
 			os.Exit(2)
 		}
 		fmt.Printf("pty-key-received:%d", key)
+	case "pty-key-bytes":
+		if len(args) != 1 {
+			os.Exit(2)
+		}
+		byteCount, err := strconv.Atoi(args[0])
+		if err != nil || byteCount <= 0 {
+			os.Exit(2)
+		}
+		stty := exec.Command("/bin/stty", "-icanon", "min", "1", "time", "0", "-echo")
+		stty.Stdin = os.Stdin
+		stty.Stdout = os.Stdout
+		stty.Stderr = os.Stderr
+		if err := stty.Run(); err != nil {
+			os.Exit(2)
+		}
+		fmt.Print("pty-key-bytes-ready")
+		received := make([]byte, byteCount)
+		if _, err := io.ReadFull(os.Stdin, received); err != nil {
+			os.Exit(2)
+		}
+		fmt.Printf("pty-key-bytes-received:%x", received)
 	case "pty-exit-output":
 		fmt.Print(strings.Repeat("x", 8192))
 		fmt.Print("pty-exit-output")
@@ -538,8 +565,19 @@ func TestBundledGitHubAuthDocumentsExact(t *testing.T) {
 		"\x60\x60\x60",
 		"",
 		"Use the session ID returned by \x60start\x60 for subsequent \x60background_command\x60",
-		"calls. If GitHub CLI is waiting to open the browser, send Enter to that",
-		"session:",
+		"calls. The profile's backward-compatible \x60keys_only\x60 setting disables \x60input\x60",
+		"and \x60write\x60 but does not restrict \x60send-keys\x60. Every eligible PTY accepts every",
+		"named terminal key already supported by \x60send-keys\x60, including arrows, tab,",
+		"space, backspace, enter/return, escape, function keys, and the existing",
+		"control/modifier forms. It also accepts one ordinary printable character per",
+		"comma-delimited token, so answer a Git credential prompt with a single \x60y\x60 or",
+		"\x60n\x60 when needed:",
+		"",
+		"\x60\x60\x60json",
+		"{\"action\":\"send-keys\",\"id\":\"<session-id>\",\"keys\":\"y\"}",
+		"\x60\x60\x60",
+		"",
+		"Use named \x60enter\x60 to submit a prompt or open the browser:",
 		"",
 		"\x60\x60\x60json",
 		"{\"action\":\"send-keys\",\"id\":\"<session-id>\",\"keys\":\"enter\"}",
@@ -551,10 +589,11 @@ func TestBundledGitHubAuthDocumentsExact(t *testing.T) {
 		"{\"action\":\"send-keys\",\"id\":\"<session-id>\",\"keys\":\"ctrl-c\"}",
 		"\x60\x60\x60",
 		"",
-		"Do not use \x60input\x60, paste, or enter secrets. Read the terminal output and share",
-		"GitHub's official verification URL and one-time code with the user, who",
-		"completes verification in their browser. Leave the session running while they",
-		"do so.",
+		"Do not use \x60input\x60 or \x60write\x60, paste text, or enter passwords, tokens, codes,",
+		"credentials, or any other secrets. A comma separates key tokens; use named",
+		"\x60comma\x60 for a literal comma. Read the terminal output and share GitHub's",
+		"official verification URL and one-time code with the user, who completes",
+		"verification in their browser. Leave the session running while they do so.",
 		"",
 		"Afterward, check the session with \x60status\x60 and read \x60output\x60 only as needed.",
 		"Verify the host and account using the commands above. Stop any still-running",
@@ -768,34 +807,34 @@ func exerciseBackgroundPTYInput(t testing.TB) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "background-commands.json")
 	writeBackgroundConfig(t, path, BackgroundCommandDefinition{
-		Name: "pty", Executable: executable, Args: backgroundHelperArgs("pty-key"), PTY: true, KeysOnly: true,
+		Name: "legacy-keys", Executable: executable, Args: backgroundHelperArgs("pty-key-bytes", strconv.Itoa(len(backgroundLegacyPTYBytes))), PTY: true, KeysOnly: true,
 	})
 	manager := NewBackgroundCommandManagerAt(path)
 	defer manager.Close()
-	session, err := manager.Start(context.Background(), "pty")
+	session, err := manager.Start(context.Background(), "legacy-keys")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !session.Interactive || !session.PTY {
 		t.Fatalf("PTY session metadata = %+v", session)
 	}
-	waitBackgroundOutput(t, manager, session.ID, "pty-key-ready")
+	waitBackgroundOutput(t, manager, session.ID, "pty-key-bytes-ready")
 	if _, err := manager.Input(context.Background(), session.ID, "text"); !errors.Is(err, ErrBackgroundSessionInputUnavailable) {
 		t.Fatalf("keys-only PTY accepted text input: %v", err)
 	}
-	if _, err := manager.SendKeys(context.Background(), session.ID, "ctrl-v"); !errors.Is(err, ErrBackgroundSessionInputUnavailable) {
-		t.Fatalf("keys-only PTY accepted paste key: %v", err)
-	}
-	if _, err := manager.SendKeys(context.Background(), session.ID, "enter"); err != nil {
-		t.Fatalf("send PTY key error = %v", err)
+	if _, err := manager.SendKeys(context.Background(), session.ID, backgroundLegacyPTYKeys); err != nil {
+		t.Fatalf("legacy keys-only PTY rejected supported keys: %v", err)
 	}
 	finished := waitBackgroundState(t, manager, session.ID, "exited", "failed")
-	if finished.State != "exited" || finished.ExitCode != 0 {
-		t.Fatalf("PTY session = %+v", finished)
+	if finished.State != "exited" || finished.ExitCode != 0 || finished.InputFailed || finished.FinishedAt.IsZero() {
+		t.Fatalf("legacy keys-only PTY session = %+v", finished)
 	}
 	output, err := manager.Output(context.Background(), session.ID)
-	if err != nil || !strings.Contains(output.Stdout, "pty-key-received:") {
-		t.Fatalf("PTY output = %+v, error = %v", output, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Stdout != "pty-key-bytes-readypty-key-bytes-received:"+fmt.Sprintf("%x", []byte(backgroundLegacyPTYBytes)) {
+		t.Fatalf("legacy keys-only PTY received bytes = %q", output.Stdout)
 	}
 }
 
@@ -811,6 +850,13 @@ func exerciseBackgroundKeyEncoding(t testing.TB) {
 		{name: "control key", keys: "ctrl-c", mode: BackgroundPtyKeyModeCSI, want: "\x03"},
 		{name: "CSI arrow", keys: "up", mode: BackgroundPtyKeyModeCSI, want: "\x1b[A"},
 		{name: "SS3 arrow", keys: "up", mode: BackgroundPtyKeyModeSS3, want: "\x1bOA"},
+		{name: "printable lower case", keys: "y", mode: BackgroundPtyKeyModeCSI, want: "y"},
+		{name: "printable upper case", keys: "N", mode: BackgroundPtyKeyModeCSI, want: "N"},
+		{name: "printable sequence", keys: "y,N", mode: BackgroundPtyKeyModeCSI, want: "yN"},
+		{name: "ordinary punctuation", keys: "!,?,;,:", mode: BackgroundPtyKeyModeCSI, want: "!?;:"},
+		{name: "named comma", keys: "comma", mode: BackgroundPtyKeyModeCSI, want: ","},
+		{name: "named comma with punctuation", keys: "!,comma,?", mode: BackgroundPtyKeyModeCSI, want: "!,?"},
+		{name: "alt printable preserves case", keys: "alt-Y", mode: BackgroundPtyKeyModeCSI, want: "\x1bY"},
 	}
 	for _, fixture := range cases {
 		got, err := EncodeBackgroundKeySequence(fixture.keys, fixture.mode)
@@ -818,9 +864,18 @@ func exerciseBackgroundKeyEncoding(t testing.TB) {
 			t.Fatalf("%s encoded key = %q, error = %v, want %q", fixture.name, got, err, fixture.want)
 		}
 	}
-	for _, keys := range []string{"", "unknown", "ctrl-", "alt-xx", ",,,"} {
+	for _, keys := range []string{"", "unknown", "yes", "password", "ctrl-", "alt-xx", "\x03", "\x1b[A", "!?", ",,,", ","} {
 		if _, err := EncodeBackgroundKeySequence(keys, BackgroundPtyKeyModeCSI); err == nil {
 			t.Errorf("accepted invalid key sequence %q", keys)
+		}
+	}
+	if _, err := EncodeBackgroundKeySequence(strings.Repeat("f10,", MaxSessionInputBytes/4), BackgroundPtyKeyModeCSI); err == nil {
+		t.Error("accepted a key sequence whose encoded bytes exceed the bound")
+	}
+	for key, want := range backgroundKeyMap {
+		got, err := EncodeBackgroundKeySequence(key, BackgroundPtyKeyModeCSI)
+		if err != nil || got != want {
+			t.Errorf("existing named key %q encoded as %q, error = %v, want %q", key, got, err, want)
 		}
 	}
 	detector := backgroundPtyKeyModeDetector{}

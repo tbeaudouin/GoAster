@@ -66,7 +66,8 @@ type BackgroundCommandDefinition struct {
 	CWD         string   `json:"cwd,omitempty"`
 	Interactive bool     `json:"interactive,omitempty"`
 	PTY         bool     `json:"pty,omitempty"`
-	// KeysOnly permits only enter/return and ctrl-c/c-c through send-keys.
+	// KeysOnly disables free-text input for backward compatibility with installed
+	// configurations. It does not restrict send-keys.
 	KeysOnly bool `json:"keys_only,omitempty"`
 	// RedactOutput prevents command output from being retained or returned.
 	RedactOutput bool `json:"redact_output,omitempty"`
@@ -539,7 +540,7 @@ func (manager BackgroundCommandManager) Input(ctx context.Context, id, data stri
 	return response.session, err
 }
 
-// SendKeys encodes named non-secret terminal keys and queues them for an
+// SendKeys encodes supported non-secret terminal keys and queues them for an
 // owner-authorized PTY session. It is not a secret-safe channel.
 func (manager BackgroundCommandManager) SendKeys(ctx context.Context, id, keys string) (BackgroundSession, error) {
 	response, err := manager.call(ctx, backgroundManagerRequest{action: "send-keys", id: id, keys: keys})
@@ -765,10 +766,6 @@ func runBackgroundCommandManager(path string, requests <-chan backgroundManagerR
 						response.err = ErrBackgroundSessionInputUnavailable
 						break
 					}
-					if managed.keysOnly && !validBackgroundControlKeys(request.keys) {
-						response.err = ErrBackgroundSessionInputUnavailable
-						break
-					}
 					mode := BackgroundPtyKeyModeCSI
 					if managed.process.KeyMode != nil {
 						mode = managed.process.KeyMode()
@@ -825,20 +822,6 @@ func runBackgroundCommandManager(path string, requests <-chan backgroundManagerR
 			request.response <- response
 		}
 	}
-}
-
-func validBackgroundControlKeys(keys string) bool {
-	if strings.TrimSpace(keys) == "" {
-		return false
-	}
-	for _, key := range strings.Split(keys, ",") {
-		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "enter", "return", "ctrl-c", "c-c":
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func refreshManagedBackgroundSessions(sessions map[string]managedBackgroundSession) {

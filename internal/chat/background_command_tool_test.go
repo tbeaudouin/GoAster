@@ -5,27 +5,62 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"goaster/internal/command"
 )
 
+const (
+	backgroundToolLegacyPTYKeys  = "up,down,left,right,y,N,comma"
+	backgroundToolLegacyPTYBytes = "\x1b[A\x1b[B\x1b[D\x1b[CyN,"
+)
+
 func TestBackgroundCommandToolHelper(t *testing.T) {
 	marker := false
-	for _, argument := range os.Args {
+	ptyMarker := false
+	ptyByteCount := 0
+	for index, argument := range os.Args {
 		if argument == "--goaster-background-tool-helper" {
 			marker = true
-			break
+		}
+		if argument == "--goaster-background-tool-pty-helper" {
+			ptyMarker = true
+			if index+1 < len(os.Args) {
+				ptyByteCount, _ = strconv.Atoi(os.Args[index+1])
+			}
 		}
 	}
 	if !marker {
 		return
+	}
+	if ptyMarker {
+		if ptyByteCount <= 0 {
+			os.Exit(2)
+		}
+		stty := exec.Command("/bin/stty", "-icanon", "min", "1", "time", "0", "-echo")
+		stty.Stdin = os.Stdin
+		stty.Stdout = os.Stdout
+		stty.Stderr = os.Stderr
+		if err := stty.Run(); err != nil {
+			os.Exit(2)
+		}
+		fmt.Print("tool-pty-ready")
+		received := make([]byte, ptyByteCount)
+		if _, err := io.ReadFull(os.Stdin, received); err != nil {
+			os.Exit(2)
+		}
+		fmt.Printf("tool-pty-received:%x", received)
+		os.Exit(0)
 	}
 	fmt.Print("tool-ready")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -74,11 +109,21 @@ func exerciseBackgroundCommandTool(t testing.TB) {
 	}
 	if !strings.Contains(registered.Description, "not secret-safe") ||
 		!strings.Contains(registered.Description, "empty strings in fields unused by an action are accepted as absent") ||
-		!strings.Contains(registered.Description, "never use input") ||
+		!strings.Contains(registered.Description, "Interactive pipe or PTY input is opt-in") ||
+		!strings.Contains(registered.Description, "input/write and send-keys are only for non-secret data or terminal keys") ||
+		!strings.Contains(registered.Description, "never send passwords, passphrases, tokens, API keys, one-time codes, private keys, or any other secret") ||
+		!strings.Contains(registered.Description, "never pasted text") ||
 		!strings.Contains(registered.Description, "PTY echo") ||
 		!strings.Contains(registered.Description, "github-login") ||
+		!strings.Contains(registered.Description, "printable character per comma-delimited token") ||
+		!strings.Contains(registered.Description, "use named comma for a literal comma") ||
+		!strings.Contains(registered.Description, "backward-compatible keys_only setting only disables input/write; it never narrows send-keys") ||
+		!strings.Contains(registered.Description, "Every eligible PTY accepts the same supported named terminal keys") ||
+		!strings.Contains(registered.Description, "keeps input/write unavailable") ||
+		!strings.Contains(registered.Description, "for the bundled github-login profile only, never use input/write or enter user secrets") ||
 		!strings.Contains(registered.Description, "official verification URL and one-time code") ||
-		!strings.Contains(registered.Description, "Never relay passwords, tokens, credentials, or other secrets") {
+		!strings.Contains(registered.Description, "Never relay passwords, tokens, credentials, or other secrets") ||
+		strings.Contains(registered.Description, "This generic tool is not secret-safe: never use input") {
 		t.Fatalf("background tool description omits the non-secret boundary: %q", registered.Description)
 	}
 	properties, ok := registered.Parameters["properties"].(map[string]any)
@@ -190,6 +235,98 @@ func TestBackgroundCommandToolSupportsAllowlistedInput(t *testing.T) {
 		if err != nil || !strings.Contains(result, `"status":"`) || strings.Contains(result, "input_queued") {
 			t.Fatalf("authorization/input boundary for %s returned %q, error = %v", arguments, result, err)
 		}
+	}
+}
+
+func TestBackgroundCommandToolKeysOnlyDoesNotRestrictSendKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "background-commands.json")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(command.BackgroundCommandConfig{Version: 1, Commands: []command.BackgroundCommandDefinition{
+		{
+			Name: "legacy-keys", Executable: executable,
+			Args: []string{"-test.run=^TestBackgroundCommandToolHelper$", "--", "--goaster-background-tool-helper", "--goaster-background-tool-pty-helper", strconv.Itoa(len(backgroundToolLegacyPTYBytes))},
+			PTY:  true, KeysOnly: true,
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := command.NewBackgroundCommandManagerAt(path)
+	defer manager.Close()
+	registered := Tool{}
+	registrar := backgroundCommandToolRegistrar{register: func(tool Tool) error {
+		registered = tool
+		return nil
+	}}
+	if err := RegisterBackgroundCommandTool(registrar, manager); err != nil {
+		t.Fatal(err)
+	}
+	started, err := registered.Handler(context.Background(), `{"action":"start","name":"legacy-keys"}`)
+	if err != nil || !strings.Contains(started, `"status":"started"`) || !strings.Contains(started, `"id":"bg-000001"`) {
+		t.Fatalf("legacy keys-only start = %q, error = %v", started, err)
+	}
+	deadline := time.Now().Add(6 * time.Second)
+	for {
+		result, err := registered.Handler(context.Background(), `{"action":"output","id":"bg-000001"}`)
+		if err != nil {
+			t.Fatalf("legacy keys-only PTY readiness output = %q, error = %v", result, err)
+		}
+		if strings.Contains(result, `"stdout":"tool-pty-ready"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("legacy keys-only PTY did not become ready: %q", result)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, action := range []string{"input", "write"} {
+		arguments := fmt.Sprintf(`{"action":%q,"id":"bg-000001","data":"blocked"}`, action)
+		result, err := registered.Handler(context.Background(), arguments)
+		if err != nil || !strings.Contains(result, `"status":"input_unavailable"`) || strings.Contains(result, `"status":"input_queued"`) {
+			t.Fatalf("legacy keys-only %s result = %q, error = %v", action, result, err)
+		}
+	}
+	result, err := registered.Handler(context.Background(), fmt.Sprintf(`{"action":"send-keys","id":"bg-000001","keys":%q}`, backgroundToolLegacyPTYKeys))
+	if err != nil || !strings.Contains(result, `"status":"keys_queued"`) {
+		t.Fatalf("legacy keys-only send-keys result = %q, error = %v", result, err)
+	}
+	wantOutput := `"stdout":"tool-pty-readytool-pty-received:` + fmt.Sprintf("%x", []byte(backgroundToolLegacyPTYBytes)) + `"`
+	deadline = time.Now().Add(6 * time.Second)
+	for {
+		result, err = registered.Handler(context.Background(), `{"action":"output","id":"bg-000001"}`)
+		if err != nil {
+			t.Fatalf("legacy keys-only PTY output = %q, error = %v", result, err)
+		}
+		if strings.Contains(result, wantOutput) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("legacy keys-only PTY received output = %q, want exact %q", result, wantOutput)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	deadline = time.Now().Add(6 * time.Second)
+	for {
+		result, err = registered.Handler(context.Background(), `{"action":"status","id":"bg-000001"}`)
+		if err != nil {
+			t.Fatalf("legacy keys-only PTY status = %q, error = %v", result, err)
+		}
+		if strings.Contains(result, `"state":"exited"`) {
+			if !strings.Contains(result, `"exit_code":0`) || strings.Contains(result, `"input_failed":true`) {
+				t.Fatalf("legacy keys-only PTY unsuccessful completion = %q", result)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("legacy keys-only PTY did not complete: %q", result)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

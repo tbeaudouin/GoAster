@@ -28,8 +28,11 @@ Optional interactive settings:
 
 - `interactive: true` enables input.
 - `pty: true` enables a terminal where supported.
-- `keys_only: true` requires a terminal, disables free-text input, and permits
-  only Enter or Ctrl-C.
+- `keys_only: true` requires a terminal and disables free-text input for
+  backward compatibility with installed configurations. It never restricts
+  `send-keys`; every eligible PTY accepts the same existing named terminal keys
+  and one printable character per comma-delimited token. Use named `comma` for
+  a literal comma.
 - `redact_output: true` hides captured output.
 
 ## Add, change, or remove a command
@@ -57,11 +60,15 @@ command whose private allowlist entry explicitly permits it. Interactive input
 is not secret-safe because arguments and PTY output may be visible to the model
 and saved. Never enter passwords, passphrases, tokens, API keys, one-time codes,
 private keys, or other secrets. Do not use this workflow to add arbitrary login
-or authentication commands. The bundled `github-login` profile is the only
-narrow exception; keep its fixed browser-login arguments, Enter/Return or
-Ctrl-C/C-C input policy, and output visibility unchanged. Its terminal output
-may be read only to relay GitHub's official verification URL and one-time code;
-never relay passwords, tokens, credentials, or other secrets.
+or authentication commands. The bundled `github-login` profile is the approved
+authentication profile; keep its fixed `/usr/bin/gh` browser-login arguments and
+output visibility unchanged. Its backward-compatible `keys_only` setting keeps
+`input`/`write` unavailable but does not narrow the common `send-keys` policy:
+the existing named terminal keys plus one printable character per comma-
+delimited token are accepted; use named `comma` for a literal comma. Never
+paste text or relay passwords, tokens, credentials, or other secrets. Its
+terminal output may be read only to relay
+GitHub's official verification URL and one-time code.
 
 Stopping is best effort: a command may leave child processes running. Cleanup
 failures are recorded and reported on orderly shutdown.
