@@ -10,11 +10,3 @@ Export this GoAster agent's memories, skills, knowledge, and other files stored 
 4. Create a ZIP named `goaster-memory-YYYYMMDD-HHMMSS.zip` containing one top-level `artefacts/` folder and all its contents, including hidden files and empty directories. Keep the archive private.
 5. Send the ZIP to the user in the same conversation.
 6. Tell the user: "On your old GoAster agent, send `/get-env` separately and save the `goaster.env` file securely. On your new agent, use `goaster-import-memory` with this ZIP, then attach `goaster.env` with `/env`."
-
-## Safety and delivery
-
-Use this workflow only in the paired owner's private conversation. Export only the real user's `<real user home>/.goaster/artefacts`; do not access outside it or follow/traverse symlinks. If any symlink or prohibited secret, credential, environment, or authentication material is encountered, stop and explain that a complete export cannot be made; never silently omit material or claim completeness. Environment variables are handled separately through `/get-env` and are outside this export.
-
-Use the existing `read-write-temp-files` skill to create the archive in an existing private temporary directory outside the source tree. After the archive is complete, copy it as a private, exclusive regular file into a fresh, unique subdirectory of the artefacts delivery workspace. The staged copy must be no larger than `send_file`'s 8 MiB limit, addressed by its path relative to that workspace, and excluded from the export. Send it once with the existing `send_file` capability in this same conversation.
-
-After confirmed delivery, remove only the staging copy, its own staging directory, and this task's temporary archive. If delivery is uncertain or fails, stop, preserve the archive and staged copy for explicit recovery, explain the status, and never retry or use another delivery route. Do not add tools, change runtime behavior, or modify authentication or delivery mechanisms.
