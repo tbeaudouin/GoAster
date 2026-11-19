@@ -18,8 +18,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/creack/pty"
-
 	appconfig "goaster/config"
 	"goaster/internal/artefacts"
 )
@@ -170,10 +168,35 @@ type managedBackgroundSession struct {
 	session       BackgroundSession
 	process       BackgroundProcess
 	result        Result
+	shutdownErr   error
+	shutdownOwned bool
 	keysOnly      bool
 	stopRequested bool
 	finished      bool
 	err           error
+}
+
+type backgroundStartFunc func(BackgroundRequest) (BackgroundProcess, error)
+
+// backgroundExecutionError retains the full completion error while exposing
+// the subset, if any, that manager shutdown still owns. The wrapper is kept
+// private so BackgroundExecution's public shape remains unchanged.
+type backgroundExecutionError struct {
+	cause         error
+	shutdownErr   error
+	shutdownOwned bool
+}
+
+func (failure backgroundExecutionError) Error() string { return failure.cause.Error() }
+
+func (failure backgroundExecutionError) Unwrap() error { return failure.cause }
+
+func backgroundShutdownOwnership(err error) (error, bool) {
+	failure, ok := err.(backgroundExecutionError)
+	if !ok {
+		return nil, false
+	}
+	return failure.shutdownErr, failure.shutdownOwned
 }
 
 // LoadBackgroundCommandConfig loads the default private runtime config when
@@ -493,11 +516,18 @@ func NewBackgroundCommandManager() (BackgroundCommandManager, error) {
 // NewBackgroundCommandManagerAt creates a runtime session manager that reads
 // an explicit allowlist file before listing or starting commands.
 func NewBackgroundCommandManagerAt(path string) BackgroundCommandManager {
+	return newBackgroundCommandManagerAt(path, StartBackground)
+}
+
+func newBackgroundCommandManagerAt(path string, start backgroundStartFunc) BackgroundCommandManager {
+	if start == nil {
+		start = StartBackground
+	}
 	requests := make(chan backgroundManagerRequest)
 	done := make(chan struct{})
 	closeResult := make(chan error, 1)
 	manager := BackgroundCommandManager{requests: requests, done: done, closeResult: closeResult}
-	go runBackgroundCommandManager(filepath.Clean(path), requests, done, closeResult)
+	go runBackgroundCommandManager(filepath.Clean(path), requests, done, closeResult, start)
 	return manager
 }
 
@@ -629,7 +659,7 @@ func (manager BackgroundCommandManager) call(ctx context.Context, request backgr
 	}
 }
 
-func runBackgroundCommandManager(path string, requests <-chan backgroundManagerRequest, done chan struct{}, closeResult chan error) {
+func runBackgroundCommandManager(path string, requests <-chan backgroundManagerRequest, done chan struct{}, closeResult chan error, start backgroundStartFunc) {
 	defer close(done)
 	sessions := make(map[string]managedBackgroundSession)
 	order := make([]string, 0, maxBackgroundSessions)
@@ -696,7 +726,7 @@ func runBackgroundCommandManager(path string, requests <-chan backgroundManagerR
 				response.err = request.ctx.Err()
 				break
 			}
-			process, err := StartBackground(BackgroundRequest{
+			process, err := start(BackgroundRequest{
 				Executable:   selected.Executable,
 				Args:         selected.Args,
 				Dir:          selected.CWD,
@@ -841,10 +871,12 @@ func refreshManagedBackgroundSessions(sessions map[string]managedBackgroundSessi
 			if !open {
 				managed.session.State = "failed"
 				managed.err = fmt.Errorf("%w: background session ended without a cleanup result", errBackgroundCleanup)
+				managed.shutdownErr = managed.err
 				managed.session.ExitCode = -1
 			} else {
 				managed.result = execution.Result
 				managed.err = execution.Err
+				managed.shutdownErr, managed.shutdownOwned = backgroundShutdownOwnership(execution.Err)
 				managed.session.FinishedAt = execution.FinishedAt
 				managed.session.ExitCode = execution.Result.ExitCode
 				managed.session.StdoutTruncated = execution.Result.StdoutTruncated
@@ -867,7 +899,7 @@ func refreshManagedBackgroundSessions(sessions map[string]managedBackgroundSessi
 			}
 			managed.finished = true
 			if managed.err != nil {
-				managed.session.Error = managed.err.Error()
+				managed.session.Error = backgroundSessionError(managed.err)
 			}
 		default:
 			if !managed.stopRequested {
@@ -914,7 +946,9 @@ func closeManagedBackgroundSessions(sessions map[string]managedBackgroundSession
 	var closeErr error
 	for _, managed := range sessions {
 		if managed.finished {
-			if isBackgroundCleanupError(managed.err) {
+			if managed.shutdownOwned {
+				closeErr = errors.Join(closeErr, managed.shutdownErr)
+			} else if isBackgroundCleanupError(managed.err) {
 				closeErr = errors.Join(closeErr, managed.err)
 			}
 		} else {
@@ -932,6 +966,7 @@ func closeManagedBackgroundSessions(sessions map[string]managedBackgroundSession
 			managed.session.State = "failed"
 			if open {
 				managed.err = execution.Err
+				managed.shutdownErr, managed.shutdownOwned = backgroundShutdownOwnership(execution.Err)
 				managed.result = execution.Result
 				managed.session.ExitCode = execution.Result.ExitCode
 				managed.session.FinishedAt = execution.FinishedAt
@@ -945,11 +980,14 @@ func closeManagedBackgroundSessions(sessions map[string]managedBackgroundSession
 				default:
 					managed.session.State = "failed"
 				}
-				if isBackgroundCleanupError(execution.Err) {
+				if managed.shutdownOwned {
+					closeErr = errors.Join(closeErr, managed.shutdownErr)
+				} else if isBackgroundCleanupError(execution.Err) {
 					closeErr = errors.Join(closeErr, execution.Err)
 				}
 			} else {
 				managed.err = fmt.Errorf("%w: background session ended without a cleanup result", errBackgroundCleanup)
+				managed.shutdownErr = managed.err
 				closeErr = errors.Join(closeErr, managed.err)
 			}
 		case <-deadline.C:
@@ -957,7 +995,7 @@ func closeManagedBackgroundSessions(sessions map[string]managedBackgroundSession
 		}
 		managed.finished = true
 		if managed.err != nil {
-			managed.session.Error = managed.err.Error()
+			managed.session.Error = backgroundSessionError(managed.err)
 		}
 		if managed.session.FinishedAt.IsZero() {
 			managed.session.FinishedAt = time.Now().UTC()
@@ -971,6 +1009,10 @@ func closeManagedBackgroundSessions(sessions map[string]managedBackgroundSession
 // best-effort process cleanup. Timeout zero runs until stopped, exited, or the
 // bounded output limit is reached; descendants may outlive the session.
 func StartBackground(req BackgroundRequest) (BackgroundProcess, error) {
+	return startBackground(req, nil)
+}
+
+func startBackground(req BackgroundRequest, configurePTY backgroundPTYConfigurer) (BackgroundProcess, error) {
 	if !validBackgroundExecutable(req.Executable, req.Args) {
 		return BackgroundProcess{}, errors.New("executable or arguments are invalid")
 	}
@@ -1060,20 +1102,22 @@ func StartBackground(req BackgroundRequest) (BackgroundProcess, error) {
 	}
 
 	var inputWriter io.Writer
+	var ptyRuntime backgroundPTYRuntime
 	if req.PTY {
-		master, err := pty.Start(cmd)
-		if err == nil {
-			terminal = master
-		}
+		var err error
+		ptyRuntime, err = startBackgroundPTY(cmd)
 		if err != nil {
+			// The chat start owner emits the single safe diagnostic for this
+			// returned, cause-preserving creation failure.
 			stop()
 			close(ready)
-			if errors.Is(err, pty.ErrUnsupported) {
-				return BackgroundProcess{}, ErrPTYNotSupported
-			}
-			return BackgroundProcess{}, errors.New("PTY could not be started")
+			return BackgroundProcess{}, err
 		}
-		inputWriter = terminal
+		if configurePTY != nil {
+			ptyRuntime = configurePTY(ptyRuntime)
+		}
+		terminal = ptyRuntime.terminal
+		inputWriter = ptyRuntime
 	} else {
 		cmd.Stdout = outputWriterFunc(writeStdout)
 		cmd.Stderr = outputWriterFunc(writeStderr)
@@ -1125,7 +1169,9 @@ func StartBackground(req BackgroundRequest) (BackgroundProcess, error) {
 	}
 
 	var readDone chan error
+	var responseDone <-chan error
 	if req.PTY {
+		responseDone = ptyRuntime.startResponsePump(stop)
 		readDone = make(chan error, 1)
 		go func() {
 			defer close(readDone)
@@ -1139,10 +1185,18 @@ func StartBackground(req BackgroundRequest) (BackgroundProcess, error) {
 						stop()
 						return
 					}
+					if _, parseErr := ptyRuntime.writeEmulator(buffer[:count]); parseErr != nil {
+						readDone <- backgroundPTYStreamFailure{cause: fmt.Errorf("%w: %w", errBackgroundPTYParser, parseErr)}
+						stop()
+						return
+					}
 				}
 				if err != nil {
 					if errors.Is(err, io.EOF) || (runtime.GOOS == "linux" && errors.Is(err, syscall.EIO)) {
 						err = nil
+					}
+					if flushErr := ptyRuntime.flushEmulatorInput(); flushErr != nil {
+						err = errors.Join(err, backgroundPTYStreamFailure{cause: fmt.Errorf("%w: %w", errBackgroundPTYParser, flushErr)})
 					}
 					readDone <- err
 					if err != nil {
@@ -1157,10 +1211,18 @@ func StartBackground(req BackgroundRequest) (BackgroundProcess, error) {
 		defer stop()
 		beginProcessWait()
 		runErr := cmd.Wait()
-		cleanupErr := finishProcess()
+		processCleanupErr := finishProcess()
+		var outputCleanup backgroundPTYOutputCleanup
+		var responsePipeErr error
+		var responseCleanupErr error
 		if terminal != nil {
-			cleanupErr = errors.Join(cleanupErr, waitForBackgroundPTYOutput(terminal, readDone))
+			outputCleanup = waitForBackgroundPTYOutputDetails(terminal, readDone)
+			responsePipeErr = ptyRuntime.closeResponsePipe()
+			responseCleanupErr = waitForBackgroundPTYResponses(responseDone)
 		}
+		cleanupErr := errors.Join(processCleanupErr, outputCleanup.err(), responsePipeErr, responseCleanupErr)
+		streamErr := errors.Join(outputCleanup.streamErr(), backgroundPTYStreamError(responseCleanupErr))
+		shutdownCleanupErr := errors.Join(processCleanupErr, outputCleanup.shutdownErr(), responsePipeErr, backgroundPTYShutdownError(responseCleanupErr))
 		finishedAt := time.Now().UTC()
 		result := snapshot()
 		if cmd.ProcessState != nil {
@@ -1177,7 +1239,15 @@ func StartBackground(req BackgroundRequest) (BackgroundProcess, error) {
 			runErr = nil
 		}
 		if cleanupErr != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("%w: %w", errBackgroundCleanup, cleanupErr))
+			if streamErr != nil {
+				reportBackgroundPTYFailure(streamErr, "stream")
+			}
+			fullErr := errors.Join(runErr, fmt.Errorf("%w: %w", errBackgroundCleanup, cleanupErr))
+			var shutdownErr error
+			if shutdownCleanupErr != nil {
+				shutdownErr = fmt.Errorf("%w: %w", errBackgroundCleanup, shutdownCleanupErr)
+			}
+			runErr = backgroundExecutionError{cause: fullErr, shutdownErr: shutdownErr, shutdownOwned: terminal != nil}
 		}
 		finishInput()
 		done <- BackgroundExecution{Result: result, Err: runErr, FinishedAt: finishedAt}
@@ -1195,6 +1265,16 @@ func StartBackground(req BackgroundRequest) (BackgroundProcess, error) {
 
 func isBackgroundCleanupError(err error) bool {
 	return errors.Is(err, errBackgroundCleanup)
+}
+
+func backgroundSessionError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, errBackgroundPTYParser) || errors.Is(err, errBackgroundPTYResponse) {
+		return "background PTY stream failed; inspect session state and output"
+	}
+	return err.Error()
 }
 
 // backgroundInputWriter acknowledges queue admission only. Completion marks any
@@ -1266,16 +1346,45 @@ func backgroundInputWriter(writer io.Writer) (func(string) error, func() bool, f
 	return write, failure, finish
 }
 
+type backgroundPTYOutputCleanup struct {
+	drainErr  error
+	readerErr error
+	closeErr  error
+}
+
+func (cleanup backgroundPTYOutputCleanup) err() error {
+	return errors.Join(cleanup.drainErr, cleanup.readerErr, cleanup.closeErr)
+}
+
+func (cleanup backgroundPTYOutputCleanup) streamErr() error {
+	if errors.Is(cleanup.readerErr, errBackgroundPTYParser) {
+		return cleanup.readerErr
+	}
+	return nil
+}
+
+func (cleanup backgroundPTYOutputCleanup) shutdownErr() error {
+	readerErr := cleanup.readerErr
+	if errors.Is(readerErr, errBackgroundPTYParser) {
+		readerErr = nil
+	}
+	return errors.Join(cleanup.drainErr, readerErr, cleanup.closeErr)
+}
+
 func waitForBackgroundPTYOutput(terminal io.ReadWriteCloser, readDone <-chan error) error {
+	return waitForBackgroundPTYOutputDetails(terminal, readDone).err()
+}
+
+func waitForBackgroundPTYOutputDetails(terminal io.ReadWriteCloser, readDone <-chan error) backgroundPTYOutputCleanup {
 	timer := time.NewTimer(backgroundPTYOutputDrainTimeout)
 	defer timer.Stop()
-	var readErr error
+	var drainErr, readerErr error
 	drained := false
 	select {
-	case readErr = <-readDone:
+	case readerErr = <-readDone:
 		drained = true
 	case <-timer.C:
-		readErr = errors.New("background PTY output drain exceeded its deadline")
+		drainErr = errors.New("background PTY output drain exceeded its deadline")
 	}
 	closeErr := terminal.Close()
 	// Closing the terminal releases a blocked reader. Preserve the original
@@ -1284,12 +1393,26 @@ func waitForBackgroundPTYOutput(terminal io.ReadWriteCloser, readDone <-chan err
 		timer.Reset(backgroundPTYOutputDrainTimeout)
 		select {
 		case finalErr := <-readDone:
-			readErr = errors.Join(readErr, finalErr)
+			readerErr = finalErr
 		case <-timer.C:
-			readErr = errors.Join(readErr, errors.New("background PTY output reader did not finish after close"))
+			readerErr = errors.New("background PTY output reader did not finish after close")
 		}
 	}
-	return errors.Join(readErr, closeErr)
+	return backgroundPTYOutputCleanup{drainErr: drainErr, readerErr: readerErr, closeErr: closeErr}
+}
+
+func backgroundPTYStreamError(err error) error {
+	if errors.Is(err, errBackgroundPTYResponse) {
+		return err
+	}
+	return nil
+}
+
+func backgroundPTYShutdownError(err error) error {
+	if errors.Is(err, errBackgroundPTYResponse) {
+		return nil
+	}
+	return err
 }
 
 type outputWriterFunc func([]byte) (int, error)

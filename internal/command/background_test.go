@@ -2,6 +2,7 @@ package command
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,12 +18,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/vt"
+
 	appconfig "goaster/config"
+	"goaster/internal/diagnostics"
 )
 
 const (
 	backgroundLegacyPTYKeys  = "up,down,left,right,y,N,comma"
 	backgroundLegacyPTYBytes = "\x1b[A\x1b[B\x1b[D\x1b[CyN,"
+	backgroundHostilePTYData = "A\x1b[1000000000b\x1b[1000000000I\x1b[1000000000Z\x1b[9223372036854775807b\x1b[18446744073709551615I\x1b[9999999999999999999999999999999999999999;2H"
 )
 
 // This helper runs in a separate copy of the test binary, without a shell.
@@ -122,6 +127,109 @@ func backgroundTestHelper() {
 			os.Exit(2)
 		}
 		fmt.Printf("pty-key-bytes-received:%x", received)
+	case "pty-cpr-handshake":
+		if err := backgroundPreparePTYForCPR(); err != nil {
+			os.Exit(2)
+		}
+		size, err := backgroundPTYSize()
+		if err != nil {
+			os.Exit(2)
+		}
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Printf("pty-size:%s\n", size)
+		fmt.Print("pty-output-secret\x1b[2J\x1b[H界")
+		for _, chunk := range []string{"\x1b", "[6", "n"} {
+			fmt.Print(chunk)
+			time.Sleep(10 * time.Millisecond)
+		}
+		response, err := backgroundReadPTYResponse(reader)
+		if err != nil {
+			os.Exit(2)
+		}
+		fmt.Printf("pty-cpr-response:%x:pty-progress", response)
+	case "pty-unicode-cpr":
+		if err := backgroundPreparePTYForCPR(); err != nil {
+			os.Exit(2)
+		}
+		reader := bufio.NewReader(os.Stdin)
+		readCPR := func() []byte {
+			response, err := backgroundReadPTYResponse(reader)
+			if err != nil {
+				os.Exit(2)
+			}
+			return response
+		}
+		fmt.Print("\x1b[H🇫🇷\x1b[6n")
+		fmt.Printf("pty-unicode-unsplit-flag:%x;", readCPR())
+		fmt.Print("\x1b[H🇫")
+		time.Sleep(100 * time.Millisecond)
+		fmt.Print("🇷\x1b[6n")
+		fmt.Printf("pty-unicode-split-flag:%x;", readCPR())
+		fmt.Print("\x1b[H👩‍💻\x1b[6n")
+		fmt.Printf("pty-unicode-unsplit-zwj:%x;", readCPR())
+		fmt.Print("\x1b[H👩")
+		time.Sleep(100 * time.Millisecond)
+		fmt.Print("\u200d")
+		time.Sleep(100 * time.Millisecond)
+		fmt.Print("💻\x1b[6n")
+		fmt.Printf("pty-unicode-split-zwj:%x:pty-unicode-progress", readCPR())
+	case "pty-osc-bel-cpr":
+		if err := backgroundPreparePTYForCPR(); err != nil {
+			os.Exit(2)
+		}
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("\x1b[H\x1b]2;title")
+		time.Sleep(100 * time.Millisecond)
+		fmt.Print("\a🇫")
+		time.Sleep(100 * time.Millisecond)
+		fmt.Print("🇷\x1b[6n")
+		response, err := backgroundReadPTYResponse(reader)
+		if err != nil {
+			os.Exit(2)
+		}
+		fmt.Printf("pty-osc-bel-cpr:%x", response)
+	case "pty-cpr-hold":
+		if err := backgroundPreparePTYForCPR(); err != nil {
+			os.Exit(2)
+		}
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("pty-concurrent-ready")
+		for i := 0; i < 100; i++ {
+			fmt.Print("\x1b[6n")
+			if _, err := backgroundReadPTYResponse(reader); err != nil {
+				os.Exit(0)
+			}
+			fmt.Print("pty-cpr-progress")
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(30 * time.Second)
+	case "pty-hostile":
+		if err := backgroundPreparePTYForCPR(); err != nil {
+			os.Exit(2)
+		}
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("pty-hostile-ready\x1b[H")
+		fmt.Print(backgroundHostilePTYData + "\x1b[6n")
+		if _, err := backgroundReadPTYResponse(reader); err != nil {
+			os.Exit(2)
+		}
+		fmt.Print("pty-hostile-progress")
+		if len(args) > 0 && args[0] == "hold" {
+			time.Sleep(30 * time.Second)
+		}
+	case "pty-cpr-overlap":
+		if err := backgroundPreparePTYForCPR(); err != nil {
+			os.Exit(2)
+		}
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("pty-overlap-ready\x1b[H\x1b[6n")
+		received := make([]byte, len("\x1b[A")+len("\x1b[1;1R"))
+		if _, err := io.ReadFull(reader, received); err != nil {
+			os.Exit(2)
+		}
+		fmt.Printf("pty-overlap-received:%x:pty-overlap-progress", received)
+	case "pty-exit-cpr":
+		fmt.Print("\x1b[6n")
 	case "pty-exit-output":
 		fmt.Print(strings.Repeat("x", 8192))
 		fmt.Print("pty-exit-output")
@@ -154,6 +262,41 @@ func backgroundTestHelper() {
 
 func backgroundHelperArgs(mode string, args ...string) []string {
 	return append([]string{"-test.run=^TestExecuteSuccess$", "--", "--background-test-helper", mode}, args...)
+}
+
+func backgroundPreparePTYForCPR() error {
+	stty := exec.Command("/bin/stty", "-icanon", "min", "1", "time", "0", "-echo")
+	stty.Stdin = os.Stdin
+	stty.Stdout = io.Discard
+	stty.Stderr = os.Stderr
+	return stty.Run()
+}
+
+func backgroundPTYSize() (string, error) {
+	stty := exec.Command("/bin/stty", "size")
+	stty.Stdin = os.Stdin
+	var output strings.Builder
+	stty.Stdout = &output
+	stty.Stderr = os.Stderr
+	if err := stty.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(output.String()), nil
+}
+
+func backgroundReadPTYResponse(reader *bufio.Reader) ([]byte, error) {
+	response := make([]byte, 0, 32)
+	for len(response) < 64 {
+		character, err := reader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		response = append(response, character)
+		if character == 'R' {
+			return response, nil
+		}
+	}
+	return nil, errors.New("PTY response exceeded the test bound")
 }
 
 func backgroundTestExecutable(t testing.TB) string {
@@ -233,6 +376,10 @@ func exerciseBackgroundCommandSupport(t testing.TB) {
 	exerciseBackgroundInputWriteFailure(t)
 	exerciseBackgroundClosedInputReported(t)
 	exerciseBackgroundPTYInput(t)
+	exerciseBackgroundPTYHandshake(t)
+	exerciseBackgroundPTYUnicodeCPR(t)
+	exerciseBackgroundPTYHostileOutput(t)
+	exerciseBackgroundPTYInputResponseOrdering(t)
 	exerciseBackgroundCompletionTime(t)
 	exerciseBackgroundCanceledStart(t)
 	exerciseBackgroundSignalShutdown(t)
@@ -838,6 +985,267 @@ func exerciseBackgroundPTYInput(t testing.TB) {
 	}
 }
 
+func exerciseBackgroundPTYHandshake(t testing.TB) {
+	t.Helper()
+	if !backgroundPTYSupported() {
+		return
+	}
+	executable := backgroundTestExecutable(t)
+	process, err := StartBackground(BackgroundRequest{
+		Executable:  executable,
+		Args:        backgroundHelperArgs("pty-cpr-handshake"),
+		Interactive: true,
+		PTY:         true,
+	})
+	if errors.Is(err, ErrPTYNotSupported) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("PTY CPR handshake start error = %v", err)
+	}
+	select {
+	case execution := <-process.Done:
+		if execution.Err != nil {
+			t.Fatalf("PTY CPR handshake error = %v", execution.Err)
+		}
+		for _, want := range []string{
+			"pty-size:24 80",
+			"pty-cpr-response:1b5b313b3352",
+			"pty-progress",
+		} {
+			if !strings.Contains(execution.Result.Stdout, want) {
+				t.Fatalf("PTY CPR handshake output = %q, missing %q", execution.Result.Stdout, want)
+			}
+		}
+	case <-time.After(6 * time.Second):
+		process.Stop()
+		t.Fatal("PTY CPR handshake did not finish")
+	}
+
+	redacted, err := StartBackground(BackgroundRequest{
+		Executable:   executable,
+		Args:         backgroundHelperArgs("pty-cpr-handshake"),
+		Interactive:  true,
+		PTY:          true,
+		RedactOutput: true,
+	})
+	if errors.Is(err, ErrPTYNotSupported) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("redacted PTY CPR handshake start error = %v", err)
+	}
+	select {
+	case execution := <-redacted.Done:
+		if execution.Err != nil || execution.Result.Stdout != "" || execution.Result.Stderr != "" {
+			t.Fatalf("redacted PTY CPR handshake result = %+v", execution)
+		}
+	case <-time.After(6 * time.Second):
+		redacted.Stop()
+		t.Fatal("redacted PTY CPR handshake did not finish")
+	}
+
+	directory := t.TempDir()
+	path := filepath.Join(directory, "background-commands.json")
+	writeBackgroundConfig(t, path, BackgroundCommandDefinition{
+		Name:        "cpr-hold",
+		Executable:  executable,
+		Args:        backgroundHelperArgs("pty-cpr-hold"),
+		Interactive: true,
+		PTY:         true,
+		KeysOnly:    true,
+	})
+	manager := NewBackgroundCommandManagerAt(path)
+	defer manager.Close()
+	session, err := manager.Start(context.Background(), "cpr-hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitBackgroundOutput(t, manager, session.ID, "pty-cpr-progress")
+	results := make(chan error, 3)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, inputErr := manager.SendKeys(context.Background(), session.ID, "y")
+			results <- inputErr
+		}()
+	}
+	go func() {
+		_, stopErr := manager.Stop(context.Background(), session.ID)
+		results <- stopErr
+	}()
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for i := 0; i < 3; i++ {
+		select {
+		case operationErr := <-results:
+			if operationErr != nil && !errors.Is(operationErr, ErrBackgroundSessionDone) && !errors.Is(operationErr, ErrBackgroundSessionInputUnavailable) {
+				t.Fatalf("concurrent PTY input/stop error = %v", operationErr)
+			}
+		case <-deadline.C:
+			t.Fatal("concurrent PTY input/stop did not finish")
+		}
+	}
+	finished := waitBackgroundState(t, manager, session.ID, "stopped", "failed")
+	if finished.State != "stopped" {
+		t.Fatalf("concurrent PTY cleanup state = %+v", finished)
+	}
+}
+
+func exerciseBackgroundPTYUnicodeCPR(t testing.TB) {
+	t.Helper()
+	if !backgroundPTYSupported() {
+		return
+	}
+	process, err := StartBackground(BackgroundRequest{
+		Executable:  backgroundTestExecutable(t),
+		Args:        backgroundHelperArgs("pty-unicode-cpr"),
+		Interactive: true,
+		PTY:         true,
+	})
+	if errors.Is(err, ErrPTYNotSupported) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("Unicode PTY CPR start error = %v", err)
+	}
+	select {
+	case execution := <-process.Done:
+		if execution.Err != nil {
+			t.Fatalf("Unicode PTY CPR error = %v", execution.Err)
+		}
+		for _, want := range []string{
+			"pty-unicode-unsplit-flag:1b5b313b3352",
+			"pty-unicode-split-flag:1b5b313b3352",
+			"pty-unicode-unsplit-zwj:1b5b313b3352",
+			"pty-unicode-split-zwj:1b5b313b3352",
+			"pty-unicode-progress",
+		} {
+			if !strings.Contains(execution.Result.Stdout, want) {
+				t.Fatalf("Unicode PTY CPR output = %q, missing %q", execution.Result.Stdout, want)
+			}
+		}
+	case <-time.After(6 * time.Second):
+		process.Stop()
+		t.Fatal("Unicode PTY CPR did not finish")
+	}
+}
+
+func TestBackgroundPTYUnicodeCPR(t *testing.T) {
+	exerciseBackgroundPTYUnicodeCPR(t)
+}
+
+func exerciseBackgroundPTYHostileOutput(t testing.TB) {
+	t.Helper()
+	if !backgroundPTYSupported() {
+		return
+	}
+	for _, redacted := range []bool{false, true} {
+		process, err := StartBackground(BackgroundRequest{
+			Executable:   backgroundTestExecutable(t),
+			Args:         backgroundHelperArgs("pty-hostile"),
+			Interactive:  true,
+			PTY:          true,
+			RedactOutput: redacted,
+		})
+		if errors.Is(err, ErrPTYNotSupported) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("hostile PTY start error (redacted=%v) = %v", redacted, err)
+		}
+		select {
+		case execution := <-process.Done:
+			if execution.Err != nil {
+				t.Fatalf("hostile PTY error (redacted=%v) = %v", redacted, execution.Err)
+			}
+			if redacted {
+				if execution.Result.Stdout != "" || execution.Result.Stderr != "" {
+					t.Fatalf("hostile PTY retained redacted output = %+v", execution.Result)
+				}
+			} else if !strings.Contains(execution.Result.Stdout, "pty-hostile-progress") {
+				t.Fatalf("hostile PTY output = %q, missing progress", execution.Result.Stdout)
+			}
+		case <-time.After(3 * time.Second):
+			process.Stop()
+			t.Fatalf("hostile PTY did not make bounded progress (redacted=%v)", redacted)
+		}
+	}
+
+	process, err := StartBackground(BackgroundRequest{
+		Executable:  backgroundTestExecutable(t),
+		Args:        backgroundHelperArgs("pty-hostile", "hold"),
+		Interactive: true,
+		PTY:         true,
+	})
+	if errors.Is(err, ErrPTYNotSupported) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("hostile PTY cleanup start error = %v", err)
+	}
+	progressDeadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(process.Snapshot().Stdout, "pty-hostile-progress") {
+		if time.Now().After(progressDeadline) {
+			process.Stop()
+			t.Fatal("hostile PTY cleanup process did not make progress")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	started := time.Now()
+	process.Stop()
+	select {
+	case execution := <-process.Done:
+		if !errors.Is(execution.Err, context.Canceled) || time.Since(started) > 2*time.Second {
+			t.Fatalf("hostile PTY cleanup = %+v, elapsed=%v", execution, time.Since(started))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("hostile PTY cleanup did not finish")
+	}
+}
+
+func exerciseBackgroundPTYInputResponseOrdering(t testing.TB) {
+	t.Helper()
+	if !backgroundPTYSupported() {
+		return
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "background-commands.json")
+	writeBackgroundConfig(t, path, BackgroundCommandDefinition{
+		Name:        "cpr-overlap",
+		Executable:  backgroundTestExecutable(t),
+		Args:        backgroundHelperArgs("pty-cpr-overlap"),
+		Interactive: true,
+		PTY:         true,
+		KeysOnly:    true,
+	})
+	manager := NewBackgroundCommandManagerAt(path)
+	defer manager.Close()
+	session, err := manager.Start(context.Background(), "cpr-overlap")
+	if errors.Is(err, ErrPTYNotSupported) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitBackgroundOutput(t, manager, session.ID, "pty-overlap-ready")
+	if _, err := manager.SendKeys(context.Background(), session.ID, "up"); err != nil {
+		t.Fatalf("overlapping PTY key = %v", err)
+	}
+	finished := waitBackgroundState(t, manager, session.ID, "exited", "failed")
+	if finished.State != "exited" {
+		t.Fatalf("overlapping PTY state = %+v", finished)
+	}
+	output, err := manager.Output(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyFirst := fmt.Sprintf("%x", []byte("\x1b[A\x1b[1;1R"))
+	responseFirst := fmt.Sprintf("%x", []byte("\x1b[1;1R\x1b[A"))
+	if !strings.Contains(output.Stdout, "pty-overlap-received:"+keyFirst) && !strings.Contains(output.Stdout, "pty-overlap-received:"+responseFirst) {
+		t.Fatalf("overlapping PTY bytes = %q, want two complete non-interleaved sequences", output.Stdout)
+	}
+}
+
 func exerciseBackgroundKeyEncoding(t testing.TB) {
 	t.Helper()
 	cases := []struct {
@@ -900,6 +1308,370 @@ func TestEncodeBackgroundKeySequenceRejectsUnsupportedShiftedSequences(t *testin
 		if got, err := EncodeBackgroundKeySequence(keys, BackgroundPtyKeyModeCSI); err == nil || got != "" {
 			t.Errorf("accepted unsupported shifted sequence %q as %q", keys, got)
 		}
+	}
+}
+
+func TestBackgroundPTYResponseWaitIsBounded(t *testing.T) {
+	started := time.Now()
+	err := waitForBackgroundPTYResponses(make(chan error))
+	if err == nil || !strings.Contains(err.Error(), "did not finish after close") {
+		t.Fatalf("response wait error = %v", err)
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Fatalf("response wait exceeded its bound: %v", time.Since(started))
+	}
+}
+
+func TestBackgroundPTYCreatePreservesWrappedCause(t *testing.T) {
+	if !backgroundPTYSupported() {
+		return
+	}
+	_, err := StartBackground(BackgroundRequest{
+		Executable: filepath.Join(t.TempDir(), "PRIVATE_PTY_EXECUTABLE_TOKEN"),
+		PTY:        true,
+	})
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("PTY creation error = %v, want wrapped os.ErrNotExist", err)
+	}
+}
+
+func TestBackgroundPTYInjectedStreamFailureHasOneOwnerAndSafeSession(t *testing.T) {
+	if !backgroundPTYSupported() {
+		return
+	}
+	privateCause := errors.New("PRIVATE_STREAM_RESPONSE_TOKEN")
+	directory := t.TempDir()
+	path := filepath.Join(directory, "background-commands.json")
+	writeBackgroundConfig(t, path, BackgroundCommandDefinition{
+		Name:         "stream-failure",
+		Executable:   backgroundTestExecutable(t),
+		Args:         backgroundHelperArgs("pty-cpr-hold"),
+		Interactive:  true,
+		PTY:          true,
+		KeysOnly:     true,
+		RedactOutput: true,
+	})
+
+	executionReady := make(chan BackgroundExecution, 1)
+	start := func(req BackgroundRequest) (BackgroundProcess, error) {
+		process, err := startBackground(req, func(runtime backgroundPTYRuntime) backgroundPTYRuntime {
+			runtime.responseWrite = func([]byte) (int, error) {
+				return 0, privateCause
+			}
+			return runtime
+		})
+		if err != nil {
+			return BackgroundProcess{}, err
+		}
+		originalDone := process.Done
+		wrappedDone := make(chan BackgroundExecution, 1)
+		go func() {
+			execution, open := <-originalDone
+			if open {
+				executionReady <- execution
+				wrappedDone <- execution
+			}
+			close(wrappedDone)
+		}()
+		process.Done = wrappedDone
+		return process, nil
+	}
+	manager := newBackgroundCommandManagerAt(path, start)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	var log bytes.Buffer
+	restore := diagnostics.SetOutput(&log)
+	defer restore()
+	session, err := manager.Start(context.Background(), "stream-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitBackgroundState(t, manager, session.ID, "failed")
+	var execution BackgroundExecution
+	select {
+	case execution = <-executionReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("injected PTY stream failure did not publish a completion")
+	}
+	if !errors.Is(execution.Err, privateCause) {
+		t.Fatalf("stream failure lost its wrapped cause: %v", execution.Err)
+	}
+	shutdownErr, shutdownOwned := backgroundShutdownOwnership(execution.Err)
+	if !shutdownOwned || shutdownErr != nil {
+		t.Fatalf("stream failure shutdown ownership = owned:%v err:%v, want owned with no shutdown error", shutdownOwned, shutdownErr)
+	}
+	output, err := manager.Output(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shutdown bytes.Buffer
+	closeErr := manager.Close()
+	if err := reportBackgroundShutdown(closeErr, &shutdown); err != nil {
+		t.Fatalf("shutdown report = %v", err)
+	}
+
+	if finished.State != "failed" || output.Session.State != "failed" {
+		t.Fatalf("stream failure session = %+v / %+v", finished, output.Session)
+	}
+	if output.Stdout != "" || output.Stderr != "" {
+		t.Fatalf("redacted stream failure output = %+v", output)
+	}
+	if strings.Contains(finished.Error, privateCause.Error()) || strings.Contains(output.Session.Error, privateCause.Error()) {
+		t.Fatalf("stream failure exposed its private cause: finished=%q output=%q", finished.Error, output.Session.Error)
+	}
+	if closeErr != nil || shutdown.Len() != 0 {
+		t.Fatalf("already-owned stream failure reached shutdown: err=%v report=%q", closeErr, shutdown.String())
+	}
+	if strings.Count(log.String(), "ERROR operation=background.pty") != 1 || strings.Count(log.String(), "ERROR operation=") != 1 {
+		t.Fatalf("stream failure diagnostics = %q, want one PTY owner record", log.String())
+	}
+	if strings.Contains(log.String(), privateCause.Error()) || strings.Contains(log.String(), "agent.main") || strings.Contains(log.String(), "background command shutdown failed") {
+		t.Fatalf("stream failure diagnostic leaked or duplicated ownership: %q", log.String())
+	}
+}
+
+type backgroundCloseAfterResponseTerminal struct {
+	io.ReadWriteCloser
+	closeStarted chan struct{}
+	writeFailed  chan struct{}
+}
+
+func (terminal backgroundCloseAfterResponseTerminal) Close() error {
+	close(terminal.closeStarted)
+	<-terminal.writeFailed
+	return terminal.ReadWriteCloser.Close()
+}
+
+func TestBackgroundPTYDrainResponseFailureHasOneOwnerAndSafeCause(t *testing.T) {
+	if !backgroundPTYSupported() {
+		return
+	}
+	privateCause := fmt.Errorf("PRIVATE_DRAIN_RESPONSE_TOKEN: %w", os.ErrClosed)
+	directory := t.TempDir()
+	path := filepath.Join(directory, "background-commands.json")
+	writeBackgroundConfig(t, path, BackgroundCommandDefinition{
+		Name:         "drain-failure",
+		Executable:   backgroundTestExecutable(t),
+		Args:         backgroundHelperArgs("pty-exit-cpr"),
+		Interactive:  true,
+		PTY:          true,
+		KeysOnly:     true,
+		RedactOutput: true,
+	})
+
+	executionReady := make(chan BackgroundExecution, 1)
+	start := func(req BackgroundRequest) (BackgroundProcess, error) {
+		process, err := startBackground(req, func(runtime backgroundPTYRuntime) backgroundPTYRuntime {
+			closeStarted := make(chan struct{})
+			writeFailed := make(chan struct{})
+			runtime.terminal = backgroundCloseAfterResponseTerminal{ReadWriteCloser: runtime.terminal, closeStarted: closeStarted, writeFailed: writeFailed}
+			runtime.responseWrite = func([]byte) (int, error) {
+				<-closeStarted
+				close(writeFailed)
+				return 0, privateCause
+			}
+			return runtime
+		})
+		if err != nil {
+			return BackgroundProcess{}, err
+		}
+		originalDone := process.Done
+		wrappedDone := make(chan BackgroundExecution, 1)
+		go func() {
+			execution, open := <-originalDone
+			if open {
+				executionReady <- execution
+				wrappedDone <- execution
+			}
+			close(wrappedDone)
+		}()
+		process.Done = wrappedDone
+		return process, nil
+	}
+	manager := newBackgroundCommandManagerAt(path, start)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	var log bytes.Buffer
+	restore := diagnostics.SetOutput(&log)
+	defer restore()
+	session, err := manager.Start(context.Background(), "drain-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitBackgroundState(t, manager, session.ID, "failed")
+	var execution BackgroundExecution
+	select {
+	case execution = <-executionReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain-time PTY stream failure did not publish a completion")
+	}
+	if !errors.Is(execution.Err, privateCause) || !errors.Is(execution.Err, os.ErrClosed) {
+		t.Fatalf("drain-time stream failure lost its wrapped cause: %v", execution.Err)
+	}
+	shutdownErr, shutdownOwned := backgroundShutdownOwnership(execution.Err)
+	if !shutdownOwned || shutdownErr != nil {
+		t.Fatalf("drain-time stream failure shutdown ownership = owned:%v err:%v, want owned with no shutdown error", shutdownOwned, shutdownErr)
+	}
+	output, err := manager.Output(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeErr := manager.Close()
+	if finished.State != "failed" || output.Session.State != "failed" {
+		t.Fatalf("drain-time stream failure session = %+v / %+v", finished, output.Session)
+	}
+	if output.Stdout != "" || output.Stderr != "" || strings.Contains(finished.Error, privateCause.Error()) || strings.Contains(output.Session.Error, privateCause.Error()) {
+		t.Fatalf("drain-time stream failure exposed private data: finished=%q output=%+v", finished.Error, output)
+	}
+	if closeErr != nil {
+		t.Fatalf("already-owned drain-time stream failure reached shutdown: %v", closeErr)
+	}
+	if strings.Count(log.String(), "ERROR operation=background.pty") != 1 || strings.Count(log.String(), "ERROR operation=") != 1 {
+		t.Fatalf("drain-time stream failure diagnostics = %q, want one PTY owner record", log.String())
+	}
+	if strings.Contains(log.String(), privateCause.Error()) || strings.Contains(log.String(), "background command shutdown failed") {
+		t.Fatalf("drain-time stream failure diagnostic leaked or duplicated ownership: %q", log.String())
+	}
+}
+
+func TestBackgroundPTYStreamOwnershipRetainsCleanupFailure(t *testing.T) {
+	privateCause := errors.New("PRIVATE_STREAM_RESPONSE_TOKEN")
+	cleanupFailure := errors.New("independent PTY close failure")
+	streamFailure := backgroundPTYStreamFailure{cause: fmt.Errorf("%w: %w", errBackgroundPTYResponse, privateCause)}
+	fullFailure := fmt.Errorf("%w: %w", errBackgroundCleanup, errors.Join(streamFailure, cleanupFailure))
+	shutdownFailure := fmt.Errorf("%w: %w", errBackgroundCleanup, cleanupFailure)
+	completed := make(chan BackgroundExecution, 1)
+	completed <- BackgroundExecution{
+		Err:        backgroundExecutionError{cause: fullFailure, shutdownErr: shutdownFailure, shutdownOwned: true},
+		FinishedAt: time.Now().UTC(),
+	}
+	close(completed)
+	sessions := map[string]managedBackgroundSession{
+		"mixed-failure": {process: BackgroundProcess{Stop: func() {}, Done: completed}},
+	}
+	closeErr := closeManagedBackgroundSessions(sessions, time.Second)
+	if !errors.Is(closeErr, cleanupFailure) || errors.Is(closeErr, privateCause) {
+		t.Fatalf("shutdown failure ownership = %v, want cleanup cause only", closeErr)
+	}
+	if got := sessions["mixed-failure"].session.Error; strings.Contains(got, privateCause.Error()) {
+		t.Fatalf("session exposed stream cause: %q", got)
+	}
+}
+
+type backgroundCloseFailingWriteTerminal struct {
+	started chan struct{}
+	closed  chan struct{}
+}
+
+func (terminal backgroundCloseFailingWriteTerminal) Read([]byte) (int, error) { return 0, io.EOF }
+func (terminal backgroundCloseFailingWriteTerminal) Write([]byte) (int, error) {
+	close(terminal.started)
+	<-terminal.closed
+	return 0, os.ErrClosed
+}
+func (terminal backgroundCloseFailingWriteTerminal) Close() error {
+	close(terminal.closed)
+	return nil
+}
+
+func TestBackgroundPTYCloseInducedResponseWriteFailureIsRetained(t *testing.T) {
+	emulator := vt.NewSafeEmulator(backgroundPTYColumns, backgroundPTYRows)
+	pipe := emulator.InputPipe().(io.Closer)
+	terminal := backgroundCloseFailingWriteTerminal{started: make(chan struct{}), closed: make(chan struct{})}
+	ptyRuntime := backgroundPTYRuntime{terminal: terminal, emulator: emulator, responsePipe: pipe}
+	done := ptyRuntime.startResponsePump(nil)
+	writeDone := make(chan error, 1)
+	go func() { _, err := emulator.Write([]byte("\x1b[6n")); writeDone <- err }()
+	select {
+	case <-terminal.started:
+	case <-time.After(time.Second):
+		t.Fatal("response write did not start")
+	}
+	if err := terminal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ptyRuntime.closeResponsePipe(); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForBackgroundPTYResponses(done); !errors.Is(err, os.ErrClosed) || !errors.Is(err, errBackgroundPTYResponse) {
+		t.Fatalf("close-induced response failure = %v", err)
+	}
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("emulator write did not finish")
+	}
+}
+
+type backgroundBlockingWriteTerminal struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (terminal backgroundBlockingWriteTerminal) Read(data []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (terminal backgroundBlockingWriteTerminal) Write(data []byte) (int, error) {
+	select {
+	case <-terminal.started:
+	default:
+		close(terminal.started)
+	}
+	<-terminal.release
+	return len(data), nil
+}
+
+func (terminal backgroundBlockingWriteTerminal) Close() error { return nil }
+
+func TestBackgroundPTYBlockedResponseCleanupIsBounded(t *testing.T) {
+	emulator := vt.NewSafeEmulator(backgroundPTYColumns, backgroundPTYRows)
+	responsePipe, ok := emulator.InputPipe().(io.Closer)
+	if !ok {
+		t.Fatal("emulator response pipe does not close")
+	}
+	terminal := backgroundBlockingWriteTerminal{started: make(chan struct{}), release: make(chan struct{})}
+	ptyRuntime := backgroundPTYRuntime{
+		terminal:     terminal,
+		emulator:     emulator,
+		responsePipe: responsePipe,
+		writeGate:    backgroundPTYWriteGate(),
+	}
+	responseDone := ptyRuntime.startResponsePump(nil)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := emulator.Write([]byte("\x1b[6n"))
+		writeDone <- err
+	}()
+	select {
+	case <-terminal.started:
+	case <-time.After(time.Second):
+		t.Fatal("response writer did not enter the blocked terminal")
+	}
+	if err := ptyRuntime.closeResponsePipe(); err != nil {
+		t.Fatalf("close response pipe = %v", err)
+	}
+	started := time.Now()
+	err := waitForBackgroundPTYResponses(responseDone)
+	if err == nil || !strings.Contains(err.Error(), "did not finish after close") || time.Since(started) > 2*time.Second {
+		t.Fatalf("blocked response cleanup = %v, elapsed=%v", err, time.Since(started))
+	}
+	close(terminal.release)
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("emulator response write = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("emulator response write remained blocked")
+	}
+	select {
+	case err, open := <-responseDone:
+		if open && err != nil {
+			t.Fatalf("response pump after release = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response pump remained blocked after release")
 	}
 }
 
@@ -1215,5 +1987,259 @@ func exerciseBackgroundProcessLifecycle(t testing.TB) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("stopped process did not finish")
+	}
+}
+
+func TestBackgroundPTYOrdinaryCSIParameters(t *testing.T) {
+	emulator := vt.NewSafeEmulator(backgroundPTYColumns, backgroundPTYRows)
+	configureBackgroundPTYParameterBounds(emulator)
+	if _, err := emulator.Write([]byte("\x1b[1;80H")); err != nil {
+		t.Fatal(err)
+	}
+	if pos := emulator.CursorPosition(); pos.X != 79 || pos.Y != 0 {
+		t.Fatalf("cursor position = %v, want column 80", pos)
+	}
+	if _, err := emulator.Write([]byte("\x1b[2;1H\x1b[38;5;196;48;5;255mX\x1b[?2004h")); err != nil {
+		t.Fatal(err)
+	}
+	reference := vt.NewSafeEmulator(backgroundPTYColumns, backgroundPTYRows)
+	if _, err := reference.Write([]byte("\x1b[2;1H\x1b[38;5;196;48;5;255mX")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := emulator.CellAt(0, 1), reference.CellAt(0, 1); got == nil || want == nil || !got.Equal(want) {
+		t.Fatalf("colored cell = %v, want %v", got, want)
+	}
+	responses := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 128)
+		n, _ := emulator.Read(buf)
+		responses <- string(buf[:n])
+	}()
+	if _, err := emulator.Write([]byte("\x1b[?2004$p")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-responses:
+		if got != "\x1b[?2004;1$y" {
+			t.Fatalf("bracketed paste mode response = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mode query did not respond")
+	}
+}
+
+type backgroundPTYAdapterRecordingWriter struct{ writes chan []byte }
+
+func (writer backgroundPTYAdapterRecordingWriter) Write(data []byte) (int, error) {
+	copyData := append([]byte(nil), data...)
+	writer.writes <- copyData
+	return len(data), nil
+}
+
+func TestBackgroundPTYInputAdapterPreservesUTF8AndANSIBoundaries(t *testing.T) {
+	writes := make(chan []byte, 32)
+	adapter := newBackgroundPTYInputAdapter(backgroundPTYAdapterRecordingWriter{writes: writes})
+	if _, err := adapter.Write([]byte{0xE7}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Write([]byte{0x95}); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != 0 {
+		t.Fatalf("partial UTF-8 was forwarded before completion: %d writes", len(writes))
+	}
+	if _, err := adapter.Write([]byte{0x8C, 'X'}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Write([]byte{'\x1b'}); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) == 0 {
+		t.Fatal("escape control was withheld with the grapheme tail")
+	}
+	if _, err := adapter.Write([]byte("[6")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Write([]byte("n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Write([]byte("\x1b]2;title")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Write([]byte{'\x1b'}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Write([]byte{'\\'}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Write([]byte("B")); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got bytes.Buffer
+	for {
+		select {
+		case data := <-writes:
+			_, _ = got.Write(data)
+		default:
+			if got.String() != "界X\x1b[6n\x1b]2;title\x1b\\B" {
+				t.Fatalf("adapter output = %q", got.String())
+			}
+			return
+		}
+	}
+}
+
+func TestBackgroundPTYInputAdapterBoundsLongGraphemeTail(t *testing.T) {
+	writes := make(chan []byte, 128)
+	adapter := newBackgroundPTYInputAdapter(backgroundPTYAdapterRecordingWriter{writes: writes})
+	input := []byte("e" + strings.Repeat("\u0301", backgroundPTYMaxGraphemeTailBytes))
+	if _, err := adapter.Write(input); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var total int
+	for {
+		select {
+		case data := <-writes:
+			if len(data) > backgroundPTYMaxGraphemeTailBytes {
+				t.Fatalf("adapter forwarded a grapheme chunk of %d bytes, limit %d", len(data), backgroundPTYMaxGraphemeTailBytes)
+			}
+			total += len(data)
+		default:
+			if total != len(input) {
+				t.Fatalf("adapter forwarded %d of %d bytes", total, len(input))
+			}
+			return
+		}
+	}
+}
+
+// Every split is passed directly to the adapter, independent of PTY read boundaries.
+func TestBackgroundPTYInputAdapterUnicodeCPR(t *testing.T) {
+	for _, tc := range []struct{ name, text, response string }{
+		{"regional indicators", "🇫🇷", "\x1b[1;3R"},
+		{"ZWJ", "👩‍💻", "\x1b[1;3R"},
+		{"ASCII combining", "e\u0301", "\x1b[1;2R"},
+		{"keycap", "1\ufe0f\u20e3", "\x1b[1;3R"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(tc.text)
+			for split := 0; split <= len(data)+1; split++ {
+				t.Run(strconv.Itoa(split), func(t *testing.T) {
+					emulator := vt.NewSafeEmulator(backgroundPTYColumns, backgroundPTYRows)
+					defer emulator.Close()
+					adapter := newBackgroundPTYInputAdapter(emulator)
+					if split == len(data)+1 {
+						for _, b := range data {
+							if _, err := adapter.Write([]byte{b}); err != nil {
+								t.Fatal(err)
+							}
+						}
+					} else {
+						for _, part := range [][]byte{data[:split], data[split:]} {
+							if _, err := adapter.Write(part); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					responses := make(chan string, 1)
+					go func() { buf := make([]byte, 64); n, _ := emulator.Read(buf); responses <- string(buf[:n]) }()
+					if _, err := adapter.Write([]byte("\x1b[6n")); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case got := <-responses:
+						if got != tc.response {
+							t.Fatalf("CPR = %q, want %q", got, tc.response)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("CPR timed out")
+					}
+				})
+			}
+		})
+	}
+}
+
+// Exercise every boundary in the entire control sequence and grapheme, as
+// well as byte-at-a-time writes, independently of kernel PTY chunking.
+func TestBackgroundPTYInputAdapterStringContextCPR(t *testing.T) {
+	for _, context := range []struct{ name, prefix string }{
+		{"OSC BEL", "\x1b]2;title\a"},
+		{"OSC ST", "\x1b]2;title\x1b\\"},
+		{"OSC C1 ST", "\x1b]2;title\x9c"},
+		{"OSC CAN", "\x1b]2;title\x18"},
+		{"OSC SUB", "\x1b]2;title\x1a"},
+		{"DCS BEL ST", "\x1bPqdata\adata\x1b\\"},
+		{"DCS CAN", "\x1bPqdata\x18"},
+		{"DCS SUB", "\x1bPqdata\x1a"},
+	} {
+		for _, tc := range []struct{ name, text, response string }{
+			{"flag", "🇫🇷", "\x1b[1;3R"}, {"ZWJ", "👩‍💻", "\x1b[1;3R"},
+			{"combining", "e\u0301", "\x1b[1;2R"}, {"keycap", "1\ufe0f\u20e3", "\x1b[1;3R"},
+		} {
+			t.Run(context.name+"/"+tc.name, func(t *testing.T) {
+				data := []byte(context.prefix + tc.text)
+				for split := 0; split <= len(data)+1; split++ {
+					t.Run(strconv.Itoa(split), func(t *testing.T) {
+						emulator := vt.NewSafeEmulator(backgroundPTYColumns, backgroundPTYRows)
+						defer emulator.Close()
+						adapter := newBackgroundPTYInputAdapter(emulator)
+						parts := [][]byte{data[:min(split, len(data))], data[min(split, len(data)):]}
+						if split == len(data)+1 {
+							parts = nil
+							for i := range data {
+								parts = append(parts, data[i:i+1])
+							}
+						}
+						for _, part := range parts {
+							if _, err := adapter.Write(part); err != nil {
+								t.Fatal(err)
+							}
+						}
+						responses := make(chan string, 1)
+						go func() { buf := make([]byte, 64); n, _ := emulator.Read(buf); responses <- string(buf[:n]) }()
+						if _, err := adapter.Write([]byte("\x1b[6n")); err != nil {
+							t.Fatal(err)
+						}
+						select {
+						case got := <-responses:
+							if got != tc.response {
+								t.Fatalf("CPR = %q, want %q", got, tc.response)
+							}
+						case <-time.After(time.Second):
+							t.Fatal("CPR timed out")
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+func TestBackgroundPTYOSCBELUnicodeCPR(t *testing.T) {
+	if !backgroundPTYSupported() {
+		t.Skip("PTY unsupported")
+	}
+	process, err := StartBackground(BackgroundRequest{Executable: backgroundTestExecutable(t), Args: backgroundHelperArgs("pty-osc-bel-cpr"), PTY: true})
+	if errors.Is(err, ErrPTYNotSupported) {
+		t.Skip("PTY unsupported")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case execution := <-process.Done:
+		if execution.Err != nil || !strings.Contains(execution.Result.Stdout, "pty-osc-bel-cpr:1b5b313b3352") {
+			t.Fatalf("OSC BEL PTY result = %+v", execution)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("OSC BEL PTY did not finish")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -515,6 +516,43 @@ func TestBackgroundCommandToolFailureResultsAreSafeAndDiagnosed(t *testing.T) {
 	}
 	if strings.Contains(log, path) {
 		t.Fatalf("diagnostics exposed configuration path: %q", log)
+	}
+}
+
+func TestBackgroundCommandToolPTYCreateFailureHasOneSafeOwnerDiagnostic(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("PTY creation diagnostics are covered on Linux")
+	}
+	directory := t.TempDir()
+	privateExecutable := filepath.Join(directory, "PRIVATE_PTY_EXECUTABLE_TOKEN")
+	path := filepath.Join(directory, "background-commands.json")
+	data, err := json.Marshal(command.BackgroundCommandConfig{Version: 1, Commands: []command.BackgroundCommandDefinition{{
+		Name: "broken-pty", Executable: privateExecutable, Args: []string{"PRIVATE_ARGUMENT_TOKEN"}, Interactive: true, PTY: true,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := command.NewBackgroundCommandManagerAt(path)
+	defer manager.Close()
+	var result string
+	log := captureChatDiagnostics(t, func() {
+		var executeErr error
+		result, executeErr = executeBackgroundCommandTool(context.Background(), `{"action":"start","name":"broken-pty"}`, manager)
+		if executeErr != nil {
+			t.Fatalf("executeBackgroundCommandTool() error = %v", executeErr)
+		}
+	})
+	if !strings.Contains(result, `"status":"start_failed"`) || strings.Contains(result, privateExecutable) || strings.Contains(result, "PRIVATE_ARGUMENT_TOKEN") {
+		t.Fatalf("PTY creation result = %q", result)
+	}
+	if strings.Count(log, "ERROR operation=") != 1 || !strings.Contains(log, "ERROR operation=chat.background_command.start") || !strings.Contains(log, `phase="model_command"`) || !strings.Contains(log, `code="unknown_failure"`) {
+		t.Fatalf("PTY creation diagnostics = %q, want exactly one chat owner record", log)
+	}
+	if strings.Contains(log, privateExecutable) || strings.Contains(log, "PRIVATE_ARGUMENT_TOKEN") || strings.Count(log, "background.pty") != 0 {
+		t.Fatalf("PTY creation diagnostics leaked or duplicated owner data: %q", log)
 	}
 }
 
