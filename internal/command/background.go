@@ -37,6 +37,8 @@ const (
 )
 
 var (
+	ErrBackgroundCommandNotAllowlisted   = errors.New("background command name is not allowlisted")
+	ErrBackgroundInvalidKeys             = errors.New("invalid background command keys")
 	ErrBackgroundSessionNotFound         = errors.New("background command session was not found")
 	ErrBackgroundSessionDone             = errors.New("background command session has finished")
 	ErrBackgroundSessionNotInteractive   = errors.New("background command session does not accept input")
@@ -673,7 +675,7 @@ func runBackgroundCommandManager(path string, requests <-chan backgroundManagerR
 				}
 			}
 			if selected.Name == "" {
-				response.err = errors.New("background command name is not allowlisted")
+				response.err = ErrBackgroundCommandNotAllowlisted
 				break
 			}
 			if activeBackgroundSessionCount(sessions) >= maxRunningBackgroundSessions {
@@ -773,7 +775,7 @@ func runBackgroundCommandManager(path string, requests <-chan backgroundManagerR
 					}
 					encoded, encodeErr := EncodeBackgroundKeySequence(request.keys, mode)
 					if encodeErr != nil {
-						response.err = encodeErr
+						response.err = fmt.Errorf("%w: %w", ErrBackgroundInvalidKeys, encodeErr)
 						break
 					}
 					data = encoded
