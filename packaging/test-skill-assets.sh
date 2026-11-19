@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 . "$script_dir/assets.sh"
 
-expected_starter_skills='background-command-administration bitwarden-secrets-manager github-auth goaster-backup goaster-build-test goaster-source-code-evolution goaster-deploy goaster-env goaster-find-contributions goaster-fork goaster-migration goaster-share-contribution hetzner-auth hetzner-auto-backup manage-skills modify-goaster-source-code internet-fetch model-administration project-memory read-write-temp-files ripgrep-search memory-consolidation goaster-telegram-groups-best-practices telegram-commands goaster-export-memory goaster-import-memory'
+expected_starter_skills='background-command-administration bitwarden-secrets-manager github-auth goaster-backup goaster-build-test goaster-source-code-evolution goaster-deploy goaster-env goaster-find-contributions goaster-fork goaster-migration goaster-share-contribution hetzner-auth hetzner-auto-backup manage-skills modify-goaster-source-code internet-fetch model-administration project-memory read-write-temp-files ripgrep-search memory-consolidation goaster-telegram-groups-best-practices telegram-commands goaster-export-memory goaster-import-memory goaster-sync-source-changes-after-migration'
 if [ "$starter_skills" != "$expected_starter_skills" ]; then
 	printf 'starter skill allowlist changed unexpectedly\nexpected: %s\nactual: %s\n' \
 		"$expected_starter_skills" "$starter_skills" >&2
@@ -69,6 +69,33 @@ for phrase in (
 ):
     if phrase not in workflow:
         raise SystemExit(f"hetzner-auto-backup workflow missing required guidance: {phrase!r}")
+
+# Validate the added post-migration source sync starter without executing
+# its workflow. Check its metadata, authentication boundary, and key guardrails
+# in both the repository source and the installed package.
+source_sync_requirements = {
+    "META.md": ("source-code customizations", "existing GoAster fork", "migrating artefacts"),
+    "AUTH.md": ("paired owner's private conversation", "github-auth", "goaster-fork", "does not authorize source changes"),
+    "SKILL.md": (
+        "verify GitHub authentication and the user's account",
+        "goaster-customization",
+        "Do not create a new fork or branch",
+        "Preserve local changes",
+        "Ask for approval to restore that version",
+        "goaster-source-code-evolution",
+        "or rebase automatically",
+        "separately approved Git change",
+        "required backup and deployment approvals",
+    ),
+}
+for label, base in (("source", root), ("installed", installed_root)):
+    directory = base / "skills" / "goaster-sync-source-changes-after-migration"
+    for filename, phrases in source_sync_requirements.items():
+        path = directory / filename
+        content = " ".join(path.read_text(encoding="utf-8").split())
+        for phrase in phrases:
+            if phrase not in content:
+                raise SystemExit(f"{label} source sync {filename} missing guidance: {phrase!r}")
 
 # Validate each active file both before and after packaging. Checking the files
 # separately catches stale metadata or authorization guidance alongside SKILL.
