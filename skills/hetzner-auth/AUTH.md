@@ -4,7 +4,7 @@ Obtain the exact `HCLOUD_TOKEN` variable through `goaster-env`. The migration
 workflow checks protected `<real user home>/.goaster/env` first, then falls
 back to process `HCLOUD_TOKEN`. If protected settings cannot be read, fail
 closed. Token presence does not prove that it authenticates successfully.
-When it is missing, use the private Telegram `/get-env` and `/env` process in
+When it is missing, use the private Telegram `/getenv` and `/env` process in
 `goaster-env`; never ask for secrets in chat.
 
 Keep credentials in memory only: never put them in model context, logs, chat,

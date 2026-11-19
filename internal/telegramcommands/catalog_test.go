@@ -12,14 +12,14 @@ func TestDispatchResolvesSupportedCommands(t *testing.T) {
 	}{
 		{text: "/help", name: "help"},
 		{text: "/m terra", name: "m"},
-		{text: "/get-env", name: "get-env"},
+		{text: "/getenv", name: "getenv"},
 	} {
 		command, ok := Dispatch(test.text)
 		if !ok || command.Name != test.name {
 			t.Errorf("Dispatch(%q) = %+v, %v; want %q", test.text, command, ok, test.name)
 		}
 	}
-	for _, text := range []string{"", "hello", "/more", "/help@other_bot", "/get_env", "/get_migration"} {
+	for _, text := range []string{"", "hello", "/more", "/help@other_bot", "/get_env", "/get_migration", "/get" + "-" + "env"} {
 		if _, ok := Dispatch(text); ok {
 			t.Errorf("Dispatch(%q) unexpectedly matched", text)
 		}
@@ -49,8 +49,8 @@ func TestHelpContainsOnlyOneConciseLinePerCommand(t *testing.T) {
 	}
 }
 
-func TestMenuOmitsCommandsTelegramCannotRegister(t *testing.T) {
-	want := []string{"help", "stop", "start", "pair", "clear", "m", "env"}
+func TestMenuIncludesSupportedCommands(t *testing.T) {
+	want := []string{"help", "stop", "start", "pair", "clear", "m", "env", "getenv"}
 	menu := Menu()
 	if len(menu) != len(want) {
 		t.Fatalf("menu count = %d, want %d: %#v", len(menu), len(want), menu)
@@ -63,21 +63,19 @@ func TestMenuOmitsCommandsTelegramCannotRegister(t *testing.T) {
 			t.Errorf("menu command %q has an invalid description", command.Command)
 		}
 	}
-	for _, command := range Catalog() {
-		if command.Name == "get-env" && command.MenuDescription != "" {
-			t.Fatal("hyphenated /get-env was configured for Telegram's native menu")
-		}
+	if menu[len(menu)-1].Command != "getenv" || menu[len(menu)-1].Description != "Download saved environment settings" {
+		t.Fatalf("getenv menu entry = %+v", menu[len(menu)-1])
 	}
 }
 
 func TestReferenceContainsCanonicalCommandsAndAccessRequirements(t *testing.T) {
 	reference := Reference()
 	for _, want := range []string{
-		"## /get-env",
-		"Primary command: `/get-env`",
+		"## /getenv",
+		"Primary command: `/getenv`",
 		"Aliases: none",
 		"Access requirements: Paired account only, private chat only.",
-		"Native Telegram menu: no",
+		"Native Telegram menu: yes",
 		"Pairing requires a private chat",
 		"After pairing, the paired account can use /pair in a private chat, group, or supergroup for readiness guidance",
 		"/start CODE is ignored",

@@ -7,7 +7,7 @@ propose a cryptorandom `goaster-migration-[0-9a-f]{16}` name and obtain one
 spending approval; then create and hand off safely. Before requesting approval,
 MUST check the latest official public rough pricing on a best-effort basis and
 explicitly report unknown if unavailable. Missing-token setup is
-`/get-env`, local `goaster.env` editing, same-message `/env` attachment, and
+`/getenv`, local `goaster.env` editing, same-message `/env` attachment, and
 exact `ACCEPT`. Secrets never enter model context or logs.
 
 The active one-shot `goaster_migration` tool accepts only `action: "create"`, exact

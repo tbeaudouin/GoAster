@@ -114,9 +114,9 @@ startup may require a restart. GoAster does not restart services as part of
 this flow.
 
 The authorized paired user can retrieve the saved settings in the same private
-chat with `/get-env`. Type it manually because Telegram's native menu cannot
-register command names with hyphens. The command may include Telegram's
-`@bot_username` suffix. Telegram receives the file directly as `goaster.env`;
+chat with `/getenv`, which is available in Telegram's native command menu. The
+command may include Telegram's `@bot_username` suffix. Telegram receives the
+file directly as `goaster.env`;
 its contents are not sent to the remote agent, model, command output, or logs.
 
 During an authorized Telegram conversation, the agent can use the model-facing
@@ -128,7 +128,7 @@ the model cannot choose a destination or token. See
 
 For a central migration, use a private conversation and follow the bundled
 four-step journey: privately check protected `~/.goaster/env` before process
-`HCLOUD_TOKEN`; if missing, use `/get-env`, local `goaster.env`, same-message
+`HCLOUD_TOKEN`; if missing, use `/getenv`, local `goaster.env`, same-message
 `/env`, review, and exact `ACCEPT`; ask the exact server choice or help;
 propose the exact name/type/locations/rough price; and obtain one spending
 approval covering the immediate create and 30-minute capacity-only retries.

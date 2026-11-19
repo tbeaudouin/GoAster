@@ -95,7 +95,7 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 			if bytes.Contains(body, []byte("synthetic-secret")) || bytes.Contains(body, []byte("test-region")) {
 				t.Fatal("environment contents entered agent context")
 			}
-			t.Fatalf("/get-env made an agent request: %s", r.URL.Path)
+			t.Fatalf("/getenv made an agent request: %s", r.URL.Path)
 			return nil, nil
 		}),
 	}
@@ -103,7 +103,7 @@ func TestTelegramGetEnvironmentSendsFileWithoutAgentContext(t *testing.T) {
 	a.handle(context.Background(), privateMessage(42, telegramGetEnvironmentCommand))
 
 	if messageCount != 0 {
-		t.Fatalf("/get-env sent %d text messages, want only the document", messageCount)
+		t.Fatalf("/getenv sent %d text messages, want only the document", messageCount)
 	}
 	if len(documentBodies) != 1 || len(documentBodies[0]) == 0 || !bytes.Contains(documentBodies[0], []byte(`name="chat_id"`)) || !bytes.Contains(documentBodies[0], []byte("\r\n\r\n42\r\n")) {
 		t.Fatalf("sendDocument did not target the authorized private chat; bodies = %d", len(documentBodies))
@@ -170,8 +170,8 @@ func TestTelegramGetEnvironmentCommandNamesAndBotMentions(t *testing.T) {
 	}
 
 	commands := []string{
-		"/get-env",
-		"/get-env@goaster_bot",
+		"/getenv",
+		"/getenv@goaster_bot",
 	}
 	documentCount := 0
 	a := adapter{
@@ -222,7 +222,7 @@ func TestTelegramRemovedCommandsAreIgnored(t *testing.T) {
 		}),
 	}
 
-	for _, spelling := range []string{"/get_env", "/get_env@goaster_bot", "/get_migration"} {
+	for _, spelling := range []string{"/get_env", "/get_env@goaster_bot", "/get_migration", "/get" + "-" + "env"} {
 		a.handle(context.Background(), privateMessage(42, spelling))
 	}
 	if documentCount != 0 || agentCount != 0 {
@@ -269,7 +269,7 @@ func TestTelegramGetEnvironmentRequiresAuthorizedPrivateConversation(t *testing.
 			}
 		}),
 		agent: doerFunc(func(*http.Request) (*http.Response, error) {
-			t.Fatal("/get-env reached the agent")
+			t.Fatal("/getenv reached the agent")
 			return nil, nil
 		}),
 	}

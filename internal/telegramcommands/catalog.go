@@ -15,7 +15,7 @@ const (
 	ClearCommand             = "/clear"
 	ModelCommand             = "/m"
 	EnvironmentCommand       = "/env"
-	GetEnvironmentCommand    = "/get-env"
+	GetEnvironmentCommand    = "/getenv"
 	CommandReferenceToolName = "telegram_command_reference"
 )
 
@@ -89,15 +89,16 @@ var catalog = []Command{
 		Access:          "Paired account only, private chat only. Attach a document named goaster.env to /env in the same message, review the preview, then reply exactly ACCEPT. /env accepts a valid @bot_username suffix.",
 	},
 	{
-		Name:            "get-env",
-		Usage:           "/get-env",
+		Name:            "getenv",
+		Usage:           "/getenv",
 		HelpDescription: "Send the saved goaster.env file.",
+		MenuDescription: "Download saved environment settings",
 		Access:          "Paired account only, private chat only. Accepts a valid @bot_username suffix.",
 	},
 }
 
 const referenceSharedBehavior = "Before pairing, /help and bare /start provide guidance in private chats; pairing requires a private chat. After pairing, only the paired account can use the bot, and bare /start or /pair provide readiness guidance in private chats, groups, and supergroups. " +
-	"Telegram topics in the same chat share conversation history and model settings. /env, ACCEPT, and /get-env require a private chat. /env and /get-env accept @bot_username suffixes; use bare /help and /stop."
+	"Telegram topics in the same chat share conversation history and model settings. /env, ACCEPT, and /getenv require a private chat. /env and /getenv accept @bot_username suffixes; use bare /help and /stop."
 
 // Catalog returns the supported commands in their stable display order.
 func Catalog() []Command {

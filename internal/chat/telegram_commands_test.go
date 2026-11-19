@@ -56,7 +56,7 @@ func TestTelegramCommandSkillUsesRuntimeReferenceAcrossStarterUpgrade(t *testing
 		"current running GoAster binary",
 		"aliases",
 		"access requirements",
-		"menu command names cannot contain hyphens",
+		"native-menu field as authoritative",
 	} {
 		if !strings.Contains(strings.ToLower(skill), strings.ToLower(want)) {
 			t.Errorf("Telegram command skill omitted %q: %s", want, skill)
@@ -67,7 +67,7 @@ func TestTelegramCommandSkillUsesRuntimeReferenceAcrossStarterUpgrade(t *testing
 	}
 
 	reference, err := handler(context.Background(), `{}`)
-	if err != nil || reference != telegramcommands.Reference() || !strings.Contains(reference, "/get-env") {
+	if err != nil || reference != telegramcommands.Reference() || !strings.Contains(reference, "/getenv") {
 		t.Fatalf("agent runtime reference = %q, error = %v", reference, err)
 	}
 

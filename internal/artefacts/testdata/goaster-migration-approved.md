@@ -16,7 +16,7 @@ Never claim that the token is missing or unreadable without actually checking. N
 
 If it is missing, tell the owner to:
 
-1. Send /get-env.
+1. Send /getenv.
 2. Add HCLOUD_TOKEN locally to the downloaded goaster.env.
 3. Attach that file with /env in the same message.
 4. Review the preview and reply exactly ACCEPT.

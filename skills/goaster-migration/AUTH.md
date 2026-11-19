@@ -5,7 +5,7 @@ that `HCLOUD_TOKEN` is missing, actually check the protected
 `<real user home>/.goaster/env` first and process `HCLOUD_TOKEN` second, without
 exposing the value. If the protected file cannot be read, fail closed. The
 workflow must never request a pasted provider token. For a missing token, use the private
-`/get-env`, local edit of `goaster.env`, same-message `/env` attachment,
+`/getenv`, local edit of `goaster.env`, same-message `/env` attachment,
 names-only review, and exact `ACCEPT` flow.
 
 Obtain one private spending approval for the cryptorandom exact
