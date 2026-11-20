@@ -169,26 +169,30 @@ func telegramFailure(method string, err error, status string, errorCode int, req
 }
 
 type agentModelError struct {
-	message string
+	message        string
+	classification string
+	reference      string
 }
 
 func (err agentModelError) Error() string { return err.message }
 
 const (
-	telegramToolFeedbackMaxChars       = 600
-	telegramTypingRefreshInterval      = 4 * time.Second
-	telegramTypingActionTimeout        = 2 * time.Second
-	telegramAgentRequestTimeout        = 20 * time.Minute
-	telegramControlAuthorizationHeader = "X-GoAster-GitHub-Auth-Control"
-	telegramPairCommand                = telegramcommands.PairCommand
-	telegramStartCommand               = telegramcommands.StartCommand
-	telegramHelpCommand                = telegramcommands.HelpCommand
-	telegramStopCommand                = telegramcommands.StopCommand
-	telegramEnvironmentCommand         = telegramcommands.EnvironmentCommand
-	telegramGetEnvironmentCommand      = telegramcommands.GetEnvironmentCommand
-	telegramEnvironmentAcceptKeyword   = "ACCEPT"
-	telegramEnvironmentFilename        = "goaster.env"
-	telegramEnvironmentStarter         = "# Add your environment variables below.\n"
+	telegramToolFeedbackMaxChars           = 600
+	telegramTypingRefreshInterval          = 4 * time.Second
+	telegramTypingActionTimeout            = 2 * time.Second
+	telegramAgentRequestTimeout            = 20 * time.Minute
+	telegramControlAuthorizationHeader     = "X-GoAster-GitHub-Auth-Control"
+	telegramAgentRequestReferenceHeader    = "X-GoAster-Request-Reference"
+	telegramAgentErrorClassificationHeader = "X-GoAster-Error-Classification"
+	telegramPairCommand                    = telegramcommands.PairCommand
+	telegramStartCommand                   = telegramcommands.StartCommand
+	telegramHelpCommand                    = telegramcommands.HelpCommand
+	telegramStopCommand                    = telegramcommands.StopCommand
+	telegramEnvironmentCommand             = telegramcommands.EnvironmentCommand
+	telegramGetEnvironmentCommand          = telegramcommands.GetEnvironmentCommand
+	telegramEnvironmentAcceptKeyword       = "ACCEPT"
+	telegramEnvironmentFilename            = "goaster.env"
+	telegramEnvironmentStarter             = "# Add your environment variables below.\n"
 )
 
 const telegramEnvironmentInstructions = "To update settings, attach a document named goaster.env to /env in the same message. Never paste secret values into chat."
@@ -1264,7 +1268,12 @@ func (a *adapter) askAgent(ctx context.Context, text string, chatID int64, attac
 
 type agentChatTypeKey struct{}
 
-func askAgentWithUser(ctx context.Context, text string, chatID, userID int64, attachments []attachment.Incoming, onToolCall func(string, string), agent httpDoer, controlSecret string) (string, error) {
+func askAgentWithUser(ctx context.Context, text string, chatID, userID int64, attachments []attachment.Incoming, onToolCall func(string, string), agent httpDoer, controlSecret string) (reply string, replyErr error) {
+	defer func() {
+		if failure, ok := replyErr.(agentModelError); ok {
+			diagnostics.Error("telegram.agent.chat", failure, diagnostics.Field{Key: "request_reference", Value: failure.reference}, diagnostics.Field{Key: "stream_classification", Value: failure.classification})
+		}
+	}()
 	if agent == nil {
 		return "", telegramAgentFailure(errors.New("remote agent client is unavailable"), "", 0, "")
 	}
@@ -1293,13 +1302,14 @@ func askAgentWithUser(ctx context.Context, text string, chatID, userID int64, at
 		return "", telegramAgentFailure(errors.New("agent response body is missing"), "", 0, "")
 	}
 	defer resp.Body.Close()
+	requestReference := diagnostics.RequestReference(resp.Header.Get(telegramAgentRequestReferenceHeader))
 	if resp.StatusCode == http.StatusUnsupportedMediaType {
 		return "", attachment.ErrUnsupportedImage
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		if readErr != nil {
-			return "", telegramAgentFailure(fmt.Errorf("read agent error response: %w", readErr), resp.Status, 0, resp.Header.Get("x-request-id"))
+			return "", telegramAgentFailureWithReference(fmt.Errorf("read agent error response: %w", readErr), resp.Status, 0, resp.Header.Get("x-request-id"), requestReference)
 		}
 		if resp.Header.Get("X-GoAster-Error") == "post-tool-authentication" {
 			message := strings.TrimSuffix(string(body), "\n")
@@ -1313,14 +1323,24 @@ func askAgentWithUser(ctx context.Context, text string, chatID, userID int64, at
 			return "", agentModelError{message: message}
 		}
 		if strings.HasPrefix(message, "model ") {
-			return "", agentModelError{message: truncateRunes(message, 512)}
+			if chat.IsSafeModelErrorMessage(message) {
+				return "", agentModelError{message: message}
+			}
 		}
-		return "", telegramAgentFailure(fmt.Errorf("agent returned status %s", resp.Status), resp.Status, 0, resp.Header.Get("x-request-id"))
+		if resp.Header.Get("X-GoAster-Error") == "model-stream" {
+			classification := diagnostics.StreamClassification(resp.Header.Get(telegramAgentErrorClassificationHeader))
+			if classification == "" {
+				classification = "model_stream"
+			}
+			return "", agentModelError{message: chat.SafeModelStreamMessage(classification, requestReference), classification: classification, reference: requestReference}
+		}
+		return "", telegramAgentFailureWithReference(fmt.Errorf("agent returned status %s", resp.Status), resp.Status, 0, resp.Header.Get("x-request-id"), requestReference)
 	}
 	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 4*1024*1024))
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	var reply string
 	var modelError string
+	var modelErrorClassification string
+	var modelErrorReference string
 	for scanner.Scan() {
 		var toolEvent struct {
 			Type      string `json:"type"`
@@ -1328,15 +1348,21 @@ func askAgentWithUser(ctx context.Context, text string, chatID, userID int64, at
 			Arguments string `json:"arguments"`
 		}
 		var replyEvent struct {
-			Type  string `json:"type"`
-			Reply string `json:"reply"`
-			Error string `json:"error"`
+			Type               string `json:"type"`
+			Reply              string `json:"reply"`
+			Error              string `json:"error"`
+			Classification     string `json:"classification"`
+			Reference          string `json:"reference"`
+			ToolStarted        bool   `json:"tool_started"`
+			ToolCompleted      bool   `json:"tool_completed"`
+			ToolStartedCount   int    `json:"tool_started_count"`
+			ToolCompletedCount int    `json:"tool_completed_count"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &toolEvent); err != nil {
-			return "", telegramAgentFailure(fmt.Errorf("decode agent stream event: %w", err), resp.Status, 0, resp.Header.Get("x-request-id"))
+			return "", telegramAgentFailureWithReference(fmt.Errorf("decode agent stream event: %w", err), resp.Status, 0, resp.Header.Get("x-request-id"), requestReference)
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &replyEvent); err != nil {
-			return "", telegramAgentFailure(fmt.Errorf("decode agent stream event: %w", err), resp.Status, 0, resp.Header.Get("x-request-id"))
+			return "", telegramAgentFailureWithReference(fmt.Errorf("decode agent stream event: %w", err), resp.Status, 0, resp.Header.Get("x-request-id"), requestReference)
 		}
 		switch replyEvent.Type {
 		case "tool_call":
@@ -1346,33 +1372,63 @@ func askAgentWithUser(ctx context.Context, text string, chatID, userID int64, at
 		case "final":
 			reply = replyEvent.Reply
 		case "error":
-			if strings.HasPrefix(replyEvent.Error, "model ") {
-				modelError = truncateRunes(strings.TrimSpace(replyEvent.Error), 512)
+			classification := diagnostics.StreamClassification(replyEvent.Classification)
+			reference := diagnostics.RequestReference(replyEvent.Reference)
+			if reference == "" {
+				reference = requestReference
+			}
+			if classification != "" {
+				modelError = chat.SafeModelStreamMessage(classification, reference)
+				modelErrorClassification = classification
+				modelErrorReference = reference
+			} else if chat.IsSafeModelErrorMessage(replyEvent.Error) {
+				modelError = strings.TrimSpace(replyEvent.Error)
+			} else {
+				modelErrorClassification = "model_request_failed"
+				modelErrorReference = reference
+				modelError = chat.SafeModelStreamMessage(modelErrorClassification, reference)
+			}
+			if modelError != "" {
+				return "", agentModelError{message: modelError, classification: modelErrorClassification, reference: modelErrorReference}
 			}
 		case "skill_recovery":
 			if chat.IsSkillRecoveryMessage(replyEvent.Error) {
-				modelError = replyEvent.Error
+				return "", agentModelError{message: replyEvent.Error, reference: requestReference}
 			}
 		case "post_tool_authentication":
 			if chat.IsPostToolAuthenticationMessage(replyEvent.Error) {
 				// This is a terminal agent event. Deliver its validated warning
 				// even if the remaining response stream is broken.
-				return "", agentModelError{message: replyEvent.Error}
+				return "", agentModelError{message: replyEvent.Error, reference: requestReference}
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", telegramAgentFailure(fmt.Errorf("scan agent response: %w", err), resp.Status, 0, resp.Header.Get("x-request-id"))
+		if modelError != "" {
+			return "", agentModelError{message: modelError, classification: modelErrorClassification, reference: modelErrorReference}
+		}
+		return "", telegramAgentFailureWithReference(fmt.Errorf("scan agent response: %w", err), resp.Status, 0, resp.Header.Get("x-request-id"), requestReference)
+	}
+	if modelError != "" {
+		return "", agentModelError{message: modelError, classification: modelErrorClassification, reference: modelErrorReference}
 	}
 	if strings.TrimSpace(reply) == "" {
-		if modelError != "" {
-			return "", agentModelError{message: modelError}
+		if requestReference != "" {
+			return "", agentModelError{
+				message:        chat.SafeModelStreamMessage("missing_final", requestReference),
+				classification: "missing_final",
+				reference:      requestReference,
+			}
 		}
-		return "", telegramAgentFailure(errors.New("agent response contained no final reply"), resp.Status, 0, resp.Header.Get("x-request-id"))
+		return "", telegramAgentFailureWithReference(errors.New("agent response contained no final reply"), resp.Status, 0, resp.Header.Get("x-request-id"), requestReference)
 	}
 	return reply, nil
 }
 func telegramAgentFailure(err error, status string, errorCode int, requestID string) error {
+	return telegramAgentFailureWithReference(err, status, errorCode, requestID, "")
+}
+
+func telegramAgentFailureWithReference(err error, status string, errorCode int, requestID, requestReference string) error {
 	if err == nil {
 		return nil
 	}
@@ -1385,6 +1441,9 @@ func telegramAgentFailure(err error, status string, errorCode int, requestID str
 	}
 	if strings.TrimSpace(requestID) != "" {
 		fields = append(fields, diagnostics.Field{Key: "request_id", Value: requestID})
+	}
+	if safeReference := diagnostics.RequestReference(requestReference); safeReference != "" {
+		fields = append(fields, diagnostics.Field{Key: "request_reference", Value: safeReference})
 	}
 	diagnostics.Error("telegram.agent.chat", err, fields...)
 	return err

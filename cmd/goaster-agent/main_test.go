@@ -302,6 +302,40 @@ func TestAgentLoopbackHandler(t *testing.T) {
 	}
 }
 
+func TestAgentModelStreamFailureUsesSafeReference(t *testing.T) {
+	providerError := chat.ModelStreamError{
+		Classification: "premature_eof",
+		Cause:          errors.New("private provider body and prompt"),
+	}
+	result := postChat(t, handler(fakeProvider{err: providerError}, readyAuth), 42, "hello")
+	reference := diagnostics.RequestReference(result.Header().Get(agentRequestReferenceHeader))
+	if result.Code != http.StatusServiceUnavailable || reference == "" || result.Header().Get("X-GoAster-Error") != "model-stream" {
+		t.Fatalf("model stream response = %d headers=%v body=%q", result.Code, result.Header(), result.Body.String())
+	}
+	if !strings.Contains(result.Body.String(), "The model stream ended before completion") || !strings.Contains(result.Body.String(), "Reference: "+reference) || strings.Contains(result.Body.String(), "private provider body") {
+		t.Fatalf("unsafe model stream response = %q", result.Body.String())
+	}
+}
+
+func TestAgentStreamModelFailureCarriesClassificationReferenceAndProgressOnly(t *testing.T) {
+	providerError := chat.ModelStreamError{Classification: "malformed_event", Cause: errors.New("private stream body")}
+	session := streamLifecycleSession{
+		notice: "safe recovery notice",
+		reply:  func(context.Context, string) (string, error) { return "", providerError },
+	}
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntime(readyAuth, chat.ModelRegistry{}, testControlSecret,
+		func(int64, int64) agentSession { return session }, cronDeliveryQueue{})
+	result := postChat(t, h, 42, "hello")
+	reference := diagnostics.RequestReference(result.Header().Get(agentRequestReferenceHeader))
+	body := result.Body.String()
+	if result.Code != http.StatusOK || reference == "" || !strings.Contains(body, `"type":"error"`) || !strings.Contains(body, `"classification":"malformed_event"`) || !strings.Contains(body, `"reference":"`+reference+`"`) || !strings.Contains(body, `"tool_started":false`) || !strings.Contains(body, `"tool_completed":false`) {
+		t.Fatalf("stream model failure = %d headers=%v body=%q", result.Code, result.Header(), body)
+	}
+	if strings.Contains(body, "private stream body") || strings.Contains(body, "arguments") || strings.Contains(body, "result") {
+		t.Fatalf("stream model failure exposed private details = %q", body)
+	}
+}
+
 func TestAgentBrokenNDJSONStreamCancelsBeforeFurtherWork(t *testing.T) {
 	for _, test := range []struct {
 		name       string

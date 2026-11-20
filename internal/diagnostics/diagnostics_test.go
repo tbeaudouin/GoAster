@@ -104,6 +104,26 @@ func TestRemoteMetadataAllowlist(t *testing.T) {
 	if strings.Count(log, "\n") != 1 {
 		t.Fatalf("injected log: %q", log)
 	}
+	for _, reference := range []string{"chat-0123456789abcdef01234567", "chat-0123456789abcdef"} {
+		if RequestReference(reference) != reference {
+			t.Fatalf("valid reference rejected: %q", reference)
+		}
+	}
+	for _, reference := range []string{"chat-privatecredential", "chat-unknown", "chat-token-private", "chat-0123456789abcdeg", "chat-0123456789abcde", "chat-0123456789abcdef012345678", "chat-0123456789abcde_", "chat-0123456789abcdef\n\x1b[31m"} {
+		if RequestReference(reference) != "" {
+			t.Errorf("unsafe reference accepted: %q", reference)
+		}
+		output.Reset()
+		Error("provider.http", errors.New("private body"), Field{Key: "request_reference", Value: reference})
+		if strings.Contains(output.String(), "request_reference=") || strings.Count(output.String(), "\n") != 1 {
+			t.Errorf("unsafe reference logged: %q", output.String())
+		}
+	}
+	output.Reset()
+	Error("provider.http", errors.New("private body"), Field{Key: "tool_started_count", Value: "65"}, Field{Key: "tool_completed_count", Value: "64"})
+	if !strings.Contains(output.String(), `tool_started_count="65"`) || !strings.Contains(output.String(), `tool_completed_count="64"`) {
+		t.Fatalf("legitimate progress omitted: %q", output.String())
+	}
 }
 
 func TestMigrationDiagnosticMetadataAllowlist(t *testing.T) {

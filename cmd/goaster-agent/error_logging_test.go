@@ -21,7 +21,7 @@ func TestAgentRuntimeDiagnosticsCaptureAuthenticationAndProviderCauses(t *testin
 
 	authErr := errors.New("authentication transport failed token=AUTH_TOKEN\nprivate auth detail")
 	result := postChat(t, handler(fakeProvider{}, func(context.Context) error { return authErr }), 42, "hello")
-	if result.Code != 503 || !strings.Contains(result.Body.String(), "check remote authentication") {
+	if result.Code != 503 || strings.Contains(result.Body.String(), "check remote authentication") || !strings.Contains(result.Body.String(), "Request reference: chat-") {
 		t.Fatalf("authentication response = %d %q", result.Code, result.Body.String())
 	}
 	authLog := output.String()

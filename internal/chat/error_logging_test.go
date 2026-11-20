@@ -43,6 +43,8 @@ func runtimeTestProvider(t *testing.T, client *http.Client, endpoint string) *Co
 	provider := NewCodexProvider(store)
 	provider.backendURL = endpoint
 	provider.httpClient = client
+	provider.retrySleep = func(context.Context, time.Duration) error { return nil }
+	provider.retryJitter = func(time.Duration) time.Duration { return 0 }
 	return provider
 }
 
@@ -160,7 +162,7 @@ func TestSessionDiagnosticOwnsProviderFailureBoundary(t *testing.T) {
 	if requestErr == nil {
 		t.Fatal("session request unexpectedly succeeded")
 	}
-	if strings.Count(log, "ERROR operation=agent.chat") != 2 || strings.Count(log, "ERROR operation=") != 2 || strings.Contains(log, "ERROR operation=chat.provider") {
+	if strings.Count(log, "ERROR operation=agent.chat") != 3 || strings.Count(log, "ERROR operation=") != 3 || strings.Contains(log, "ERROR operation=chat.provider") {
 		t.Fatalf("diagnostics = %q, want one outer boundary record per attempt", log)
 	}
 }

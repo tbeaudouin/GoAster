@@ -578,6 +578,8 @@ func TestCodexProviderIncludesSafeNonSuccessDetails(t *testing.T) {
 	provider := NewCodexProvider(store)
 	provider.backendURL = server.URL
 	provider.httpClient = server.Client()
+	provider.retrySleep = func(context.Context, time.Duration) error { return nil }
+	provider.retryJitter = func(time.Duration) time.Duration { return 0 }
 	_, err := provider.Reply(context.Background(), "gpt-test", "hello")
 	if err == nil || !strings.Contains(err.Error(), "Codex backend request failed with status 502 Bad Gateway") ||
 		strings.Contains(err.Error(), "private provider response") {
@@ -607,6 +609,8 @@ func TestCodexProviderPreservesInterruptedNonSuccessResponse(t *testing.T) {
 	provider := NewCodexProvider(store)
 	provider.backendURL = server.URL
 	provider.httpClient = server.Client()
+	provider.retrySleep = func(context.Context, time.Duration) error { return nil }
+	provider.retryJitter = func(time.Duration) time.Duration { return 0 }
 	_, err := provider.Reply(context.Background(), "gpt-test", "hello")
 	if err == nil || !strings.Contains(err.Error(), "Codex backend request failed with status 502 Bad Gateway") || !strings.Contains(err.Error(), "unexpected EOF") || strings.Contains(err.Error(), body) {
 		t.Fatalf("interrupted response error = %v, want status and transport cause without partial body", err)
@@ -617,8 +621,8 @@ func TestParseCodexSSEFailureDetailsAndCompletion(t *testing.T) {
 	t.Run("nested failure details", func(t *testing.T) {
 		body := []byte("data: " + `{"type":"response.failed","response":{"error":{"code":"server_error","message":"nested backend detail"}}}` + "\n\n")
 		_, err := parseCodexResponseResult(body)
-		if err == nil || !strings.Contains(err.Error(), "backend returned an error") || strings.Contains(err.Error(), "nested backend detail") {
-			t.Fatalf("nested failure error = %v, want backend code without backend message", err)
+		if err == nil || !strings.Contains(err.Error(), "backend returned an error") || !strings.Contains(err.Error(), "server_error") || strings.Contains(err.Error(), "nested backend detail") {
+			t.Fatalf("nested failure error = %v, want safe backend code without backend message", err)
 		}
 	})
 
@@ -698,6 +702,8 @@ func TestCodexProviderPreservesBackendErrorsThroughPublicFlows(t *testing.T) {
 		provider.httpClient = server.Client()
 		provider.auth.AuthBaseURL = server.URL
 		provider.auth.HTTPClient = server.Client()
+		provider.retrySleep = func(context.Context, time.Duration) error { return nil }
+		provider.retryJitter = func(time.Duration) time.Duration { return 0 }
 		_, err := NewSession(Config{Model: "gpt-test"}, provider).Reply(context.Background(), "hello")
 		if !errors.Is(err, ErrLoginRequired) || !errors.Is(err, errRequestAuthentication) {
 			t.Fatalf("401 retry classifications = %v", err)
@@ -746,6 +752,8 @@ func TestCodexProviderPreservesBackendErrorsThroughPublicFlows(t *testing.T) {
 		provider.httpClient = server.Client()
 		provider.auth.AuthBaseURL = server.URL
 		provider.auth.HTTPClient = server.Client()
+		provider.retrySleep = func(context.Context, time.Duration) error { return nil }
+		provider.retryJitter = func(time.Duration) time.Duration { return 0 }
 		_, err := NewSession(Config{Model: "gpt-test"}, provider).Reply(context.Background(), "hello")
 		if err == nil || errors.Is(err, ErrLoginRequired) || errors.Is(err, errRequestAuthentication) || !strings.Contains(err.Error(), "status 401") ||
 			!strings.Contains(err.Error(), "status 502 Bad Gateway") || strings.Contains(err.Error(), "private access detail") || strings.Contains(err.Error(), "private refresh detail") {
@@ -792,6 +800,8 @@ func TestCodexProviderPreservesBackendErrorsThroughPublicFlows(t *testing.T) {
 		provider.httpClient = server.Client()
 		provider.auth.AuthBaseURL = server.URL
 		provider.auth.HTTPClient = server.Client()
+		provider.retrySleep = func(context.Context, time.Duration) error { return nil }
+		provider.retryJitter = func(time.Duration) time.Duration { return 0 }
 		_, err := NewSession(Config{Model: "gpt-test"}, provider).Reply(context.Background(), "hello")
 		if err == nil || !strings.Contains(err.Error(), "status 401") || !strings.Contains(err.Error(), "status 502") ||
 			strings.Contains(err.Error(), "private access detail") || strings.Contains(err.Error(), "private retry detail") {
@@ -803,7 +813,7 @@ func TestCodexProviderPreservesBackendErrorsThroughPublicFlows(t *testing.T) {
 		if diagnostic := requestFailureDiagnostic(err); strings.Contains(diagnostic, "private access detail") || strings.Contains(diagnostic, "private retry detail") {
 			t.Fatalf("retry failure diagnostic = %q", diagnostic)
 		}
-		if backendRequests.Load() != 3 || refreshRequests.Load() != 1 {
+		if backendRequests.Load() != 4 || refreshRequests.Load() != 1 {
 			t.Fatalf("401 retry failure requests = %d, refreshes = %d", backendRequests.Load(), refreshRequests.Load())
 		}
 	})

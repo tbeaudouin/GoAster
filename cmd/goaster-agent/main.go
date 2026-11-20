@@ -3,8 +3,10 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +46,11 @@ const (
 )
 
 const controlAuthorizationHeader = "X-GoAster-GitHub-Auth-Control"
+
+const (
+	agentRequestReferenceHeader    = "X-GoAster-Request-Reference"
+	agentErrorClassificationHeader = "X-GoAster-Error-Classification"
+)
 
 type countingReader struct {
 	io.Reader
@@ -124,6 +131,14 @@ func run(ctx context.Context, args []string, output io.Writer, auth *chat.OpenAI
 		return fmt.Errorf("invalid invocation; use goaster-agent, login, prompt, test-prompt, live, or health")
 	}
 	return start(auth.Store)
+}
+
+func newAgentRequestReference() string {
+	var random [12]byte
+	if _, err := cryptorand.Read(random[:]); err != nil {
+		return "chat-unknown"
+	}
+	return "chat-" + hex.EncodeToString(random[:])
 }
 
 func runTestPrompt(ctx context.Context, message string, output io.Writer, store chat.CredentialStore) error {
@@ -478,6 +493,8 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		}
 	})
 	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
+		requestReference := newAgentRequestReference()
+		w.Header().Set(agentRequestReferenceHeader, requestReference)
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -503,7 +520,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&request); err != nil {
-			diagnostics.Error("agent.chat.decode", err)
+			diagnostics.Error("agent.chat.decode", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
@@ -539,9 +556,9 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		}
 		if err := dec.Decode(&struct{}{}); err != io.EOF {
 			if err != nil {
-				diagnostics.Error("agent.chat.trailing_data", err)
+				diagnostics.Error("agent.chat.trailing_data", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 			} else {
-				diagnostics.Error("agent.chat.trailing_data", errors.New("request contains multiple JSON values"))
+				diagnostics.Error("agent.chat.trailing_data", errors.New("request contains multiple JSON values"), diagnostics.Field{Key: "request_reference", Value: requestReference})
 			}
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -590,31 +607,31 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 				authErr = checkAuth(r.Context())
 			}
 			if authErr != nil {
-				diagnostics.Error("agent.chat.authentication", authErr)
-				http.Error(w, "agent request failed; check remote authentication", http.StatusServiceUnavailable)
+				diagnostics.Error("agent.chat.authentication", authErr, diagnostics.Field{Key: "request_reference", Value: requestReference})
+				http.Error(w, "Agent request could not be started. Request reference: "+requestReference+".", http.StatusServiceUnavailable)
 				return
 			}
 		}
 		if len(metadata) > 0 {
 			root, err := filepath.Abs(os.TempDir())
 			if err != nil {
-				diagnostics.Error("agent.chat.attachment_setup", err)
+				diagnostics.Error("agent.chat.attachment_setup", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				http.Error(w, "agent request failed", http.StatusServiceUnavailable)
 				return
 			}
 			directory, err := os.MkdirTemp(root, attachment.AgentTemporaryDirectoryPrefix)
 			if err != nil {
-				diagnostics.Error("agent.chat.attachment_setup", err)
+				diagnostics.Error("agent.chat.attachment_setup", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				http.Error(w, "agent request failed", http.StatusServiceUnavailable)
 				return
 			}
 			defer func() {
 				if err := os.RemoveAll(directory); err != nil {
-					diagnostics.Error("agent.chat.attachment_cleanup", err)
+					diagnostics.Error("agent.chat.attachment_cleanup", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				}
 			}()
 			if err := os.Chmod(directory, 0700); err != nil {
-				diagnostics.Error("agent.chat.attachment_setup", err)
+				diagnostics.Error("agent.chat.attachment_setup", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				http.Error(w, "agent request failed", http.StatusServiceUnavailable)
 				return
 			}
@@ -622,7 +639,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 				metadata[index].Path = filepath.Join(directory, metadata[index].Filename)
 				file, err := os.OpenFile(metadata[index].Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 				if err != nil {
-					diagnostics.Error("agent.chat.attachment_write", err)
+					diagnostics.Error("agent.chat.attachment_write", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 					http.Error(w, "agent request failed", http.StatusServiceUnavailable)
 					return
 				}
@@ -659,16 +676,16 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 				}
 				store, err := localenv.NewStore()
 				if err != nil {
-					diagnostics.Error("agent.environment.store", err)
+					diagnostics.Error("agent.environment.store", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 					return "Environment settings are unavailable; no changes were saved."
 				}
 				if err := store.Load(); err != nil {
-					diagnostics.Error("agent.environment.load", err)
+					diagnostics.Error("agent.environment.load", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 					return "Environment settings are unavailable; no changes were saved."
 				}
 				values, err := localenv.LoadFile(metadata[0].Path)
 				if err != nil {
-					diagnostics.Error("agent.environment.input", err)
+					diagnostics.Error("agent.environment.input", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 					return "The goaster.env file was rejected: use unique KEY=VALUE names, one setting per line, with no blank lines. No changes were saved."
 				}
 				changes := localenv.Changes(store.Values(), values)
@@ -693,20 +710,20 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 
 			store, err := localenv.NewStore()
 			if err != nil {
-				diagnostics.Error("agent.environment.store", err)
+				diagnostics.Error("agent.environment.store", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				return "Environment settings are unavailable; no changes were saved."
 			}
 			if err := store.Load(); err != nil {
-				diagnostics.Error("agent.environment.load", err)
+				diagnostics.Error("agent.environment.load", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				return "Environment settings are unavailable; no changes were saved."
 			}
 			changes, err := store.UpsertIfUnchanged(proposal.baseDigest, proposal.values)
 			if errors.Is(err, localenv.ErrChanged) {
-				diagnostics.Error("agent.environment.save", err)
+				diagnostics.Error("agent.environment.save", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				return "Environment settings changed since this preview; send /env with goaster.env attached in the same message to review a fresh proposal."
 			}
 			if err != nil {
-				diagnostics.Error("agent.environment.save", err)
+				diagnostics.Error("agent.environment.save", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 				return "Environment settings could not be saved; no changes were applied."
 			}
 			if len(changes.Added) == 0 && len(changes.Modified) == 0 {
@@ -722,7 +739,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 				Type  string `json:"type"`
 				Reply string `json:"reply"`
 			}{"final", reply}); err != nil {
-				diagnostics.Error("agent.environment.stream_encode", err)
+				diagnostics.Error("agent.environment.stream_encode", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
 			}
 			return
 		}
@@ -737,7 +754,11 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		var streamOperation, streamEvent, streamPhase string
 		defer func() {
 			if streamErr != nil {
-				diagnostics.Error(streamOperation, streamErr, diagnostics.Field{Key: "event", Value: streamEvent}, diagnostics.Field{Key: "phase", Value: streamPhase})
+				diagnostics.Error(streamOperation, streamErr,
+					diagnostics.Field{Key: "event", Value: streamEvent},
+					diagnostics.Field{Key: "phase", Value: streamPhase},
+					diagnostics.Field{Key: "request_reference", Value: requestReference},
+				)
 			}
 		}()
 		emit := func(eventName, phase string, event any) {
@@ -783,7 +804,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		session := sessionFor(request.ChatID, request.ThreadID)
 		if session == nil {
 			err := errors.New("agent conversation session is unavailable")
-			diagnostics.Error("agent.chat.session", err, diagnostics.Field{Key: "reason", Value: "session factory returned nil"})
+			diagnostics.Error("agent.chat.session", err, diagnostics.Field{Key: "reason", Value: "session factory returned nil"}, diagnostics.Field{Key: "request_reference", Value: requestReference})
 			http.Error(w, "conversation session unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -803,9 +824,10 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		requestContext = chat.WithConversationThreadID(requestContext, request.ThreadID)
 		requestContext = chat.WithToolCallObserver(requestContext, observer)
 		requestContext = chat.WithRuntimeFailureOperation(requestContext, "agent.chat")
+		requestContext = chat.WithRequestReference(requestContext, requestReference)
 		values, environmentErr := runtimeEnvironment()
 		if environmentErr != nil {
-			diagnostics.Error("agent.chat.runtime_environment", environmentErr)
+			diagnostics.Error("agent.chat.runtime_environment", environmentErr, diagnostics.Field{Key: "request_reference", Value: requestReference})
 			requestContext = chat.WithShellEnvironmentUnavailable(requestContext)
 		} else if len(values) > 0 {
 			requestContext = chat.WithShellEnvironment(requestContext, values)
@@ -858,12 +880,47 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 				return
 			}
 			if streamEmitted {
-				emit("error", "session_error", struct {
-					Type string `json:"type"`
-				}{"error"})
+				classification, reference, ok := chat.ModelStreamFailureInfo(err)
+				if !ok {
+					classification = "model_request_failed"
+				}
+				if reference == "" {
+					reference = requestReference
+				}
+				progress, hasProgress := chat.ToolProgressDetails(err)
+				errorEvent := struct {
+					Type               string `json:"type"`
+					Error              string `json:"error"`
+					Classification     string `json:"classification"`
+					Reference          string `json:"reference"`
+					ToolStarted        bool   `json:"tool_started"`
+					ToolCompleted      bool   `json:"tool_completed"`
+					ToolStartedCount   int    `json:"tool_started_count"`
+					ToolCompletedCount int    `json:"tool_completed_count"`
+				}{
+					Type:               "error",
+					Error:              chat.ModelStreamMessageForError(err, reference),
+					Classification:     classification,
+					Reference:          reference,
+					ToolStarted:        hasProgress && progress.Started > 0,
+					ToolCompleted:      hasProgress && progress.Completed > 0,
+					ToolStartedCount:   progress.Started,
+					ToolCompletedCount: progress.Completed,
+				}
+				emit("error", "session_error", errorEvent)
 				return
 			}
-			http.Error(w, "agent request failed; check remote authentication", http.StatusServiceUnavailable)
+			if chat.IsModelStreamError(err) {
+				classification, _, ok := chat.ModelStreamFailureInfo(err)
+				if !ok {
+					classification = "model_stream"
+				}
+				w.Header().Set("X-GoAster-Error", "model-stream")
+				w.Header().Set(agentErrorClassificationHeader, classification)
+				http.Error(w, chat.ModelStreamMessageForError(err, requestReference), http.StatusServiceUnavailable)
+				return
+			}
+			http.Error(w, "agent request failed. Request reference: "+requestReference+".", http.StatusServiceUnavailable)
 			return
 		}
 		emit("final", "final_reply", struct {

@@ -47,10 +47,12 @@ func Error(operation string, err error, fields ...Field) {
 	var attempts []error
 	otherLeaf := false
 	var separate func(error, int)
+	visitedCount := 0
 	separate = func(e error, depth int) {
-		if e == nil || depth > 32 {
+		if e == nil || depth > 32 || visitedCount >= 1024 {
 			return
 		}
+		visitedCount++
 		if _, ok := e.(interface{ DiagnosticSeparateRecord() }); ok {
 			attempts = append(attempts, e)
 			return
@@ -70,7 +72,7 @@ func Error(operation string, err error, fields ...Field) {
 	separate(err, 0)
 	if len(attempts) > 0 {
 		for _, attempt := range attempts {
-			errorRecord(operation, attempt, nil, false)
+			errorRecord(operation, attempt, fields, false)
 		}
 		if !otherLeaf {
 			return
@@ -172,6 +174,8 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			}
 		case "request_id":
 			value = RequestID(field.Value)
+		case "request_reference":
+			value = RequestReference(field.Value)
 		case "configured_model":
 			if len(field.Value) <= 96 && token(field.Value) == field.Value {
 				value = field.Value
@@ -180,8 +184,16 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			value = safeDetailState(field.Value)
 		case "attempt", "attempts":
 			value = safeAttempt(field.Value)
+		case "elapsed_ms", "retry_wait_ms":
+			value = safeMilliseconds(field.Value)
+		case "tool_started_count", "tool_completed_count":
+			value = safeCount(field.Value)
+		case "tool_started", "tool_completed":
+			value = safeBoolean(field.Value)
 		case "retry_decision":
 			value = safeRetryDecision(field.Value)
+		case "retry_wait_source":
+			value = safeRetryWaitSource(field.Value)
 		case "reason":
 			value = knownDescription(field.Value)
 		case "backend_message":
@@ -207,6 +219,8 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			value = safeEvent(field.Value)
 		case "phase":
 			value = safePhase(field.Value)
+		case "stream_classification":
+			value = StreamClassification(field.Value)
 		case "dispatch_state":
 			value = safeInfoField(field.Key, field.Value)
 		case "handoff_delivery":
@@ -461,10 +475,35 @@ func safeDetailState(value string) string {
 
 func safeAttempt(value string) string {
 	number, err := strconv.Atoi(value)
-	if err != nil || number < 1 || number > 2 {
+	if err != nil || number < 1 || number > 3 {
 		return ""
 	}
 	return strconv.Itoa(number)
+}
+
+func safeMilliseconds(value string) string {
+	number, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || number < 0 || number > 20*60*1000 {
+		return ""
+	}
+	return strconv.FormatInt(number, 10)
+}
+
+func safeCount(value string) string {
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 0 {
+		return ""
+	}
+	return strconv.Itoa(number)
+}
+
+func safeBoolean(value string) string {
+	switch value {
+	case "true", "false":
+		return value
+	default:
+		return ""
+	}
 }
 
 func safeRetryDecision(value string) string {
@@ -476,29 +515,44 @@ func safeRetryDecision(value string) string {
 	}
 }
 
+func safeRetryWaitSource(value string) string {
+	switch value {
+	case "exponential", "retry_after_integer", "retry_after_date", "retry_after_invalid", "none":
+		return value
+	default:
+		return ""
+	}
+}
+
 func expectedOnly(err error, depth int) bool {
-	if err == nil {
-		return true
-	}
-	if depth > 32 {
-		return false
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		children := joined.Unwrap()
-		if len(children) == 0 {
+	count := 0
+	var check func(error, int) bool
+	check = func(current error, level int) bool {
+		if current == nil {
+			return true
+		}
+		if level > 32 || count >= 1024 {
 			return false
 		}
-		for _, child := range children {
-			if !expectedOnly(child, depth+1) {
+		count++
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			children := joined.Unwrap()
+			if len(children) == 0 {
 				return false
 			}
+			for _, child := range children {
+				if !check(child, level+1) {
+					return false
+				}
+			}
+			return true
 		}
-		return true
+		if child := errors.Unwrap(current); child != nil {
+			return check(child, level+1)
+		}
+		return current == context.Canceled || current == io.EOF
 	}
-	if child := errors.Unwrap(err); child != nil {
-		return expectedOnly(child, depth+1)
-	}
-	return err == context.Canceled || err == io.EOF
+	return check(err, depth)
 }
 
 // BackendValue accepts known protocol classifications, never arbitrary strings.
@@ -547,12 +601,38 @@ func RequestID(value string) string {
 	return ""
 }
 
+// RequestReference accepts the local agent's 24 lowercase hex digit format and
+// the deliberate 16 digit fixtures. It validates shape, not provenance.
+func RequestReference(value string) string {
+	if (len(value) != 29 && len(value) != 21) || !strings.HasPrefix(value, "chat-") {
+		return ""
+	}
+	for _, character := range value[5:] {
+		if character >= 'a' && character <= 'f' || character >= '0' && character <= '9' {
+			continue
+		}
+		return ""
+	}
+	return value
+}
+
+// StreamClassification retains only the fixed classifications used by the
+// model response boundary. Provider text is never copied into this field.
+func StreamClassification(value string) string {
+	switch value {
+	case "model_stream", "model_request_failed", "interrupted_read", "premature_eof", "malformed_event", "unrecognized_event", "response_incomplete", "provider_error", "missing_final":
+		return value
+	default:
+		return ""
+	}
+}
+
 func knownDescription(message string) string {
 	// Exact matches against application-owned literals. Never emit a suffix or
 	// interpolate a value from an arbitrary error string.
 	switch message {
 	case "Codex backend request failed", "Codex stream failed", "Codex response failed: backend returned an error", "device code request failed", "device authentication failed", "token exchange failed", "saved refresh token was rejected", "token refresh failed", "Telegram rejected message formatting",
-		"temporary HTTP status", "transient network error", "quota exhausted", "authentication error", "ordinary HTTP status", "request canceled", "request deadline exceeded", "malformed response", "received stream failure", "TLS or configuration error", "non-transient transport error",
+		"temporary HTTP status", "transient network error", "transient stream provider error", "interrupted stream read", "premature EOF", "response incomplete", "unrecognized stream event", "malformed stream response", "retry-after exceeds wait cap", "retry wait exceeds request deadline", "quota exhausted", "authentication error", "ordinary HTTP status", "request canceled", "request deadline exceeded", "malformed response", "received stream failure", "TLS or configuration error", "non-transient transport error",
 		"OpenAI subscription authentication required: credentials were not found", "OpenAI subscription authentication required", "request authentication failed",
 		"OpenAI subscription authentication required: credential file has no access token",
 		"OpenAI subscription authentication required: saved credentials have no refresh token",

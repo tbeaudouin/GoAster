@@ -124,6 +124,28 @@ func TestRequestFailureDiagnosticIncludesUnderlyingErrorAndContext(t *testing.T)
 	if !errors.Is(wrapped, errConversationSaveFailed) || !errors.Is(wrapped, saveFailure) {
 		t.Fatalf("safe diagnostic lost a save failure cause: %v", wrapped)
 	}
+	streamCause := errors.New("Bearer privatecredential https://user:pass@host/private?token=value\n\x1b[31m")
+	streamFailure := ModelStreamError{Classification: modelStreamInterruptedRead, Reference: "chat-privatecredential", Cause: streamCause}
+	for _, message := range []string{streamFailure.Error(), requestFailureDiagnostic(ModelRequestError{Model: DefaultModel, Err: streamFailure}), ModelStreamMessageForError(streamFailure, "chat-privatecredential")} {
+		for _, secret := range []string{"privatecredential", "user:pass", "token=value", "\x1b[31m"} {
+			if strings.Contains(message, secret) {
+				t.Errorf("stream boundary exposed %q: %q", secret, message)
+			}
+		}
+		if !strings.Contains(message, "interrupted before completion") {
+			t.Errorf("stream cause classification lost: %q", message)
+		}
+	}
+	if !errors.Is(streamFailure, streamCause) {
+		t.Fatal("stream boundary lost underlying cause")
+	}
+	progress := ToolProgress{Started: 65, Completed: 64}
+	if got, ok := ToolProgressDetails(toolProgressError{cause: streamFailure, progress: progress}); !ok || got != progress {
+		t.Errorf("legitimate progress lost: %+v, present=%t", got, ok)
+	}
+	if got := codexToolProgressFromContext(withCodexToolProgress(context.Background(), progress)); got != progress {
+		t.Errorf("legitimate attempt progress lost: %+v", got)
+	}
 }
 
 func TestRequestFailureDiagnosticDoesNotBoundUnderlyingError(t *testing.T) {
@@ -553,8 +575,8 @@ func TestModelUncertaintyInstructionRemainsAfterSessionReload(t *testing.T) {
 	requestsMu.Lock()
 	gotRequests := append([]codexRequest(nil), requests...)
 	requestsMu.Unlock()
-	if len(gotRequests) != 7 {
-		t.Fatalf("model requests = %d, want 7", len(gotRequests))
+	if len(gotRequests) != 8 {
+		t.Fatalf("model requests = %d, want 8", len(gotRequests))
 	}
 	for _, request := range gotRequests {
 		if !strings.Contains(request.Instructions, "If an earlier attempt may have failed or been interrupted") || !strings.Contains(request.Instructions, "Before continuing or retrying, check whether any actions completed and verify external state.") || !strings.Contains(request.Instructions, requestMigrationRetryException) || !strings.Contains(request.Instructions, "Conversation history may omit failed or interrupted attempts, even after a restart.") || !strings.Contains(request.Instructions, "do not suppress them because previous scheduled runs occurred") || strings.Contains(request.Instructions, "Verify external state before repeating.") {
@@ -568,14 +590,14 @@ func TestModelUncertaintyInstructionRemainsAfterSessionReload(t *testing.T) {
 			}
 		}
 	}
-	resumedInput, err := json.Marshal(gotRequests[4].Input)
+	resumedInput, err := json.Marshal(gotRequests[5].Input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(resumedInput), "first question") || !strings.Contains(string(resumedInput), "second question") || strings.Contains(string(resumedInput), "failed action") || strings.Contains(string(resumedInput), "TOOL_OUTPUT_NOT_PERSISTED") {
 		t.Fatalf("reloaded history did not reflect the failed attempt: %s", resumedInput)
 	}
-	for _, request := range gotRequests[5:] {
+	for _, request := range gotRequests[6:] {
 		input, err := json.Marshal(request.Input)
 		if err != nil || !strings.Contains(string(input), "regular scheduled repeat") {
 			t.Fatalf("scheduled repeat was not sent: %s, %v", input, err)

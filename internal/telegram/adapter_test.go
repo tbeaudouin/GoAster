@@ -1455,6 +1455,40 @@ func TestTelegramDisplaysSafeSkillRecoveryForDirectAndStreamErrors(t *testing.T)
 	}
 }
 
+func TestTelegramPreservesSafeModelStreamClassificationAndReference(t *testing.T) {
+	const reference = "chat-0123456789abcdef"
+	wireReference := reference
+	agent := doerFunc(func(*http.Request) (*http.Response, error) {
+		result := response(http.StatusOK, `{"type":"error","error":"private stream detail","classification":"premature_eof","reference":"`+wireReference+`","tool_started":true,"tool_completed":false,"tool_started_count":1,"tool_completed_count":0}`+"\n")
+		result.Header = make(http.Header)
+		result.Header.Set("X-GoAster-Request-Reference", wireReference)
+		return result, nil
+	})
+	_, err := askAgentWithUser(context.Background(), "hello", 42, 7, nil, nil, agent, "control-secret")
+	if err == nil {
+		t.Fatal("model stream error unexpectedly succeeded")
+	}
+	var modelErr agentModelError
+	if !errors.As(err, &modelErr) || modelErr.classification != "premature_eof" || modelErr.reference != reference {
+		t.Fatalf("model stream error = %#v", err)
+	}
+	if modelErr.message != "The model stream ended before completion. Reference: "+reference+"." || strings.Contains(modelErr.message, "private stream detail") {
+		t.Fatalf("unsafe model stream message = %q", modelErr.message)
+	}
+	wireReference = "chat-privatecredential"
+	log := captureTelegramDiagnostics(t, func() {
+		_, err = askAgentWithUser(context.Background(), "hello", 42, 7, nil, nil, agent, "control-secret")
+	})
+	if failure, ok := err.(agentModelError); !ok || failure.reference != "" || failure.message != "The model stream ended before completion." {
+		t.Fatalf("untrusted reference was not discarded: %v", err)
+	}
+	for _, secret := range []string{"privatecredential", "private stream detail", "control-secret"} {
+		if strings.Contains(log, secret) {
+			t.Fatalf("agent stream diagnostic exposed %q: %q", secret, log)
+		}
+	}
+}
+
 func TestPollingStopTargetsExecutingTopicAndKeepsQueuedRequest(t *testing.T) {
 	paths := testPaths(t)
 	setupTest(t, paths)
@@ -1824,5 +1858,23 @@ func TestScheduledDeliveryUsesPersistedChatAndThreadOrigin(t *testing.T) {
 	}
 	if len(acknowledged) != 1 || acknowledged[0] != "delivery-1-2" {
 		t.Fatalf("scheduled delivery acknowledgement = %v", acknowledged)
+	}
+}
+
+func TestTelegramTerminalErrorStopsLaterFinalAndToolEvent(t *testing.T) {
+	errorEvent := `{"type":"error","classification":"premature_eof"}`
+	agent := doerFunc(func(*http.Request) (*http.Response, error) {
+		return response(http.StatusOK, errorEvent+"\n{\"type\":\"tool_call\",\"name\":\"late\"}\n{\"type\":\"final\",\"reply\":\"incorrect\"}\n"), nil
+	})
+	called := false
+	for _, event := range []string{errorEvent, `{"type":"error"}`, `{"type":"error","classification":"privateclassification","error":"privatecredential"}`} {
+		errorEvent = event
+		reply, err := askAgentWithUser(context.Background(), "hello", 42, 7, nil, func(string, string) { called = true }, agent, "control-secret")
+		if err == nil || reply != "" || called {
+			t.Errorf("event=%s reply=%q error=%v tool called=%v", event, reply, err, called)
+		}
+		if err != nil && (strings.Contains(err.Error(), "privatecredential") || strings.Contains(err.Error(), "privateclassification")) {
+			t.Errorf("unrecognized error exposed private details: %v", err)
+		}
 	}
 }

@@ -39,8 +39,197 @@ const (
 	requestFailureCredentialMode     = "The credential file permissions are too broad. Restrict access to the file (mode 0600) before retrying."
 	requestFailureConversationMode   = "The conversation file permissions are too broad. Restrict access to the file (mode 0600) before retrying."
 	requestFailureDirectoryMode      = "The conversation directory permissions are too broad. Restrict access to the directory (mode 0700) before retrying."
+	requestFailureModelStream        = "The model stream failed."
 	requestFailureUnknown            = "The request failed for an unknown reason."
 )
+
+const (
+	modelStreamClassification         = "model_stream"
+	modelRequestFailureClassification = "model_request_failed"
+	modelStreamInterruptedRead        = "interrupted_read"
+	modelStreamPrematureEOF           = "premature_eof"
+	modelStreamMalformedEvent         = "malformed_event"
+	modelStreamUnrecognizedEvent      = "unrecognized_event"
+	modelStreamResponseIncomplete     = "response_incomplete"
+	modelStreamProviderError          = "provider_error"
+	modelStreamMissingFinal           = "missing_final"
+)
+
+var errModelStream = errors.New("model stream failure")
+
+// ModelStreamError is the safe boundary for a model response that did not
+// produce a completed usable result. Cause remains available to the owner for
+// typed diagnostics, while Error never copies provider text, bodies, or URLs.
+type ModelStreamError struct {
+	Classification string
+	Reference      string
+	Retryable      bool
+	Cause          error
+}
+
+func (err ModelStreamError) Error() string {
+	message := SafeModelStreamMessage(err.Classification, err.Reference)
+	if detail := modelStreamCauseDetail(err.Cause); detail != "" {
+		message += ": " + detail
+	}
+	return message
+}
+
+func (err ModelStreamError) Unwrap() error { return err.Cause }
+
+func (err ModelStreamError) Is(target error) bool { return target == errModelStream }
+
+func (err ModelStreamError) DiagnosticFields() []diagnostics.Field {
+	fields := []diagnostics.Field{{Key: "stream_classification", Value: err.Classification}}
+	if err.Reference != "" {
+		fields = append(fields, diagnostics.Field{Key: "request_reference", Value: err.Reference})
+	}
+	return fields
+}
+
+// IsModelStreamError reports whether err contains the safe model-stream
+// classification marker.
+func IsModelStreamError(err error) bool {
+	for _, current := range requestFailureErrors(err) {
+		if _, ok := current.(ModelStreamError); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func modelStreamCauseDetail(err error) string {
+	for _, current := range requestFailureErrors(err) {
+		if backend, ok := current.(backendError); ok {
+			return backend.Error()
+		}
+	}
+	return ""
+}
+
+// ModelStreamFailureInfo returns only the allowlisted classification and local
+// request reference carried by a model-stream failure.
+func ModelStreamFailureInfo(err error) (classification, reference string, ok bool) {
+	if err == nil {
+		return "", "", false
+	}
+	for _, current := range requestFailureErrors(err) {
+		streamErr, matches := current.(ModelStreamError)
+		if !matches {
+			continue
+		}
+		classification = diagnostics.StreamClassification(streamErr.Classification)
+		if classification == "" {
+			classification = modelStreamClassification
+		}
+		return classification, diagnostics.RequestReference(streamErr.Reference), true
+	}
+	return "", "", false
+}
+
+// SafeModelStreamMessage creates the plain-text message shared by the
+// terminal, local agent and Telegram adapter. Both inputs are sanitized before
+// they can reach a user or a response body.
+func SafeModelStreamMessage(classification, reference string) string {
+	safeClassification := diagnostics.StreamClassification(classification)
+	message := requestFailureModelStream
+	switch safeClassification {
+	case modelStreamInterruptedRead:
+		message = "The model stream was interrupted before completion."
+	case modelStreamPrematureEOF:
+		message = "The model stream ended before completion."
+	case modelStreamMalformedEvent:
+		message = "The model returned a malformed stream response."
+	case modelStreamUnrecognizedEvent:
+		message = "The model returned an unrecognized stream event."
+	case modelStreamResponseIncomplete:
+		message = "The model response was incomplete."
+	case modelStreamProviderError:
+		message = "The model provider reported a stream failure."
+	case modelRequestFailureClassification:
+		message = "The model request failed."
+	case modelStreamMissingFinal:
+		message = "The model stream ended without a final response."
+	}
+	if safeReference := diagnostics.RequestReference(reference); safeReference != "" {
+		message += " Reference: " + safeReference + "."
+	}
+	return message
+}
+
+// ModelStreamMessageForError returns a safe terminal message for err. A
+// caller-supplied reference is used only when the error did not already carry
+// one, which lets /chat correlate failures across the local boundary.
+func ModelStreamMessageForError(err error, reference string) string {
+	classification, errorReference, ok := ModelStreamFailureInfo(err)
+	if !ok {
+		classification = modelRequestFailureClassification
+	}
+	if errorReference == "" {
+		errorReference = diagnostics.RequestReference(reference)
+	}
+	return SafeModelStreamMessage(classification, errorReference)
+}
+
+type requestReferenceKey struct{}
+
+// WithRequestReference carries only the sanitized local /chat reference into
+// the provider request. It never carries a prompt, model output, or secret.
+func WithRequestReference(ctx context.Context, reference string) context.Context {
+	return context.WithValue(ctx, requestReferenceKey{}, diagnostics.RequestReference(reference))
+}
+
+func requestReference(ctx context.Context) string {
+	reference, _ := ctx.Value(requestReferenceKey{}).(string)
+	return diagnostics.RequestReference(reference)
+}
+
+type ToolProgress struct {
+	Started   int
+	Completed int
+}
+
+type toolProgressError struct {
+	cause    error
+	progress ToolProgress
+}
+
+func (err toolProgressError) Error() string {
+	if err.cause == nil {
+		return "model request failed"
+	}
+	return err.cause.Error()
+}
+
+func (err toolProgressError) Unwrap() error { return err.cause }
+
+func (err toolProgressError) DiagnosticFields() []diagnostics.Field {
+	return []diagnostics.Field{
+		{Key: "tool_started_count", Value: fmt.Sprintf("%d", err.progress.Started)},
+		{Key: "tool_completed_count", Value: fmt.Sprintf("%d", err.progress.Completed)},
+		{Key: "tool_started", Value: fmt.Sprintf("%t", err.progress.Started > 0)},
+		{Key: "tool_completed", Value: fmt.Sprintf("%t", err.progress.Completed > 0)},
+	}
+}
+
+// ToolProgressDetails returns bounded local progress metadata without exposing
+// tool arguments or results.
+func ToolProgressDetails(err error) (ToolProgress, bool) {
+	if err == nil {
+		return ToolProgress{}, false
+	}
+	for _, current := range requestFailureErrors(err) {
+		progressErr, matches := current.(toolProgressError)
+		if !matches {
+			continue
+		}
+		if progressErr.progress.Started < 0 || progressErr.progress.Completed < 0 {
+			return ToolProgress{}, false
+		}
+		return progressErr.progress, true
+	}
+	return ToolProgress{}, false
+}
 
 type postToolAuthenticationMarker struct{}
 
@@ -124,6 +313,27 @@ func IsPostToolAuthenticationMessage(message string) bool {
 	return message == postToolAuthenticationWarning || message == postToolAuthenticationLegacy
 }
 
+// IsSafeModelErrorMessage accepts only the local agent's bounded selected
+// model marker. It prevents an arbitrary streamed "model ..." error from
+// becoming Telegram user-visible text.
+func IsSafeModelErrorMessage(message string) bool {
+	message = strings.TrimSpace(message)
+	if len(message) > 512 || !strings.HasPrefix(message, "model ") || !strings.HasSuffix(message, ": model unavailable") {
+		return false
+	}
+	model := strings.TrimSuffix(strings.TrimPrefix(message, "model "), ": model unavailable")
+	if len(model) == 0 || len(model) > 96 {
+		return false
+	}
+	for _, character := range model {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("._-", character) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 type insecurePermissionsError uint8
 
 const (
@@ -199,7 +409,7 @@ func requestFailureErrors(err error) []error {
 	visited := make(map[error]struct{})
 	var collect func(error, int)
 	collect = func(current error, depth int) {
-		if current == nil || depth > maxRequestErrorDepth {
+		if current == nil || depth > maxRequestErrorDepth || len(nodes) >= maxRequestErrorDepth {
 			return
 		}
 		if requestErrorComparable(current) {
@@ -270,6 +480,8 @@ func requestFailureDiagnostic(err error) string {
 			message = requestFailureAuthentication
 		case requestFailureIs(err, ErrModelUnavailable):
 			message = requestFailureModelUnavailable
+		case IsModelStreamError(err):
+			message = ModelStreamMessageForError(err, "")
 		}
 	}
 	if requestFailureIs(err, errConversationSaveFailed) && message != requestFailureStateSave {
@@ -307,7 +519,13 @@ func requestFailureDetails(err error) string {
 		return ""
 	}
 	details := strings.Builder{}
-	for _, current := range requestFailureErrors(err) {
+	var collect func(error, int)
+	count := 0
+	collect = func(current error, depth int) {
+		if current == nil || depth > maxRequestErrorDepth || count >= maxRequestErrorDepth {
+			return
+		}
+		count++
 		message := current.Error()
 		if message != "" && !strings.Contains(details.String(), message) {
 			if details.Len() > 0 {
@@ -315,7 +533,21 @@ func requestFailureDetails(err error) string {
 			}
 			details.WriteString(message)
 		}
+		// ModelStreamError is the safe user-facing boundary. Its typed cause is
+		// still retained for errors.Is/diagnostics, but arbitrary wire/read text
+		// must not be copied into a terminal or agent-facing detail string.
+		if _, boundary := current.(ModelStreamError); boundary {
+			return
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, cause := range joined.Unwrap() {
+				collect(cause, depth+1)
+			}
+			return
+		}
+		collect(errors.Unwrap(current), depth+1)
 	}
+	collect(err, 0)
 	return details.String()
 }
 
@@ -466,6 +698,7 @@ type ToolCallObserver func(name, arguments string)
 
 type toolCallObserverKey struct{}
 type toolActionStartedKey struct{}
+type codexToolProgressKey struct{}
 type runtimeFailureOperationKey struct{}
 type providerFailureBoundaryKey struct{}
 
@@ -482,6 +715,18 @@ func WithRuntimeFailureOperation(ctx context.Context, operation string) context.
 func toolCallObserver(ctx context.Context) ToolCallObserver {
 	observer, _ := ctx.Value(toolCallObserverKey{}).(ToolCallObserver)
 	return observer
+}
+
+func withCodexToolProgress(ctx context.Context, progress ToolProgress) context.Context {
+	return context.WithValue(ctx, codexToolProgressKey{}, progress)
+}
+
+func codexToolProgressFromContext(ctx context.Context) ToolProgress {
+	progress, _ := ctx.Value(codexToolProgressKey{}).(ToolProgress)
+	if progress.Started < 0 || progress.Completed < 0 {
+		return ToolProgress{}
+	}
+	return progress
 }
 
 type currentTurnAttachmentsKey struct{}
@@ -1020,6 +1265,9 @@ func (s *Session) logSessionFailure(ctx context.Context, err error) {
 		operation = value
 	}
 	fields := make([]diagnostics.Field, 0, 3)
+	if reference := requestReference(ctx); reference != "" {
+		fields = append(fields, diagnostics.Field{Key: "request_reference", Value: reference})
+	}
 	var modelErr ModelRequestError
 	if errors.As(err, &modelErr) {
 		fields = append(fields, configuredModelDiagnostic(s.registry, modelErr.Model)...)
