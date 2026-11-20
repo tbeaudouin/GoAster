@@ -10,6 +10,11 @@ Use the [github-auth skill](../github-auth/SKILL.md) and its
 
 ## Preflight
 
+Before choosing a new local checkout path, load the
+[git-repositories skill](../git-repositories/SKILL.md). Use its default unless
+the user gives an explicit path; this does not change the fork verification
+or approval steps below.
+
 1. Verify the authenticated GitHub account and the public upstream
    repository, including its default branch and commit.
 

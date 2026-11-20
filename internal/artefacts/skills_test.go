@@ -27,6 +27,79 @@ func TestGoasterMigrationSkillMatchesApprovedWording(t *testing.T) {
 	}
 }
 
+func TestDefaultFilesystemSkillContracts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assetDir)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"read-write-temp-files", "git-repositories"} {
+		if !strings.Contains(metadata, "name: "+name+"\n") {
+			t.Errorf("default skill %q is not discoverable: %q", name, metadata)
+		}
+	}
+
+	loaded := make(map[string]string)
+	for _, name := range []string{"read-write-temp-files", "git-repositories", "goaster-fork", "goaster-find-contributions"} {
+		content, err := Load(name)
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		loaded[name] = strings.Join(strings.Fields(content), " ")
+	}
+
+	temp := loaded["read-write-temp-files"]
+	for _, phrase := range []string{
+		"/tmp/goaster", "trusted system directory with the sticky bit", "current identity with mode `0700`",
+		"Separate identities cannot share this root", "TMPDIR", "TMP", "TEMP",
+		"different unprivileged identity cannot traverse a `0700` task directory",
+		"separate fresh directory directly under trusted system `/tmp`", "approved test identity",
+		"atomic replacement", "~/.goaster/agent-auth.json", "~/.goaster/auth.json",
+		"per-turn attachment directories", "exact generated task path",
+	} {
+		if !strings.Contains(temp, phrase) {
+			t.Errorf("temporary-file workflow missing %q", phrase)
+		}
+	}
+	for _, oldDefault := range []string{"~/.goaster/tmp", "<real user home>/.goaster/tmp", "$HOME/.goaster/tmp"} {
+		if strings.Contains(strings.Join([]string{metadata, temp}, " "), oldDefault) {
+			t.Errorf("temporary-file metadata or workflow retains old home-based default %q", oldDefault)
+		}
+	}
+
+	repositories := loaded["git-repositories"]
+	for _, phrase := range []string{
+		"/srv/git/<owner>/<repo>", "explicit path", "Keep existing approved repositories where they are",
+		"single path components", "trusted real directory", "symlinks", "scoped provisioning",
+		"Do not fall back elsewhere", "git status --short --ignored", "exact Git root",
+		"origin", "nested clone", "`pull`, `reset`, or `checkout` automatically",
+		"`github-auth`", "tokens in URLs", "`goaster-fork` workflow",
+	} {
+		if !strings.Contains(repositories, phrase) {
+			t.Errorf("git-repositories workflow missing %q", phrase)
+		}
+	}
+	if !strings.Contains(loaded["goaster-fork"], "Before choosing a new local checkout path, load the [git-repositories skill]") {
+		t.Error("goaster-fork does not load git-repositories before choosing a checkout path")
+	}
+	for _, phrase := range []string{"Before choosing a new path, load", "without pulling, resetting, or checking out a branch"} {
+		if !strings.Contains(loaded["goaster-find-contributions"], phrase) {
+			t.Errorf("goaster-find-contributions missing repository path guidance %q", phrase)
+		}
+	}
+}
+
 func TestInstallBundledStartersOnce(t *testing.T) {
 	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
 	if err != nil {

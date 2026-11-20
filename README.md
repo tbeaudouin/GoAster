@@ -49,6 +49,7 @@ Useful operational skills include [background command
 administration](skills/background-command-administration/SKILL.md),
 [model administration](skills/model-administration/SKILL.md),
 [read/write temporary files](skills/read-write-temp-files/SKILL.md),
+[Git repository paths](skills/git-repositories/SKILL.md),
 [project memory](skills/project-memory/SKILL.md),
 [GoAster migration](skills/goaster-migration/SKILL.md),
 [backup and rollback](skills/goaster-backup/SKILL.md),

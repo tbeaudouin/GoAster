@@ -1,47 +1,40 @@
 # Read/write temporary files
 
-Load this skill before creating, reading, writing, or cleaning any managed
-temporary file or directory, or before choosing a temporary path for a
-subprocess. Load any other skill required by the task as well.
+Load this skill before choosing a temporary path, managing temporary files, or
+setting temporary-directory variables for a subprocess. Load any other skill
+required by the task. Discovery metadata is only a hint; it does not enforce
+these rules on `shell_execute` or other tools. If this skill cannot be loaded,
+stop the temp-dependent workflow.
 
-The `META.md` description is a discovery hint only. Skill discovery does not
-automatically apply these rules to `shell_execute`, a subprocess, or another
-tool, and this skill cannot enforce every tool's behavior. Do not claim that
-metadata provided enforcement. If the required skill cannot be loaded, stop
-the temp-dependent workflow.
+## Resolve the private root
 
-## Resolve the GoAster temporary root first
+Use `/tmp/goaster` for GoAster-managed temporary work. Before using `/tmp`,
+verify with `lstat` that it is a real, trusted system directory with the sticky
+bit (normally owned by root). Do not follow a symlink or change `/tmp`.
 
-Before changing `HOME`, `USERPROFILE`, or another profile environment variable,
-capture the verified real user home and resolve the absolute GoAster temporary
-root as:
+Create `/tmp/goaster` exclusively as the current identity under umask `077`.
+Whether new or existing, it must be a real directory owned by the current
+identity with mode `0700`. If it is occupied by a symlink, another file type,
+another owner, or different permissions, stop and report the conflict. Do not
+take it over, change its owner or mode, use `sudo`, or modify a parent
+directory. Separate identities cannot share this root; a collision must fail
+clearly.
 
-```text
-<real user home>/.goaster/tmp
-```
+The temporary root does not depend on `HOME`. Before changing `HOME`,
+`USERPROFILE`, or another profile variable, save the verified real home and
+exact credential paths. Never override `HOME` for an authenticated GoAster
+operation. If an isolated child needs a profile override, apply it only to that
+child and never copy credentials into the temporary area.
 
-Save that resolved path in a variable before any profile override. Do not
-recompute `~/.goaster/tmp` after an override, because it could point at a test
-home or an unrelated user's directory. Inspect each existing component as a
-real directory, reject symbolic links and unexpected file types, and create
-missing components with mode `0700` without broadening existing permissions.
+## Create and use one task directory
 
-Do not override `HOME` for an authenticated GoAster operation. If an isolated
-subprocess genuinely needs a profile override, resolve and save the real
-GoAster root and the exact credential paths first, then apply the override
-only to that subprocess. Never copy credentials into the temporary area to
-make the override work.
+Create one fresh, unique child of `/tmp/goaster` per task, using an exclusive
+`mktemp -d`-style operation under umask `077`. Verify its absolute path, real
+directory type, current owner, and `0700` mode before use. Never use `/tmp`,
+`/tmp/goaster`, the repository, or a shared directory as the task directory.
 
-## Create one private task directory
-
-Use a fresh, unique child of the resolved root for the whole task. Set a
-restrictive umask before creation, use an exclusive `mktemp -d`-style
-operation, and verify that the result is an absolute real directory with mode
-`0700`. Never use the GoAster root, its `tmp` root, the repository, or a shared
-system temporary directory as the task directory itself.
-
-Point all common subprocess temporary-directory variables at that one task
-directory before starting a child:
+Point all inherited subprocess temporary-directory variables at that task
+directory:
 
 ```sh
 export TMPDIR="$TASK_DIR"
@@ -49,42 +42,43 @@ export TMP="$TASK_DIR"
 export TEMP="$TASK_DIR"
 ```
 
-Use the platform equivalent when a shell does not use POSIX syntax. Keep the
-variables exported so descendants inherit them. A child working directory may
-also be set to `TASK_DIR` when that is part of the approved task. Use bounded
+Keep temporary contents non-secret and limited to the task. Never put
+credentials, tokens, private keys, pairing material, control secrets, or auth
+headers in files, filenames, arguments, logs, or child output. Keep paths
+inside the task directory, reject symlinks and unexpected file types, and
+create private files exclusively (normally mode `0600`). For a durable file,
+use a private same-directory temporary file and atomic replacement only when
+the owning workflow requires it; never replace an unrelated file. Use bounded
 commands and do not start, stop, restart, or replace services as a side effect
 of temporary-file handling.
 
-## Read and write safely
+A different unprivileged identity cannot traverse a `0700` task directory,
+even though it is under `/tmp`. For a test that must run as another identity,
+put only non-secret fixtures in a separate fresh directory directly under
+trusted system `/tmp`, owned by or access-controlled for the approved test
+identity; create it as that identity when possible. Give the child only the
+fixture paths it needs. Setting that child's `TMPDIR`, `TMP`, and `TEMP` to the
+fixture directory is the explicit identity-change exception. Do not loosen
+permissions on `/tmp`, `/root`, `/tmp/goaster`, or authentication files.
 
-Keep temporary contents non-secret and limited to the current task. Do not put
-passwords, tokens, OAuth state, private keys, pairing material, control
-secrets, or auth headers in temporary files, filenames, command arguments,
-logs, or subprocess output. Reject paths that escape `TASK_DIR`, and do not
-follow or create symlinks in the managed tree. Create files privately (normally
-mode `0600`) and use exclusive creation. For an existing durable file, use a
-private same-directory temporary file and an atomic replacement only when the
-owning workflow requires it; do not replace an unrelated file.
-
-GoAster's own per-turn attachment directories are runtime-managed and have
-their own validation and cleanup contract. Use that contract when a runtime
-supplies an attachment path; do not delete the process temporary root or
-rewrite durable GoAster state merely to make it fit this workflow.
+GoAster per-turn attachment directories are runtime-managed and have their own
+validation and cleanup contract. Follow that contract for runtime-supplied
+attachment paths; do not remove a process temporary root or rewrite durable
+GoAster state to fit this workflow.
 
 ## Clean up narrowly
 
-Arrange cleanup when the task starts so it runs on success, failure, and
-interruption after child processes have exited. Before removing anything,
-verify that the target is the exact generated `TASK_DIR`, is not the root or
-`tmp` directory, is still a private real directory, and remains below the
-resolved GoAster temporary root. Remove only that task directory. Never use a
-wildcard or a broad parent path, and never remove the GoAster root, artefact
-retention directories, the repository, or files belonging to another task.
+Arrange cleanup when the task starts; run it on success, failure, or
+interruption after child processes exit. Before removal, verify the exact
+generated task path, current ownership, real directory type, private mode,
+and that it remains below `/tmp/goaster`. Remove only that task directory,
+never a wildcard or parent. Clean up a separate fixture only at its exact
+generated path, after the child exits, using its owning or approved test
+identity. Never remove `/tmp/goaster` or `/tmp`.
 
-Preserve authentication and authorization files, including the local
-`~/.goaster/agent-auth.json` and `~/.goaster/auth.json` paths and any configured
-control-secret, Telegram token, or pairing-state files. Do not inspect, copy,
-move, overwrite, or delete them. If one is found inside the task directory,
-stop, preserve it for explicit recovery, and report that cleanup is incomplete
-instead of deleting it. Report cleanup failures without printing temporary
-contents or secret-bearing paths.
+Preserve authentication and authorization files, including
+`~/.goaster/agent-auth.json`, `~/.goaster/auth.json`, configured control
+secrets, Telegram tokens, and pairing state. Do not inspect, copy, move,
+overwrite, or delete them. If one is found in a task directory, stop and
+preserve it for explicit recovery; report incomplete cleanup without printing
+temporary contents or secret-bearing paths.
