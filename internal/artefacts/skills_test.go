@@ -139,6 +139,46 @@ func TestTaskPlanningDefaultSkill(t *testing.T) {
 	}
 }
 
+func TestGoasterSelfDebugDefaultSkill(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assetDir)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(metadata, "name: goaster-self-debug\n") {
+		t.Fatal("goaster-self-debug is not discoverable after default installation")
+	}
+	content, err := Load("goaster-self-debug")
+	if err != nil {
+		t.Fatalf("load goaster-self-debug: %v", err)
+	}
+	serviceDefinition, err := os.ReadFile(filepath.Join("..", "..", "docs", "goasterweb-installation.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const serviceUnit = "goaster-agent.service"
+	if !strings.Contains(string(serviceDefinition), "generates `"+serviceUnit+"`") {
+		t.Fatalf("repository service definition does not name %s", serviceUnit)
+	}
+	command := "journalctl -u " + serviceUnit + " -n 100 --no-pager"
+	if !strings.Contains(content, command) {
+		t.Fatalf("self-debug workflow missing bounded journal command %q", command)
+	}
+	if !strings.Contains(content, "Keep secrets and private content out of reports.") {
+		t.Fatal("self-debug workflow missing report privacy reminder")
+	}
+}
+
 func TestFeatureInspirationPolicy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
