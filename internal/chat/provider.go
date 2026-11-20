@@ -1243,9 +1243,6 @@ func (s *Session) rememberSelectedSkill(next selectedSkill) error {
 		}
 	}
 	s.selectedSkills = selected
-	if len(selected) > maxSessionSkills {
-		return errors.New("too many selected skills")
-	}
 	return nil
 }
 

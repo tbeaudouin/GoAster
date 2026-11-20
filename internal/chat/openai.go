@@ -2017,12 +2017,7 @@ requestLoop:
 		}
 
 		if skillLoadCount+responseSkillLoads > maxCodexSkillLoads {
-			if skillSession.remember != nil {
-				if err := skillSession.remember(selectedSkill{}); err != nil {
-					return "", status, fmt.Errorf("save failed skill selection: %w", err)
-				}
-			}
-			return "", status, skillRecovery(fmt.Errorf("Codex requested too many load_skill calls (maximum %d)", maxCodexSkillLoads), skillResetMessage)
+			return "", status, skillRequestFailure(fmt.Errorf("Codex requested too many load_skill calls (maximum %d)", maxCodexSkillLoads), skillReasonRequestLimit)
 		}
 
 		// Record every selected name before processing the batch. A malformed
@@ -2037,12 +2032,7 @@ requestLoop:
 				err = errors.New("invalid skill name")
 			}
 			if err != nil {
-				if skillSession.remember != nil {
-					if saveErr := skillSession.remember(selectedSkill{}); saveErr != nil {
-						return "", status, fmt.Errorf("save failed skill selection: %w", saveErr)
-					}
-				}
-				return "", status, skillRecovery(fmt.Errorf("skill load failed: %w; stopped the workflow", err), skillResetMessage)
+				return "", status, skillRequestFailure(fmt.Errorf("skill load failed: %w; stopped the workflow", err), skillReasonInvalidRequest)
 			}
 			if !loadedSkills[name] && !pending[name] && skillSession.remember != nil {
 				if err := skillSession.remember(selectedSkill{Name: name}); err != nil {
@@ -2070,7 +2060,7 @@ requestLoop:
 				if call.Name == loadSkillCodexTool.Name {
 					name, err = parseLoadSkillArguments(call.Arguments)
 					if err != nil {
-						return "", status, skillRecovery(fmt.Errorf("skill load failed: %w; stopped the workflow", err), skillResetMessage)
+						return "", status, skillRequestFailure(fmt.Errorf("skill load failed: %w; stopped the workflow", err), skillReasonInvalidRequest)
 					}
 				}
 				if call.Name == loadSkillCodexTool.Name && loadedSkills[name] {
@@ -2207,7 +2197,7 @@ type selectedSkillSnapshot struct {
 // reject an ordinary user-owned skill update: the current validated content
 // becomes the new guidance and the caller can checkpoint its new digest.
 func loadSelectedSkillSnapshot(selected []selectedSkill) (selectedSkillSnapshot, error) {
-	if !validSelectedSkills(selected) || len(selected) > maxSessionSkills {
+	if !validSelectedSkills(selected) {
 		return selectedSkillSnapshot{}, skillRecovery(errors.New("invalid or too many selected skills"), skillResetMessage)
 	}
 	snapshot := selectedSkillSnapshot{
@@ -2215,8 +2205,8 @@ func loadSelectedSkillSnapshot(selected []selectedSkill) (selectedSkillSnapshot,
 		names:    make(map[string]bool),
 	}
 	for index, skill := range selected {
-		if skill.Name == "" || skill.Digest == "" {
-			return selectedSkillSnapshot{}, skillRecovery(fmt.Errorf("selected skill %q did not finish loading", skill.Name), skillResetMessage)
+		if skill.Name == "" {
+			return selectedSkillSnapshot{}, skillRecovery(errors.New("skill selection was invalid or excessive"), skillAnonymousMessage)
 		}
 		content, err := artefacts.Load(skill.Name)
 		if err != nil {

@@ -161,6 +161,12 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 				default:
 					t.Errorf("unexpected session continuation request %d", step)
 				}
+			case "eleventh-selection":
+				if step == 1 {
+					writeCodexFunctionCall(t, w, "load-eleventh", "load_skill", `{"name":"limited-10"}`)
+				} else {
+					fmt.Fprint(w, `{"output_text":"done"}`)
+				}
 			case "selection-checkpoint":
 				writeCodexFunctionCall(t, w, "load", "load_skill", `{"name":"fixture-skill"}`)
 			case "malformed-selection":
@@ -471,11 +477,23 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pending.Reply(context.Background(), "Yes"); err == nil || !strings.Contains(err.Error(), "did not finish loading") {
+	if _, err := pending.Reply(context.Background(), "Yes"); err == nil || !strings.Contains(err.Error(), "reload selected skill") {
 		t.Fatalf("pending skill continuation error = %v", err)
 	}
 	if backendRequests.Load() != 1 || len(shellCalls) != 1 {
 		t.Fatal("pending skill allowed a backend request or action")
+	}
+	missingDir := filepath.Join(home, ".goaster", "artefacts", "skills", "missing-skill")
+	writeFixture(t, filepath.Join(missingDir, "META.md"), "name: missing-skill\ndescription: repaired fixture\n")
+	writeFixture(t, filepath.Join(missingDir, "AUTH.md"), "repaired authentication")
+	writeFixture(t, filepath.Join(missingDir, "SKILL.md"), "repaired workflow")
+	scenario = "simple"
+	if _, err := pending.Reply(context.Background(), "Continue after repair"); err != nil {
+		t.Fatalf("repaired skill: %v", err)
+	}
+	pending, err = NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, pendingPath)
+	if err != nil || len(pending.selectedSkills) != 1 || pending.selectedSkills[0].Digest == "" {
+		t.Fatalf("repaired checkpoint: %+v, %v", pending, err)
 	}
 	if _, err := pending.Reply(context.Background(), "/clear"); err != nil {
 		t.Fatal(err)
@@ -487,24 +505,26 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 	for _, failure := range []string{"malformed-selection", "unsupported-before-selection", "excessive-selection"} {
 		scenario = failure
 		backendRequests.Store(0)
-		gotArguments = ""
 		path := filepath.Join(t.TempDir(), "session.json")
 		blocked, err := NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := blocked.Reply(context.Background(), "Select a skill"); err == nil {
-			t.Fatalf("%s: invalid selection unexpectedly succeeded", failure)
+			t.Fatalf("%s: invalid selection succeeded", failure)
 		}
 		blocked, err = NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := blocked.Reply(context.Background(), "Yes"); err == nil || (!strings.Contains(err.Error(), "did not finish loading") && !strings.Contains(err.Error(), "skill selection was invalid or excessive")) {
-			t.Fatalf("%s: failed selection was forgotten: %v", failure, err)
+		for _, selection := range blocked.selectedSkills {
+			if selection.Name == "" {
+				t.Fatalf("%s: anonymous marker persisted", failure)
+			}
 		}
-		if backendRequests.Load() != 1 || gotArguments != "" {
-			t.Fatalf("%s: failed selection allowed another request or action", failure)
+		scenario = "simple"
+		if _, err := blocked.Reply(context.Background(), "Continue"); err != nil {
+			t.Fatalf("%s: retry: %v", failure, err)
 		}
 	}
 
@@ -529,12 +549,14 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := checkpoint.Reply(context.Background(), "Yes"); err == nil || !strings.Contains(err.Error(), "did not finish loading") {
-		t.Fatalf("uncertain checkpoint after restart = %v", err)
+	scenario = "simple"
+	if _, err := checkpoint.Reply(context.Background(), "Yes"); err != nil {
+		t.Fatalf("pending checkpoint after restart = %v", err)
 	}
-	if backendRequests.Load() != 1 || len(shellCalls) != 1 {
-		t.Fatal("failed checkpoint allowed a later backend request or action")
+	if backendRequests.Load() != 2 || len(shellCalls) != 1 {
+		t.Fatal("failed checkpoint allowed an unexpected action")
 	}
+	scenario = "selection-checkpoint"
 	checkpointPath = filepath.Join(t.TempDir(), "session.json")
 	checkpoint, err = NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, checkpointPath)
 	if err != nil {
@@ -617,46 +639,61 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 		t.Fatalf("compacted session requests = %d", backendRequests.Load())
 	}
 
-	// A selection beyond the session limit is itself checkpointed as pending,
-	// so retrying cannot discard the additional requested workflow.
+	// Eleven selections, including a legacy pending entry, are restored.
 	limitedPath := filepath.Join(t.TempDir(), "session.json")
 	limited, err := NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, limitedPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maxSessionSkills; i++ {
+	for i := 0; i < 11; i++ {
 		name := fmt.Sprintf("limited-%d", i)
 		dir := filepath.Join(home, ".goaster", "artefacts", "skills", name)
-		writeFixture(t, filepath.Join(dir, "META.md"), "name: "+name+"\ndescription: limited fixture\n")
+		writeFixture(t, filepath.Join(dir, "META.md"), "name: "+name+"\ndescription: fixture\n")
 		writeFixture(t, filepath.Join(dir, "AUTH.md"), "authentication")
 		writeFixture(t, filepath.Join(dir, "SKILL.md"), "workflow")
-		arguments := fmt.Sprintf(`{"name":%q}`, name)
-		content, err := executeLoadSkill(context.Background(), arguments)
+		content, err := executeLoadSkill(context.Background(), fmt.Sprintf(`{"name":%q}`, name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		limited.selectedSkills = append(limited.selectedSkills, selectedSkill{Name: name, Digest: skillDigest(content)})
+		digest := skillDigest(content)
+		if i == 10 {
+			digest = ""
+		}
+		limited.selectedSkills = append(limited.selectedSkills, selectedSkill{Name: name, Digest: digest})
 	}
+	// Exercise a normal model-requested eleventh selection before the legacy
+	// pending state below.
+	legacyEleventh := limited.selectedSkills[10]
+	limited.selectedSkills = limited.selectedSkills[:10]
 	version, err = limited.store.saveStateWithVersion("", nil, limited.selectedSkills, limited.storeVersion, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	limited.storeVersion = version
-	scenario = "failed-load"
+	scenario = "eleventh-selection"
 	backendRequests.Store(0)
-	gotArguments = ""
-	if _, err := limited.Reply(context.Background(), "Use another skill"); err == nil || !strings.Contains(err.Error(), "too many selected skills") {
-		t.Fatalf("skill selection limit = %v", err)
+	if _, err := limited.Reply(context.Background(), "Load one more"); err != nil {
+		t.Fatalf("eleventh selection: %v", err)
+	}
+	if len(limited.selectedSkills) != 11 || limited.selectedSkills[10].Digest == "" {
+		t.Fatalf("eleventh selection not checkpointed: %+v", limited.selectedSkills)
+	}
+	limited.selectedSkills[10] = legacyEleventh
+	version, err = limited.store.saveStateWithVersion("", nil, limited.selectedSkills, limited.storeVersion, true)
+	if err != nil {
+		t.Fatal(err)
 	}
 	limited, err = NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, limitedPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := limited.Reply(context.Background(), "Yes"); err == nil || !strings.Contains(err.Error(), "too many selected skills") {
-		t.Fatalf("skill selection limit after restart = %v", err)
+	scenario = "simple"
+	if _, err := limited.Reply(context.Background(), "Continue"); err != nil {
+		t.Fatal(err)
 	}
-	if backendRequests.Load() != 1 || gotArguments != "" {
-		t.Fatal("skill selection limit allowed a later model request or action")
+	limited, err = NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, limitedPath)
+	if err != nil || len(limited.selectedSkills) != 11 || limited.selectedSkills[10].Digest == "" {
+		t.Fatalf("restored selections: %+v, %v", limited, err)
 	}
 
 	// A current-format file missing its explicit selection state is invalid,

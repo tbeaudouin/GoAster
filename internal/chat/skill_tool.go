@@ -9,16 +9,17 @@ import (
 	"strings"
 
 	"goaster/internal/artefacts"
+	"goaster/internal/diagnostics"
 )
 
-const maxSessionSkills = 10
-
 const (
-	skillActionNotice   = "Some actions may already have completed. Check their results before continuing or repeating any action."
-	skillResetMessage   = skillActionNotice + " Skill guidance could not be loaded or restored. Check the installed skill files; use /clear if the selection cannot be restored."
-	skillChangedMessage = skillActionNotice + " Skill guidance changed and was refreshed automatically."
-	skillBudgetMessage  = skillActionNotice + " Skill guidance does not fit in the conversation. Review installed skills in ~/.goaster/artefacts/skills and retain their authentication guidance, workflow, safety, and any legacy AUTH.md authorization requirements; use /clear if selected skills or conversation history still do not fit."
-	skillSaveMessage    = skillActionNotice + " Skill selection could not be saved. Restart to reload the conversation, then use /clear if needed."
+	skillActionNotice     = "Some actions may already have completed. Check their results before continuing or repeating any action."
+	skillResetMessage     = skillActionNotice + " Skill guidance could not be loaded or restored. Check the installed skill files; use /clear if the selection cannot be restored."
+	skillRequestMessage   = skillActionNotice + " The skill request was invalid or exceeded the per-request limit. Ask again with valid skill names."
+	skillAnonymousMessage = skillActionNotice + " A previous skill selection cannot be identified. Use /clear, then request the needed skills again."
+	skillChangedMessage   = skillActionNotice + " Skill guidance changed and was refreshed automatically."
+	skillBudgetMessage    = skillActionNotice + " Skill guidance does not fit in the conversation. Review installed skills in ~/.goaster/artefacts/skills and retain their authentication guidance, workflow, safety, and any legacy AUTH.md authorization requirements; use /clear if selected skills or conversation history still do not fit."
+	skillSaveMessage      = skillActionNotice + " Skill selection could not be saved. Restart to reload the conversation, then use /clear if needed."
 
 	// Skill files are user-owned and can change while a model response is being
 	// processed. A small fixed bound keeps a writer that continually rewrites a
@@ -28,9 +29,18 @@ const (
 	skillRefreshLimitReply = "Skill guidance changed repeatedly during this request. No further tool was run. Some actions may have completed; check their results before repeating any action."
 )
 
+type skillFailureReason string
+
+const (
+	skillReasonInvalidRequest skillFailureReason = "invalid_request"
+	skillReasonRequestLimit   skillFailureReason = "request_limit"
+)
+
 type skillRecoveryError struct {
 	err     error
 	message string
+	stage   string
+	reason  string
 }
 
 func (err skillRecoveryError) Error() string { return err.err.Error() }
@@ -43,7 +53,24 @@ func skillRecovery(err error, message string) error {
 			break
 		}
 	}
-	return skillRecoveryError{err: err, message: message}
+	stage, reason := "load", "invalid_or_unavailable"
+	switch message {
+	case skillBudgetMessage:
+		stage, reason = "validate", "budget_exceeded"
+	case skillSaveMessage:
+		stage, reason = "checkpoint", "save_failed"
+	case skillAnonymousMessage:
+		stage, reason = "restore", "unknown_selection"
+	}
+	return skillRecoveryError{err: err, message: message, stage: stage, reason: reason}
+}
+
+func (err skillRecoveryError) DiagnosticFields() []diagnostics.Field {
+	return []diagnostics.Field{{Key: "skill_stage", Value: err.stage}, {Key: "skill_reason", Value: err.reason}}
+}
+
+func skillRequestFailure(err error, reason skillFailureReason) error {
+	return skillRecoveryError{err: err, message: skillRequestMessage, stage: "request", reason: string(reason)}
 }
 
 // SkillRecoveryMessage returns a fixed, safe explanation for a skill failure.
@@ -61,7 +88,7 @@ func SkillRecoveryMessage(err error) string {
 // protocol so arbitrary remote error text is never shown as recovery guidance.
 func IsSkillRecoveryMessage(message string) bool {
 	switch message {
-	case skillResetMessage, skillChangedMessage, skillBudgetMessage, skillSaveMessage:
+	case skillResetMessage, skillRequestMessage, skillAnonymousMessage, skillChangedMessage, skillBudgetMessage, skillSaveMessage:
 		return true
 	default:
 		return false
@@ -69,7 +96,7 @@ func IsSkillRecoveryMessage(message string) bool {
 }
 
 // A selection is context, never user authorization. An empty digest means
-// loading was interrupted or failed, so a later turn must stop safely.
+// loading was interrupted or failed and must be validated and checkpointed.
 type selectedSkill struct {
 	Name   string `json:"name"`
 	Digest string `json:"digest,omitempty"`
@@ -87,10 +114,6 @@ func skillDigest(content string) string {
 }
 
 func validSelectedSkills(selected []selectedSkill) bool {
-	// One extra pending entry records that the active-skill limit was hit.
-	if len(selected) > maxSessionSkills+1 {
-		return false
-	}
 	seen := make(map[string]bool, len(selected))
 	for i, skill := range selected {
 		// An unknown selection is a fail-closed marker for malformed or

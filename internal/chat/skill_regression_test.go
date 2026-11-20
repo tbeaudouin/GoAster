@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"goaster/internal/artefacts"
+	"goaster/internal/diagnostics"
 	"goaster/internal/localenv"
 )
 
@@ -518,5 +519,29 @@ func TestRefreshRemovesStaleLoadOutputFromContinuation(t *testing.T) {
 	session := NewSession(Config{Model: "gpt-test"}, newShellTestProvider(t, backend))
 	if reply, err := session.Reply(context.Background(), "use the skill"); err != nil || reply != "fresh answer" || requests.Load() != 3 {
 		t.Fatalf("refresh continuation = %q, %v, requests=%d", reply, err, requests.Load())
+	}
+}
+
+func TestLegacyAnonymousSelectionFailsWithSafeRecovery(t *testing.T) {
+	_, err := loadSelectedSkillSnapshot([]selectedSkill{{}})
+	if err == nil || SkillRecoveryMessage(err) != skillAnonymousMessage || !IsSkillRecoveryMessage(skillAnonymousMessage) {
+		t.Fatalf("anonymous recovery = %v, %q", err, SkillRecoveryMessage(err))
+	}
+	log := captureChatDiagnostics(t, func() { diagnostics.Error("chat.session.reply", err) })
+	if !strings.Contains(log, `skill_stage="restore"`) || !strings.Contains(log, `skill_reason="unknown_selection"`) {
+		t.Fatalf("diagnostic = %q", log)
+	}
+}
+
+func TestSkillFailureDiagnosticsRedactPrivateDetails(t *testing.T) {
+	err := skillRecovery(errors.New("private-name /private/path secret arguments"), skillResetMessage)
+	log := captureChatDiagnostics(t, func() { diagnostics.Error("chat.session.reply", err) })
+	if !strings.Contains(log, `skill_stage="load"`) || !strings.Contains(log, `skill_reason="invalid_or_unavailable"`) {
+		t.Fatalf("diagnostic = %q", log)
+	}
+	for _, private := range []string{"private-name", "/private/path", "secret", "arguments"} {
+		if strings.Contains(log, private) {
+			t.Fatalf("private detail in diagnostic: %q", log)
+		}
 	}
 }
