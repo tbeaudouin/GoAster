@@ -9,15 +9,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"goaster/internal/artefacts"
 	"goaster/internal/localenv"
 )
 
-func TestUnselectedSkillsAreNotInjectedAndSelectedChangesStopTools(t *testing.T) {
+func TestSelectedSkillChangesRefreshBetweenTurnsAndMidBatch(t *testing.T) {
 	setupSkillFixture(t)
 	root, err := artefacts.Root()
 	if err != nil {
@@ -36,6 +38,7 @@ func TestUnselectedSkillsAreNotInjectedAndSelectedChangesStopTools(t *testing.T)
 		}
 		if phase == "change" {
 			writeFixture(t, workflow, "CHANGED WORKFLOW")
+			phase = "done"
 		}
 		if phase == "batch" {
 			fmt.Fprint(w, `{"output":[{"type":"function_call","call_id":"first","name":"shell_execute","arguments":"{}"},{"type":"function_call","call_id":"second","name":"shell_execute","arguments":"{}"}]}`)
@@ -62,21 +65,250 @@ func TestUnselectedSkillsAreNotInjectedAndSelectedChangesStopTools(t *testing.T)
 	}
 	session := NewSession(Config{Model: "gpt-test"}, provider)
 	session.selectedSkills = []selectedSkill{{Name: "fixture-skill", Digest: skillDigest(content)}}
-	phase = "change"
-	if _, err := session.ReplyScheduled(context.Background(), "perform task"); !errors.Is(err, ErrSessionBusy) || SkillRecoveryMessage(err) != skillChangedMessage || executions != 1 {
-		t.Fatalf("changed selected skill reached tool: executions=%d error=%v", executions, err)
+	writeFixture(t, workflow, "CHANGED WORKFLOW")
+	phase = "direct"
+	if reply, err := session.ReplyScheduled(context.Background(), "perform task"); err != nil || reply != "done" || executions != 2 {
+		t.Fatalf("changed selected skill was not refreshed: executions=%d reply=%q error=%v", executions, reply, err)
+	}
+	content, err = artefacts.Load("fixture-skill")
+	if err != nil || session.selectedSkills[0].Digest != skillDigest(content) {
+		t.Fatalf("refreshed selected digest = %+v, content error=%v", session.selectedSkills, err)
 	}
 	writeFixture(t, workflow, "PRIVATE WORKFLOW TEXT")
 	phase = "batch"
 	provider.tools.byName["shell_execute"] = func(context.Context, string) (string, error) {
 		executions++
 		writeFixture(t, workflow, "CHANGED DURING FIRST ACTION")
+		phase = "done"
 		return "ok", nil
 	}
-	if _, err := session.ReplyScheduled(context.Background(), "perform two tasks"); err == nil || errors.Is(err, ErrSessionBusy) || SkillRecoveryMessage(err) != skillChangedMessage || executions != 2 {
-		t.Fatalf("changed guidance did not stop second action: executions=%d error=%v", executions, err)
+	if reply, err := session.ReplyScheduled(context.Background(), "perform two tasks"); err != nil || reply != "done" || executions != 3 {
+		t.Fatalf("changed guidance did not continue safely: executions=%d reply=%q error=%v", executions, reply, err)
 	}
 
+}
+
+func TestSelectedSkillRefreshPersistsThroughCompactionAndRestart(t *testing.T) {
+	setupSkillFixture(t)
+	root, err := artefacts.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := filepath.Join(root, "skills", "fixture-skill", "SKILL.md")
+	original, err := artefacts.Load("fixture-skill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathName := filepath.Join(t.TempDir(), "session.json")
+	provider := &summaryTestProvider{}
+	session, err := NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, pathName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.selectedSkills = []selectedSkill{{Name: "fixture-skill", Digest: skillDigest(original)}}
+	session.history = numberedHistory(maxSessionMessages - 1)
+	session.summary = "prior durable summary"
+	version, err := session.store.saveStateWithVersion(session.summary, session.history, session.selectedSkills, session.storeVersion, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.storeVersion = version
+	writeFixture(t, workflow, "REFRESHED WORKFLOW")
+
+	if reply, err := session.Reply(context.Background(), "continue after the refresh"); err != nil || !strings.Contains(reply, "answer to") {
+		t.Fatalf("compacted refreshed turn = %q, %v", reply, err)
+	}
+	loaded, err := NewSessionStoreAt(pathName).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := artefacts.Load("fixture-skill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Summary == "" || len(loaded.selectedSkills) != 1 || loaded.selectedSkills[0].Digest != skillDigest(refreshed) {
+		t.Fatalf("compaction lost refreshed durable state: summary=%q skills=%+v", loaded.Summary, loaded.selectedSkills)
+	}
+
+	restarted, err := NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, pathName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.selectedSkills) != 1 || restarted.selectedSkills[0].Digest != skillDigest(refreshed) || restarted.summary == "" {
+		t.Fatalf("restart lost refreshed selection or summary: summary=%q skills=%+v", restarted.summary, restarted.selectedSkills)
+	}
+}
+
+func TestMidTurnSkillRefreshIsBoundedWithoutExecutingStaleCalls(t *testing.T) {
+	setupSkillFixture(t)
+	root, err := artefacts.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := filepath.Join(root, "skills", "fixture-skill", "SKILL.md")
+	content, err := artefacts.Load("fixture-skill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		step := requests.Add(1)
+		writeFixture(t, workflow, fmt.Sprintf("CHURNED WORKFLOW %d", step))
+		fmt.Fprint(w, `{"output":[{"type":"function_call","call_id":"stale","name":"shell_execute","arguments":"{}"}]}`)
+	}))
+	defer backend.Close()
+	provider := newShellTestProvider(t, backend)
+	var executions atomic.Int32
+	provider.tools.byName["shell_execute"] = func(context.Context, string) (string, error) {
+		executions.Add(1)
+		return "must not run", nil
+	}
+	session := NewSession(Config{Model: "gpt-test"}, provider)
+	session.selectedSkills = []selectedSkill{{Name: "fixture-skill", Digest: skillDigest(content)}}
+	reply, err := session.Reply(context.Background(), "run the selected workflow")
+	if err != nil || reply != skillRefreshLimitReply {
+		t.Fatalf("bounded refresh = %q, %v", reply, err)
+	}
+	if requests.Load() > int32(maxSkillRefreshesPerTurn+1) || executions.Load() != 0 {
+		t.Fatalf("refresh churn was not bounded safely: requests=%d executions=%d", requests.Load(), executions.Load())
+	}
+	if strings.Contains(reply, "/clear") || SkillRecoveryMessage(err) != "" {
+		t.Fatalf("routine refresh churn became a manual recovery: reply=%q error=%v", reply, err)
+	}
+	current, loadErr := artefacts.Load("fixture-skill")
+	if loadErr != nil || session.selectedSkills[0].Digest != skillDigest(current) || session.skillCheckpointFailed || len(session.history) != 2 || session.history[1].Content != reply {
+		t.Fatalf("churn did not retain the current checkpoint and turn: load error=%v, checkpoint failed=%v, history=%+v", loadErr, session.skillCheckpointFailed, session.history)
+	}
+}
+
+func TestMidTurnSkillRefreshKeepsCompletedOutputAndDropsUnexecutedBatch(t *testing.T) {
+	setupSkillFixture(t)
+	root, err := artefacts.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := filepath.Join(root, "skills", "fixture-skill", "SKILL.md")
+	content, err := artefacts.Load("fixture-skill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		step := requests.Add(1)
+		if step == 1 {
+			fmt.Fprint(w, `{"output":[{"type":"function_call","call_id":"call_goaster_restored_skill_action","name":"shell_execute","arguments":"{}"},{"type":"function_call","call_id":"second","name":"shell_execute","arguments":"{}"}]}`)
+			return
+		}
+		var request codexRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		data, err := json.Marshal(request.Input)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		text := string(data)
+		if !strings.Contains(text, "first result") || !strings.Contains(text, "REFRESHED WORKFLOW") || step == 2 && strings.Contains(text, `"call_id":"second"`) {
+			t.Errorf("continuation input replayed stale batch or lost completed output: %s", text)
+		}
+		if step == 2 {
+			fmt.Fprint(w, `{"output":[{"type":"function_call","call_id":"second","name":"shell_execute","arguments":"{}"}]}`)
+			return
+		}
+		if !strings.Contains(text, "stale tool batch discarded") {
+			t.Error("repeated stale call did not receive a rejection output")
+		}
+		fmt.Fprint(w, `{"output_text":"continued with refreshed guidance"}`)
+	}))
+	defer backend.Close()
+	provider := newShellTestProvider(t, backend)
+	var calls atomic.Int32
+	provider.tools.byName["shell_execute"] = func(_ context.Context, arguments string) (string, error) {
+		calls.Add(1)
+		if arguments != "{}" {
+			t.Errorf("unexpected tool arguments: %s", arguments)
+		}
+		writeFixture(t, workflow, "REFRESHED WORKFLOW")
+		return "first result", nil
+	}
+	session := NewSession(Config{Model: "gpt-test"}, provider)
+	session.selectedSkills = []selectedSkill{{Name: "fixture-skill", Digest: skillDigest(content)}}
+	reply, err := session.Reply(context.Background(), "run two steps")
+	if err != nil || reply != "continued with refreshed guidance" {
+		t.Fatalf("mid-turn continuation = %q, %v", reply, err)
+	}
+	if calls.Load() != 1 || requests.Load() != 3 {
+		t.Fatalf("tool replay counts = calls %d requests %d", calls.Load(), requests.Load())
+	}
+}
+
+func TestSelectedSkillRefreshFailsClosedForMalformedOrDeletedFiles(t *testing.T) {
+	setupSkillFixture(t)
+	root, err := artefacts.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(root, "skills", "fixture-skill", "AUTH.md")
+	content, err := artefacts.Load("fixture-skill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	provider := providerFunc(func(context.Context, string, string) (string, error) {
+		calls++
+		return "unexpected", nil
+	})
+	session := NewSession(Config{Model: "gpt-test"}, provider)
+	session.selectedSkills = []selectedSkill{{Name: "fixture-skill", Digest: skillDigest(content)}}
+	if err := os.WriteFile(authPath, []byte("invalid UTF-8: \xff"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Reply(context.Background(), "continue"); err == nil || SkillRecoveryMessage(err) != skillResetMessage || calls != 0 {
+		t.Fatalf("malformed selected skill was not rejected safely: calls=%d error=%v", calls, err)
+	}
+	writeFixture(t, authPath, "FIXTURE AUTHENTICATION")
+	if err := os.Remove(authPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Reply(context.Background(), "continue"); err == nil || SkillRecoveryMessage(err) != skillResetMessage || calls != 0 {
+		t.Fatalf("deleted selected skill was not rejected safely: calls=%d error=%v", calls, err)
+	}
+}
+
+func TestSelectedSkillRefreshSaveFailureStopsBeforeTheModel(t *testing.T) {
+	setupSkillFixture(t)
+	root, err := artefacts.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := filepath.Join(root, "skills", "fixture-skill", "SKILL.md")
+	content, err := artefacts.Load("fixture-skill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathName := filepath.Join(t.TempDir(), "session.json")
+	calls := 0
+	provider := providerFunc(func(context.Context, string, string) (string, error) {
+		calls++
+		return "unexpected", nil
+	})
+	session, err := NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, pathName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.selectedSkills = []selectedSkill{{Name: "fixture-skill", Digest: skillDigest(content)}}
+	version, err := session.store.saveStateWithVersion("summary", nil, session.selectedSkills, session.storeVersion, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.storeVersion = version
+	writeFixture(t, workflow, "UPDATED WORKFLOW")
+	session.store.syncDirectory = func(string) error { return errors.New("refresh checkpoint unavailable") }
+	if _, err := session.Reply(context.Background(), "continue"); err == nil || SkillRecoveryMessage(err) != skillSaveMessage || calls != 0 {
+		t.Fatalf("refresh save failure was not actionable and safe: calls=%d error=%v", calls, err)
+	}
 }
 
 func TestUnselectedSkillContentsAreLoadedOnlyOnDemand(t *testing.T) {
@@ -222,4 +454,69 @@ func TestTerminalShowsSkillRecoveryDetails(t *testing.T) {
 		t.Fatalf("scheduled recovery output = %q, calls=%d, error=%v", output.String(), calls, err)
 	}
 
+}
+
+func TestRefreshReplacesPriorLoadOutputAndKeepsCompletedCalls(t *testing.T) {
+	input := []codexInputItem{
+		{Type: "function_call", CallID: "call_goaster_restored_skill_0", Name: "load_skill", restoredSkill: true},
+		{Type: "function_call_output", CallID: "call_goaster_restored_skill_0", Output: "OLD SNAPSHOT AUTH", restoredSkill: true},
+		{Type: "function_call", CallID: "call_goaster_restored_skill_load", Name: "load_skill"},
+		{Type: "function_call_output", CallID: "call_goaster_restored_skill_load", Output: "OLD AUTH"},
+		{Type: "function_call", CallID: "action", Name: "shell_execute"},
+		{Type: "function_call_output", CallID: "action", Output: "completed result"},
+	}
+	fresh := []codexInputItem{
+		{Type: "function_call", CallID: "call_goaster_restored_skill_0", Name: "load_skill", restoredSkill: true},
+		{Type: "function_call_output", CallID: "call_goaster_restored_skill_0", Output: "NEW AUTH", restoredSkill: true},
+	}
+	result := replaceRestoredSkillItems(input, fresh)
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "OLD") || strings.Contains(text, "restoredSkill") || !strings.Contains(text, "NEW AUTH") || !strings.Contains(text, "completed result") || len(result) != 6 || result[3].CallID != "call_goaster_restored_skill_load" || result[3].Output == "" {
+		t.Fatalf("refresh lost protocol pairs or retained stale guidance: %s", text)
+	}
+}
+
+func TestRefreshRemovesStaleLoadOutputFromContinuation(t *testing.T) {
+	setupSkillFixture(t)
+	root, err := artefacts.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := filepath.Join(root, "skills", "fixture-skill", "AUTH.md")
+	var requests atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			fmt.Fprint(w, `{"output":[{"type":"function_call","call_id":"load-original","name":"load_skill","arguments":"{\"name\":\"fixture-skill\"}"}]}`)
+		case 2:
+			writeFixture(t, auth, "FRESH AUTH GUIDANCE")
+			fmt.Fprint(w, `{"output_text":"outdated answer"}`)
+		case 3:
+			var request codexRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+				return
+			}
+			data, err := json.Marshal(request.Input)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if strings.Contains(string(data), "FIXTURE AUTHENTICATION") || !strings.Contains(string(data), "FRESH AUTH GUIDANCE") {
+				t.Error("continuation did not replace old authentication guidance")
+			}
+			fmt.Fprint(w, `{"output_text":"fresh answer"}`)
+		default:
+			t.Error("unexpected request")
+		}
+	}))
+	defer backend.Close()
+	session := NewSession(Config{Model: "gpt-test"}, newShellTestProvider(t, backend))
+	if reply, err := session.Reply(context.Background(), "use the skill"); err != nil || reply != "fresh answer" || requests.Load() != 3 {
+		t.Fatalf("refresh continuation = %q, %v, requests=%d", reply, err, requests.Load())
+	}
 }

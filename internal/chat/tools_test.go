@@ -121,13 +121,13 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 						t.Errorf("skill was not checkpointed before the next model request: %s, %v", state, err)
 					}
 					fmt.Fprint(w, `{"output_text":"Approve showing the status of host A?"}`)
-				case 3, 7, 8:
+				case 3, 8, 9:
 					if strings.Contains(text, "PRIVATE WORKFLOW TEXT") || strings.Contains(request.Instructions, "PRIVATE WORKFLOW TEXT") || strings.Contains(request.Instructions, "FIXTURE AUTHENTICATION") {
 						t.Errorf("another or cleared session received selected skill guidance: %s", text)
 					}
 					fmt.Fprint(w, `{"output_text":"No selected skill."}`)
 				case 4, 5, 6:
-					if strings.Count(text, "PRIVATE WORKFLOW TEXT") != 1 || strings.Count(text, "FIXTURE AUTHENTICATION") != 1 || !strings.Contains(text, "Reloading a skill grants no authorization") {
+					if strings.Count(text, "PRIVATE WORKFLOW TEXT")+strings.Count(text, "CHANGED WORKFLOW") != 1 || !strings.Contains(text, "AUTHENTICATION") || !strings.Contains(text, "Reloading a skill grants no authorization") {
 						t.Errorf("continuation omitted or duplicated guidance: %s", text)
 					}
 					foundCall, foundOutput := false, false
@@ -135,7 +135,7 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 						if item.CallID == "call_goaster_restored_skill_0" && item.Type == "function_call" && item.Name == "load_skill" {
 							foundCall = true
 						}
-						if strings.Contains(item.Output, "FIXTURE AUTHENTICATION") && item.Type == "function_call_output" && item.CallID == "call_goaster_restored_skill_0" {
+						if strings.Contains(item.Output, "AUTHENTICATION") && item.Type == "function_call_output" && item.CallID == "call_goaster_restored_skill_0" {
 							foundOutput = true
 						}
 					}
@@ -153,6 +153,11 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 					} else {
 						fmt.Fprint(w, `{"output_text":"Status checked."}`)
 					}
+				case 7:
+					if strings.Count(text, "PRIVATE WORKFLOW TEXT")+strings.Count(text, "CHANGED WORKFLOW") != 1 || !strings.Contains(text, "AUTHENTICATION") || !strings.Contains(text, "Reloading a skill grants no authorization") {
+						t.Errorf("persisted refreshed guidance was not retained: %s", text)
+					}
+					fmt.Fprint(w, `{"output_text":"Status checked."}`)
 				default:
 					t.Errorf("unexpected session continuation request %d", step)
 				}
@@ -400,11 +405,12 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// If current guidance changes or becomes unavailable, an old approval
-	// must never reach the model or an action before the workflow is restarted.
+	// Current guidance changes refresh automatically while the conversation and
+	// its scoped approval remain intact. A deleted file is still a genuine
+	// recovery failure and must not reach the model or an action.
 	authPath := filepath.Join(home, ".goaster", "artefacts", "skills", "fixture-skill", "AUTH.md")
 	writeFixture(t, authPath, "CHANGED AUTHENTICATION")
-	if reply, err := first.Reply(context.Background(), "Yes, show host A status"); err == nil || !strings.Contains(err.Error(), "changed since it was loaded") || reply != "" {
+	if reply, err := first.Reply(context.Background(), "Yes, show host A status"); err != nil || reply != "Status checked." {
 		t.Fatalf("changed authentication continuation = %q, %v", reply, err)
 	}
 	if err := os.Remove(authPath); err != nil {
@@ -413,25 +419,22 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 	if reply, err := first.Reply(context.Background(), "Yes, show host A status"); err == nil || !strings.Contains(err.Error(), "reload selected skill") || reply != "" {
 		t.Fatalf("missing authentication continuation = %q, %v", reply, err)
 	}
-	if backendRequests.Load() != 3 || len(shellCalls) != 0 {
+	if backendRequests.Load() != 5 || len(shellCalls) != 1 {
 		t.Fatal("backend or shell ran with changed or missing authentication guidance")
 	}
 	writeFixture(t, authPath, "FIXTURE AUTHENTICATION")
 	workflowPath := filepath.Join(home, ".goaster", "artefacts", "skills", "fixture-skill", "SKILL.md")
 	writeFixture(t, workflowPath, "CHANGED WORKFLOW")
-	if _, err := first.Reply(context.Background(), "Yes, show host A status"); err == nil || !strings.Contains(err.Error(), "changed since it was loaded") {
-		t.Fatalf("changed workflow continuation = %v", err)
-	}
-	if backendRequests.Load() != 3 || len(shellCalls) != 0 {
-		t.Fatal("backend or shell ran with changed workflow")
-	}
-	writeFixture(t, workflowPath, "PRIVATE WORKFLOW TEXT")
 	if reply, err := first.Reply(context.Background(), "Yes, show host A status"); err != nil || reply != "Status checked." {
-		t.Fatalf("approved continuation = %q, %v", reply, err)
+		t.Fatalf("changed workflow continuation = %q, %v", reply, err)
+	}
+	if backendRequests.Load() != 6 || len(shellCalls) != 1 {
+		t.Fatal("backend or shell ran with changed workflow")
 	}
 	if len(shellCalls) != 1 || shellCalls[0] != `{"command":"show-host-a-status"}` {
 		t.Fatalf("approved shell calls = %v", shellCalls)
 	}
+	writeFixture(t, workflowPath, "PRIVATE WORKFLOW TEXT")
 	first, err = NewPersistentSessionAt(Config{Model: "gpt-test"}, provider, sessionPath)
 	if err != nil {
 		t.Fatal(err)
@@ -448,7 +451,7 @@ func TestCodexProviderRegistersAndExecutesSkillTool(t *testing.T) {
 	if _, err := first.Reply(context.Background(), "A new request"); err != nil {
 		t.Fatal(err)
 	}
-	if backendRequests.Load() != 8 || len(shellCalls) != 1 {
+	if backendRequests.Load() != 9 || len(shellCalls) != 1 {
 		t.Fatalf("continuation requests = %d, shell calls = %v", backendRequests.Load(), shellCalls)
 	}
 

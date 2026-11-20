@@ -16,9 +16,16 @@ const maxSessionSkills = 10
 const (
 	skillActionNotice   = "Some actions may already have completed. Check their results before continuing or repeating any action."
 	skillResetMessage   = skillActionNotice + " Skill guidance could not be loaded or restored. Check the installed skill files; use /clear if the selection cannot be restored."
-	skillChangedMessage = skillActionNotice + " Skill guidance changed. Restore the original files or use /clear to discard the selection."
+	skillChangedMessage = skillActionNotice + " Skill guidance changed and was refreshed automatically."
 	skillBudgetMessage  = skillActionNotice + " Skill guidance does not fit in the conversation. Review installed skills in ~/.goaster/artefacts/skills and retain their authentication guidance, workflow, safety, and any legacy AUTH.md authorization requirements; use /clear if selected skills or conversation history still do not fit."
 	skillSaveMessage    = skillActionNotice + " Skill selection could not be saved. Restart to reload the conversation, then use /clear if needed."
+
+	// Skill files are user-owned and can change while a model response is being
+	// processed. A small fixed bound keeps a writer that continually rewrites a
+	// skill from turning one user turn into an unbounded stream of model calls.
+	maxSkillRefreshesPerTurn = 3
+
+	skillRefreshLimitReply = "Skill guidance changed repeatedly during this request. No further tool was run. Some actions may have completed; check their results before repeating any action."
 )
 
 type skillRecoveryError struct {

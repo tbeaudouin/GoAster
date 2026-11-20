@@ -920,6 +920,9 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		}
 		return "", err
 	}
+	if err := s.refreshSelectedSkillGuidance(scheduled); err != nil {
+		return "", err
+	}
 	if s.memory != nil {
 		if s.memory.initErr != nil {
 			if scheduled {
@@ -1075,41 +1078,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		selected: func() []selectedSkill {
 			return append([]selectedSkill(nil), s.selectedSkills...)
 		},
-		remember: func(next selectedSkill) error {
-			selected := append([]selectedSkill(nil), s.selectedSkills...)
-			found := false
-			for i, current := range selected {
-				if current.Name == next.Name {
-					if current.Digest != "" && current.Digest != next.Digest {
-						return errors.New("selected skill changed while loading; use /clear to start a new conversation")
-					}
-					selected[i], found = next, true
-					break
-				}
-			}
-			if !found {
-				selected = append(selected, next)
-			}
-			if !validSelectedSkills(selected) {
-				return errors.New("invalid skill selection")
-			}
-			if s.store != nil {
-				version, err := s.store.saveStateWithVersion(s.summary, s.history, selected, s.storeVersion, true)
-				if err != nil {
-					s.skillCheckpointFailed = true
-					return fatalRequestError(skillRecovery(fmt.Errorf("save selected skill: %w", err), skillSaveMessage))
-				}
-				s.storeVersion = version
-				if s.migrationDiagnosticsPending {
-					s.migrationDiagnosticsPending = false
-				}
-			}
-			s.selectedSkills = selected
-			if len(selected) > maxSessionSkills {
-				return errors.New("too many selected skills; use /clear to start a new conversation")
-			}
-			return nil
-		},
+		remember: s.rememberSelectedSkill,
 	})
 	actionStarted := false
 	if scheduled && tracksTools {
@@ -1225,6 +1194,59 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	s.migrationDiagnosticsPending = false
 	s.recoveryPending = false
 	return historyReply, nil
+}
+
+// refreshSelectedSkillGuidance accepts ordinary changes to user-owned skill
+// files before a turn is sent. The conversation, summary, and completed
+// history remain untouched; only the durable freshness digest is checkpointed.
+func (s *Session) refreshSelectedSkillGuidance(scheduled bool) error {
+	if len(s.selectedSkills) == 0 {
+		return nil
+	}
+	_, err := refreshSelectedSkillSnapshot(skillSessionContext{remember: s.rememberSelectedSkill}, s.selectedSkills)
+	if err == nil {
+		return nil
+	}
+	if scheduled {
+		return errors.Join(ErrSessionBusy, err)
+	}
+	return recoverableRequestError(err)
+}
+
+// rememberSelectedSkill owns the durable selection checkpoint shared by
+// model-requested loads and automatic freshness refreshes. A changed digest is
+// a replacement of the selected guidance, not a conflict with the conversation.
+func (s *Session) rememberSelectedSkill(next selectedSkill) error {
+	selected := append([]selectedSkill(nil), s.selectedSkills...)
+	found := false
+	for index, current := range selected {
+		if current.Name == next.Name {
+			selected[index], found = next, true
+			break
+		}
+	}
+	if !found {
+		selected = append(selected, next)
+	}
+	if !validSelectedSkills(selected) {
+		return errors.New("invalid skill selection")
+	}
+	if s.store != nil {
+		version, err := s.store.saveStateWithVersion(s.summary, s.history, selected, s.storeVersion, true)
+		if err != nil {
+			s.skillCheckpointFailed = true
+			return fatalRequestError(skillRecovery(fmt.Errorf("save selected skill: %w", err), skillSaveMessage))
+		}
+		s.storeVersion = version
+		if s.migrationDiagnosticsPending {
+			s.migrationDiagnosticsPending = false
+		}
+	}
+	s.selectedSkills = selected
+	if len(selected) > maxSessionSkills {
+		return errors.New("too many selected skills")
+	}
+	return nil
 }
 
 func shouldSummarize(summary string, messages []ChatMessage, overhead int) bool {
