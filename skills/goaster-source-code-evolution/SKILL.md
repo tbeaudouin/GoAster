@@ -2,7 +2,12 @@
 
 Use this skill to evolve GoAster's own source code and safely update its active
 runtime. Before making source changes, ask the user: "Could a simple skill meet
-your need instead of changing GoAster's source code?"
+your need instead of changing GoAster's source code?" After that question is
+answered, offer once the optional research choice in
+[modify-goaster-source-code](../modify-goaster-source-code/SKILL.md): shared
+contributions, other agents' implementations, both, or neither. If that offer
+was already made, do not repeat it. Research may be skipped and never blocks
+approved implementation.
 
 ## Workflow
 

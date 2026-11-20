@@ -8,4 +8,10 @@ Each skill requires three files:
 
 When creating or modifying a skill, keep all three files aligned. Use simple, direct, concise instructions like the default skills.
 
+Before creating a new skill, suggest to the user that they may optionally
+search [goaster-find-contributions](../goaster-find-contributions/SKILL.md) for
+shared GoAster skills that may help. Search only if the user chooses it; the
+user may skip it. Do not implicitly decide to search, install, or adopt a
+contribution automatically.
+
 Do not list every edge case, fallback, or constraint. Trust the model to apply its own safeguards when using the skill.

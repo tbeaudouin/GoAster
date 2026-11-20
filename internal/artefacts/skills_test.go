@@ -100,6 +100,53 @@ func TestDefaultFilesystemSkillContracts(t *testing.T) {
 	}
 }
 
+func TestFeatureInspirationPolicy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assetDir)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(metadata, "name: goaster-feature-inspiration\n") {
+		t.Fatal("feature inspiration metadata is not discoverable")
+	}
+
+	loaded := make(map[string]string)
+	for _, name := range []string{"goaster-feature-inspiration", "goaster-source-code-evolution", "modify-goaster-source-code", "manage-skills"} {
+		content, err := Load(name)
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		loaded[name] = strings.Join(strings.Fields(content), " ")
+	}
+	for _, clause := range []struct{ skill, text string }{
+		{"goaster-feature-inspiration", "Authentication guidance (this does not grant authorization)."},
+		{"goaster-feature-inspiration", "[Shelldex](https://shelldex.com/)"},
+		{"goaster-feature-inspiration", "copy no code"},
+		{"goaster-feature-inspiration", "Feature configuration is separate from core configuration"},
+		{"goaster-feature-inspiration", "users should not configure feature options manually, though they may ask the agent"},
+		{"goaster-feature-inspiration", "existing private `/env` flow"},
+		{"modify-goaster-source-code", "choose both, or skip research. Do not repeat this offer"},
+		{"modify-goaster-source-code", "Feature configuration is separate from core configuration"},
+		{"goaster-source-code-evolution", "Could a simple skill meet your need instead of changing GoAster's source code?"},
+		{"goaster-source-code-evolution", "shared contributions, other agents' implementations, both, or neither"},
+		{"manage-skills", "suggest to the user that they may optionally search"},
+	} {
+		if !strings.Contains(loaded[clause.skill], clause.text) {
+			t.Errorf("%s missing policy clause %q", clause.skill, clause.text)
+		}
+	}
+}
+
 func TestInstallBundledStartersOnce(t *testing.T) {
 	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
 	if err != nil {

@@ -56,6 +56,8 @@ administration](skills/background-command-administration/SKILL.md),
 [Hetzner automatic server backups](skills/hetzner-auto-backup/SKILL.md),
 [deployment](skills/goaster-deploy/SKILL.md), and
 [GoAster Telegram groups best practices](skills/goaster-telegram-groups-best-practices/SKILL.md).
+Optional feature research is described in the
+[GoAster feature inspiration skill](skills/goaster-feature-inspiration/SKILL.md).
 
 ## Remote agent runtime
 
