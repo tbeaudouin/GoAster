@@ -126,10 +126,10 @@ func TestTaskPlanningDefaultSkill(t *testing.T) {
 	for _, phrase := range []string{
 		"Use whenever the user asks to plan a task, project, or implementation.",
 		"[project-memory](../project-memory/SKILL.md)",
-		"Create or update PLAN.md beside those notes.",
-		"goal, ordered steps, and how to check completion",
-		"Reuse an existing relevant plan rather than creating duplicates.",
-		"Tell the user where the plan is saved.",
+		"Save `PLAN-<task-name>.md` beside them, using a short lowercase hyphenated task name.",
+		"Reuse or update only a plan for that same task.",
+		"Keep it concise: goal, steps, and completion checks.",
+		"Tell the user the path.",
 		"Planning does not authorize implementation.",
 	} {
 		if !strings.Contains(content, phrase) {

@@ -2,9 +2,9 @@
 
 ## Scope
 
-Add a concise `task-planning` default skill for user-requested task, project, or implementation plans. Load `project-memory`, save or update `PLAN.md` alongside related notes, avoid duplicate plans, report the saved path, and distinguish planning from implementation approval. No runtime code changes.
+Add a concise `task-planning` default skill for user-requested plans. Load `project-memory`, save or update `PLAN-<task-name>.md` alongside project notes using a short lowercase hyphenated task name, reuse a plan only for the same task, report the saved path, and distinguish planning from implementation approval. No runtime code changes.
 
-## Results
+## Historical results (before named-plan correction)
 
 - Offline `go test ./internal/artefacts -run '^(TestTaskPlanningDefaultSkill|TestDefaultFilesystemSkillContracts)$' -count=1`: PASS. Covers starter installation, discovery, loading, guidance, and existing filesystem contracts.
 - Offline `go vet ./internal/artefacts`: PASS.
@@ -14,6 +14,11 @@ Add a concise `task-planning` default skill for user-requested task, project, or
 
 Go commands used `/usr/local/go/bin/go` with `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off`. The initial system Go invocation could not verify its selected toolchain offline; the installed local toolchain resolved this.
 
-## Remaining gaps
+## Follow-up checks for named-plan correction
 
-No live model planning scenario, deployment, runtime upgrade, or installed-skill reconciliation performed. Full Go suite was not rerun for this skill-only addition. Existing installed skills remain unchanged.
+- PASS: `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off /usr/local/go/bin/go test ./internal/artefacts -run ^TestTaskPlanningDefaultSkill$ -count=1` checks the updated skill assertions.
+- PASS: `git diff --check` for whitespace errors.
+- Final read-only review: SATISFIED.
+- The focused test checks the skill text through starter installation, discovery, and loading; no live model planning scenario is covered.
+
+No deployment, runtime upgrade, installed-skill reconciliation, or full-suite rerun performed for this correction. Existing installed skills remain unchanged.
