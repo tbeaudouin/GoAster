@@ -277,19 +277,6 @@ func checkScheduledTurnWaitsForRecoveredConversation(t interface {
 			t.Fatalf("acknowledged recovery did not resume: calls=%d error=%v", calls-before, err)
 		}
 	}
-	calls := 0
-	provider := providerFunc(func(context.Context, string, string) (string, error) {
-		calls++
-		return "ok", nil
-	})
-	checkpoint, err := NewPersistentSessionAt(Config{Model: "test"}, provider, filepath.Join(t.TempDir(), "session.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpoint.skillCheckpointFailed = true
-	if _, err := checkpoint.ReplyScheduled(context.Background(), "scheduled"); !errors.Is(err, ErrSessionBusy) || calls != 0 || !checkpoint.skillCheckpointFailed {
-		t.Fatalf("absent session forgot failed checkpoint: calls=%d error=%v", calls, err)
-	}
 }
 
 func TestSessionStoreFailedSaveLeavesPreviousStateAndNoTempFile(t *testing.T) {

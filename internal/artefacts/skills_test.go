@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -641,5 +642,25 @@ func TestStarterInstallationReportsFinalDirectorySyncFailure(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(root, ".skills-installing")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("completed installation lock: %v", err)
+	}
+}
+
+func TestDiscoverMoreThanOneHundredSkills(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 101; i++ {
+		name := fmt.Sprintf("skill-%03d", i)
+		dir := filepath.Join(root, "skills", name)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		for file, content := range map[string]string{"META.md": "name: " + name + "\ndescription: Test skill.\n", "SKILL.md": "workflow", "AUTH.md": "authentication"} {
+			if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	metadata, err := discoverAt(root)
+	if err != nil || !strings.Contains(metadata, "name: skill-100") {
+		t.Fatalf("discovery failed: %v", err)
 	}
 }

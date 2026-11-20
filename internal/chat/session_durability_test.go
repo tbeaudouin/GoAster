@@ -351,7 +351,7 @@ func TestSessionFailedSaveDoesNotRetainUndisplayedTurn(t *testing.T) {
 			if compact {
 				session.history = numberedHistory(maxSessionMessages)
 			}
-			version, err := session.store.saveStateWithVersion(session.summary, session.history, session.selectedSkills, session.storeVersion, true)
+			version, err := session.store.saveStateWithVersion(session.summary, session.history, session.storeVersion, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -392,7 +392,7 @@ func TestSessionFailedSaveDoesNotRetainUndisplayedTurn(t *testing.T) {
 			}
 			if compact {
 				session.history = numberedHistory(maxSessionMessages)
-				version, err := session.store.saveStateWithVersion(session.summary, session.history, session.selectedSkills, session.storeVersion, true)
+				version, err := session.store.saveStateWithVersion(session.summary, session.history, session.storeVersion, true)
 				if err != nil {
 					t.Fatal(err)
 				}

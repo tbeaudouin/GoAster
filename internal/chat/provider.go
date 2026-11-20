@@ -684,8 +684,6 @@ type Session struct {
 	summary                     string
 	migrationDiagnostics        []MigrationDiagnostic
 	migrationDiagnosticsPending bool
-	selectedSkills              []selectedSkill
-	skillCheckpointFailed       bool
 	recoveryPending             bool
 	store                       *SessionStore
 	storeVersion                [sha256.Size]byte // Expected persisted version for this session.
@@ -878,8 +876,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 				s.history = cloneChatMessages(loaded.Messages)
 				s.summary = loaded.Summary
 				s.migrationDiagnostics = cloneMigrationDiagnostics(loaded.MigrationDiagnostics)
-				s.selectedSkills = append([]selectedSkill(nil), loaded.selectedSkills...)
-				s.skillCheckpointFailed = false
+
 				s.recoveryPending = false
 			}
 		}
@@ -895,7 +892,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			return "", fatalRequestError(errors.Join(errConversationStateChanged, errMigrationDiagnosticsPending))
 		}
 		if s.store != nil {
-			version, err := s.store.saveStateWithVersionAndDiagnostics("", nil, nil, s.storeVersion, true, nil, true)
+			version, err := s.store.saveStateWithVersionAndDiagnostics("", nil, s.storeVersion, true, nil, true)
 			if err != nil {
 				return "", fatalRequestError(conversationSaveError{operation: "save cleared conversation state", cause: err})
 			}
@@ -904,24 +901,13 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		s.history = nil
 		s.summary = ""
 		s.migrationDiagnostics = nil
-		s.selectedSkills = nil
-		s.skillCheckpointFailed = false
+
 		s.recoveryPending = false
 		s.contextNotice = ""
 		return "Conversation history cleared.", nil
 	}
 	if s.recoveryPending {
 		return "", recoverableRequestError(ErrConversationRecovery)
-	}
-	if s.skillCheckpointFailed {
-		err := fatalRequestError(skillRecovery(errors.New("skill selection could not be saved; restart to reload the conversation"), skillSaveMessage))
-		if scheduled {
-			return "", errors.Join(ErrSessionBusy, err)
-		}
-		return "", err
-	}
-	if err := s.refreshSelectedSkillGuidance(scheduled); err != nil {
-		return "", err
 	}
 	if s.memory != nil {
 		if s.memory.initErr != nil {
@@ -945,11 +931,11 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	overhead := 0
 	tracksTools := false
 	if provider, ok := s.provider.(interface {
-		skillContextOverhead(context.Context, []selectedSkill) (int, error)
+		skillContextOverhead(context.Context) (int, error)
 	}); ok {
 		tracksTools = true
 		var err error
-		overhead, err = provider.skillContextOverhead(replyContext, s.selectedSkills)
+		overhead, err = provider.skillContextOverhead(replyContext)
 		if err != nil {
 			if scheduled {
 				return "", errors.Join(ErrSessionBusy, err)
@@ -1008,7 +994,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			// request, without recording a user turn that might fail.
 			previousTurns := cloneChatMessages(candidate[:len(candidate)-1])
 			if s.store != nil {
-				version, saveErr := s.store.saveStateWithVersion(summary, previousTurns, s.selectedSkills, s.storeVersion, true)
+				version, saveErr := s.store.saveStateWithVersion(summary, previousTurns, s.storeVersion, true)
 				if saveErr != nil {
 					return "", fatalRequestError(conversationSaveError{operation: "save conversation state", cause: saveErr})
 				}
@@ -1072,13 +1058,20 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		}
 	}
 
-	// The session owns selections, even when several sessions share a provider.
-	// Checkpoint before a selected skill can lead to another tool call.
+	// Checkpoint guidance with the current user turn before any later tool action.
 	replyContext = context.WithValue(replyContext, skillSessionKey{}, skillSessionContext{
-		selected: func() []selectedSkill {
-			return append([]selectedSkill(nil), s.selectedSkills...)
+		remember: func(content string) error {
+			bounded = append(bounded, ChatMessage{Role: "guidance", Content: content})
+			if s.store != nil {
+				version, err := s.store.saveStateWithVersion(summary, bounded, s.storeVersion, true)
+				if err != nil {
+					return fatalRequestError(conversationSaveError{operation: "save skill guidance", cause: err})
+				}
+				s.storeVersion = version
+			}
+			s.summary, s.history = summary, cloneChatMessages(bounded)
+			return nil
 		},
-		remember: s.rememberSelectedSkill,
 	})
 	actionStarted := false
 	if scheduled && tracksTools {
@@ -1091,7 +1084,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		if s.store != nil {
 			s.migrationDiagnosticsPending = true
 			s.store.setPendingMigrationDiagnostics(safe)
-			version, err := s.store.saveStateWithVersionAndDiagnostics(s.summary, s.history, s.selectedSkills, s.storeVersion, true, safe, true)
+			version, err := s.store.saveStateWithVersionAndDiagnostics(s.summary, s.history, s.storeVersion, true, safe, true)
 			if err != nil {
 				return conversationSaveError{operation: "save migration diagnostic checkpoint", cause: err}
 			}
@@ -1182,7 +1175,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		s.contextNotice = contextTrimNotice
 	}
 	if s.store != nil {
-		version, saveErr := s.store.saveStateWithVersionAndDiagnostics(summary, completed, s.selectedSkills, s.storeVersion, true, turnMigrationDiagnostics, true)
+		version, saveErr := s.store.saveStateWithVersionAndDiagnostics(summary, completed, s.storeVersion, true, turnMigrationDiagnostics, true)
 		if saveErr != nil {
 			return "", fatalRequestError(conversationSaveError{operation: "save conversation state", cause: saveErr})
 		}
@@ -1194,56 +1187,6 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	s.migrationDiagnosticsPending = false
 	s.recoveryPending = false
 	return historyReply, nil
-}
-
-// refreshSelectedSkillGuidance accepts ordinary changes to user-owned skill
-// files before a turn is sent. The conversation, summary, and completed
-// history remain untouched; only the durable freshness digest is checkpointed.
-func (s *Session) refreshSelectedSkillGuidance(scheduled bool) error {
-	if len(s.selectedSkills) == 0 {
-		return nil
-	}
-	_, err := refreshSelectedSkillSnapshot(skillSessionContext{remember: s.rememberSelectedSkill}, s.selectedSkills)
-	if err == nil {
-		return nil
-	}
-	if scheduled {
-		return errors.Join(ErrSessionBusy, err)
-	}
-	return recoverableRequestError(err)
-}
-
-// rememberSelectedSkill owns the durable selection checkpoint shared by
-// model-requested loads and automatic freshness refreshes. A changed digest is
-// a replacement of the selected guidance, not a conflict with the conversation.
-func (s *Session) rememberSelectedSkill(next selectedSkill) error {
-	selected := append([]selectedSkill(nil), s.selectedSkills...)
-	found := false
-	for index, current := range selected {
-		if current.Name == next.Name {
-			selected[index], found = next, true
-			break
-		}
-	}
-	if !found {
-		selected = append(selected, next)
-	}
-	if !validSelectedSkills(selected) {
-		return errors.New("invalid skill selection")
-	}
-	if s.store != nil {
-		version, err := s.store.saveStateWithVersion(s.summary, s.history, selected, s.storeVersion, true)
-		if err != nil {
-			s.skillCheckpointFailed = true
-			return fatalRequestError(skillRecovery(fmt.Errorf("save selected skill: %w", err), skillSaveMessage))
-		}
-		s.storeVersion = version
-		if s.migrationDiagnosticsPending {
-			s.migrationDiagnosticsPending = false
-		}
-	}
-	s.selectedSkills = selected
-	return nil
 }
 
 func shouldSummarize(summary string, messages []ChatMessage, overhead int) bool {

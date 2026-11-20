@@ -1,13 +1,13 @@
 # Skill selection recovery validation — 2026-11-20
 
-Named pending selections are reloaded with complete current guidance and their digests checkpointed before the model or tools run. Existing history and summary remain intact. A legacy anonymous marker cannot identify the missing guidance, so the fixed recovery message asks the user to check completed actions, use `/clear`, and request the skills again. Invalid and excessive new requests do not create anonymous markers. Selection count no longer has a lifetime cap; per-request tool limits, skill bytes, context and serialized state limits remain. Guidance and its digest do not confer authorization; checkpoint failures still stop the session. Diagnostics use fixed skill stage and reason fields without names, paths, content or arguments.
+Full loaded skill guidance is stored in ordered conversation history, passed to later turns, and included in normal summarization. Explicit loads append the current content; no selected-skill registry or automatic refresh is used. Legacy `selected_skills` values are ignored while the saved summary and messages remain available. Invalid or unavailable skills produce a normal tool error. Per-file, actual model-context, conversation, and storage size limits still apply; there is no runtime skill-count cap. Failed loads end the current turn through the normal diagnostic path but do not poison later turns.
 
-Offline commands used Go 1.25.13 from the locally installed toolchain with `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off`:
+Subsequent independent reviews and additional race/baseline evidence are recorded in `skill-context-review-20261120.md` and `skill-context-final-review-20261120.md`. Both reviews found the final implementation ready; the three full-suite failures were reproduced on unchanged main `a53599a`.
 
-- `go test ./internal/chat ./internal/telegram ./internal/diagnostics` — passed.
-- `go test ./internal/chat -run 'TestCodexProviderRegistersAndExecutesSkillTool|TestLegacyAnonymousSelectionFailsWithSafeRecovery|TestSkillFailureDiagnosticsRedactPrivateDetails' -count=1` — passed.
-- `go test ./...` — failed in unrelated starter content expectations: `TestAgentPromptUsesRuntimeSkillsAndMemorySetup`, `TestFeatureInspirationPolicy`, and `TestInstallBundledStartersOnce`; the chat, Telegram and diagnostics packages passed.
+Offline validation used `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off` and `/root/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.13.linux-amd64/bin/go`:
+
+- `go test ./internal/chat -count=1 -timeout 300s` — passed. Coverage includes eleven distinct skill loads, restart with full guidance, explicit reload after a change, bad loads followed by another turn, and compaction with legacy pending markers.
+- `go test ./... -count=1 -timeout 300s` — failed: `cmd/goaster-agent` `TestAgentPromptUsesRuntimeSkillsAndMemorySetup`, and `internal/artefacts` `TestFeatureInspirationPolicy` and `TestInstallBundledStartersOnce` fail on existing bundled starter content expectations. `internal/chat` and all other tested packages passed.
 - `go vet ./...` — passed.
-- The system Go 1.22.2 could not run the module, which requires Go 1.25.
 
-These are offline tests against source and local fixtures; no installed binary, deployed service, production state, or live provider was changed or validated. Legacy anonymous selections require `/clear` because their requested guidance is unknowable. The full suite is not green due to the starter-content failures above.
+These are offline source and fixture checks; no runtime or deployed service was changed.

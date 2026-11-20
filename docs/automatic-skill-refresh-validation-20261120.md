@@ -1,3 +1,5 @@
+> Superseded by [skill selection recovery validation](skill-selection-recovery-validation-20261120.md). Automatic refresh, selected-skill registries, and digest checkpoints described below no longer reflect the implementation.
+
 # Automatic skill guidance refresh validation - 2026-11-20
 
 This change keeps the existing conversation, summary, and authorization context when a selected user-owned skill changes. Before a turn, the current validated AUTH.md, META.md, and SKILL.md content is loaded and its durable selection digest is updated. During a tool batch, a changed skill causes the not-yet-executed portion of that batch to be discarded; completed call/output pairs are passed to the model with the refreshed guidance. Refresh does not itself rerun completed tools, and repeated discarded call IDs are rejected within the same request. Repeated mid-turn changes are bounded. Missing, malformed, unreadable, over-budget, or unsaveable guidance remains fail-closed.

@@ -537,7 +537,7 @@ func TestMigrationDiagnosticPendingStoreSavePreservesLatestEvidence(t *testing.T
 	if _, err := store.Load(); err == nil || !errors.Is(err, errMigrationDiagnosticsPending) {
 		t.Fatalf("same-store load while pending = %v", err)
 	}
-	if _, err := store.saveStateWithVersionAndDiagnostics("", nil, nil, session.storeVersion, true, nil, true); err == nil || !errors.Is(err, errMigrationDiagnosticsPending) {
+	if _, err := store.saveStateWithVersionAndDiagnostics("", nil, session.storeVersion, true, nil, true); err == nil || !errors.Is(err, errMigrationDiagnosticsPending) {
 		t.Fatalf("explicit diagnostic replacement while pending = %v", err)
 	}
 	before, err := NewSessionStoreAt(path).Load()

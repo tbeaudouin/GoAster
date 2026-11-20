@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,13 +19,6 @@ const (
 	skillChangedMessage   = skillActionNotice + " Skill guidance changed and was refreshed automatically."
 	skillBudgetMessage    = skillActionNotice + " Skill guidance does not fit in the conversation. Review installed skills in ~/.goaster/artefacts/skills and retain their authentication guidance, workflow, safety, and any legacy AUTH.md authorization requirements; use /clear if selected skills or conversation history still do not fit."
 	skillSaveMessage      = skillActionNotice + " Skill selection could not be saved. Restart to reload the conversation, then use /clear if needed."
-
-	// Skill files are user-owned and can change while a model response is being
-	// processed. A small fixed bound keeps a writer that continually rewrites a
-	// skill from turning one user turn into an unbounded stream of model calls.
-	maxSkillRefreshesPerTurn = 3
-
-	skillRefreshLimitReply = "Skill guidance changed repeatedly during this request. No further tool was run. Some actions may have completed; check their results before repeating any action."
 )
 
 type skillFailureReason string
@@ -95,49 +87,8 @@ func IsSkillRecoveryMessage(message string) bool {
 	}
 }
 
-// A selection is context, never user authorization. An empty digest means
-// loading was interrupted or failed and must be validated and checkpointed.
-type selectedSkill struct {
-	Name   string `json:"name"`
-	Digest string `json:"digest,omitempty"`
-}
-
 type skillSessionKey struct{}
-
-type skillSessionContext struct {
-	selected func() []selectedSkill
-	remember func(selectedSkill) error
-}
-
-func skillDigest(content string) string {
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
-}
-
-func validSelectedSkills(selected []selectedSkill) bool {
-	seen := make(map[string]bool, len(selected))
-	for i, skill := range selected {
-		// An unknown selection is a fail-closed marker for malformed or
-		// excessive load requests. It can only appear at the end.
-		if skill.Name == "" && skill.Digest == "" && i == len(selected)-1 {
-			continue
-		}
-		if !artefacts.ValidName(skill.Name) || seen[skill.Name] {
-			return false
-		}
-		seen[skill.Name] = true
-		if skill.Digest != "" {
-			if len(skill.Digest) != sha256.Size*2 {
-				return false
-			}
-			for _, c := range skill.Digest {
-				if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
-					return false
-				}
-			}
-		}
-	}
-	return true
-}
+type skillSessionContext struct{ remember func(string) error }
 
 var loadSkillCodexTool = codexTool{
 	Type:        "function",

@@ -1,3 +1,5 @@
+> Superseded by [skill selection recovery validation](skill-selection-recovery-validation-20261120.md). Automatic refresh, selected-skill registries, and digest checkpoints described below no longer reflect the implementation.
+
 # Automatic skill refresh review - 2026-11-20
 
 Verdict: the normal refresh and mid-batch continuation paths are suitable for offline validation, with the interrupted-turn durability limitation below. Changed selected instructions are loaded automatically without an accept or clear step. Missing, invalid, oversized or unsaveable guidance still stops the workflow. The refresh does not itself grant authorization; current skill requirements and the scope of user approval remain relevant.

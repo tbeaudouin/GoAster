@@ -1,3 +1,5 @@
+> Superseded by [skill selection recovery validation](skill-selection-recovery-validation-20261120.md). Automatic refresh, selected-skill registries, and digest checkpoints described below no longer reflect the implementation.
+
 # Automatic skill refresh final review - 2026-11-20
 
 Verdict: pass for the reviewed offline scope after fixing one completed-output preservation blocker. Routine changes to selected instructions load automatically and preserve the conversation without a clear or manual accept step. This verdict does not establish exactly-once execution or durable tool-output recovery across crashes.

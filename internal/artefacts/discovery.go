@@ -43,6 +43,7 @@ func discoverAt(root string) (string, error) {
 		return "", fmt.Errorf("read skills directory: %w", err)
 	}
 	var descriptions []string
+	metadataBytes := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			if entry.Type()&os.ModeSymlink != 0 {
@@ -54,12 +55,13 @@ func discoverAt(root string) (string, error) {
 		if !validName(name) {
 			return "", fmt.Errorf("invalid skill directory name: %s", name)
 		}
-		if len(descriptions) >= maxSkills {
-			return "", fmt.Errorf("too many runtime skills")
-		}
 		metadata, err := readSkillFile(filepath.Join(dir, name, "META.md"), metadataLimit)
 		if err != nil {
 			return "", fmt.Errorf("read %s metadata: %w", name, err)
+		}
+		metadataBytes += len(metadata)
+		if metadataBytes > 1<<20 {
+			return "", fmt.Errorf("runtime skill metadata exceeds size limit")
 		}
 		if err := validateMetadata(name, metadata); err != nil {
 			return "", err

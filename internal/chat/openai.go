@@ -51,7 +51,6 @@ const (
 	maxResponseBody          = 8 << 20
 	maxCodexWebSearchCalls   = 3
 	maxCodexWebFetchCalls    = 5
-	maxCodexSkillLoads       = 10
 	maxCodexSkillBytes       = 512 << 10
 	openAIModelAttempts      = 3
 	openAITransientBaseDelay = time.Second
@@ -1506,7 +1505,6 @@ type codexInputItem struct {
 	Arguments string              `json:"arguments,omitempty"`
 	Output    string              `json:"output,omitempty"`
 	// App-owned provenance must not depend on provider-generated call IDs.
-	restoredSkill bool
 }
 
 type codexInputContent struct {
@@ -1866,35 +1864,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 	webSearchCallCount := 0
 	webFetchCallCount := 0
 	toolStarted := false
-	skillLoadCount := 0
-	skillBytes := 0
-	loadedSkills := make(map[string]bool)
-	var selected []selectedSkill
 	skillSession, _ := ctx.Value(skillSessionKey{}).(skillSessionContext)
-	skillRefreshes := 0
-	if allowTools && skillSession.selected != nil {
-		selected = skillSession.selected()
-		snapshot, err := refreshSelectedSkillSnapshot(skillSession, selected)
-		if err != nil {
-			return "", 0, err
-		}
-		selected = snapshot.selected
-		if snapshot.changed {
-			skillRefreshes++
-		}
-		if len(snapshot.items) > 0 {
-			fits, err := skillFitsContext(ctx, input, snapshot.items, nil, "")
-			if err != nil {
-				return "", 0, err
-			}
-			if !fits {
-				return "", 0, skillRecovery(errors.New("selected skill context has insufficient room; stopped the workflow"), skillBudgetMessage)
-			}
-			input = append(snapshot.items, input...)
-			skillBytes = snapshot.bytes
-			loadedSkills = snapshot.names
-		}
-	}
 	instructions := ""
 	if allowTools {
 		instructions, err = toolInstructions(ctx)
@@ -1902,57 +1872,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 			return "", 0, err
 		}
 	}
-	staleToolResult := "Tool not executed: this call belonged to a stale tool batch discarded after skill guidance changed. Use the refreshed guidance and request a fresh call if needed."
-	discardedCallIDs := make(map[string]bool)
-	requestNumber := 0
-	refreshGuidance := func(base []codexInputItem, expected string) ([]codexInputItem, string, bool, bool, error) {
-		snapshot, snapshotErr := refreshSelectedSkillSnapshot(skillSession, selected)
-		if snapshotErr != nil {
-			return nil, "", false, false, snapshotErr
-		}
-		currentInstructions, instructionsErr := toolInstructions(ctx)
-		if instructionsErr != nil {
-			return nil, "", false, false, instructionsErr
-		}
-		changed := snapshot.changed || expected != "" && currentInstructions != expected
-		selected = snapshot.selected
-		skillBytes = snapshot.bytes
-		loadedSkills = snapshot.names
-		if !changed {
-			return base, currentInstructions, false, false, nil
-		}
-		skillRefreshes++
-		if skillRefreshes > maxSkillRefreshesPerTurn {
-			return base, currentInstructions, false, true, nil
-		}
-		refreshed := replaceRestoredSkillItems(base, snapshot.items)
-		refreshed = append(refreshed, skillRefreshNoticeItem())
-		fits, fitsErr := skillFitsContext(ctx, refreshed, nil, nil, "")
-		if fitsErr != nil {
-			return nil, "", false, false, fitsErr
-		}
-		if !fits {
-			return nil, "", false, false, skillRecovery(errors.New("refreshed skill context has insufficient room; stopped the workflow"), skillBudgetMessage)
-		}
-		return refreshed, currentInstructions, true, false, nil
-	}
-
-requestLoop:
 	for {
-		if requestNumber > 0 && allowTools {
-			refreshed, currentInstructions, changed, limited, refreshErr := refreshGuidance(input, instructions)
-			if refreshErr != nil {
-				return "", status, refreshErr
-			}
-			if limited {
-				return skillRefreshLimitReply, status, nil
-			}
-			if changed {
-				input = refreshed
-			}
-			instructions = currentInstructions
-		}
-		requestNumber++
 		requestContext := ctx
 		if allowTools {
 			requestContext = context.WithValue(ctx, toolInstructionsKey{}, instructions)
@@ -1973,20 +1893,6 @@ requestLoop:
 		}
 		phase = "post-stream"
 		if len(response.ToolCalls) == 0 {
-			if allowTools {
-				refreshed, currentInstructions, changed, limited, refreshErr := refreshGuidance(input, instructions)
-				if refreshErr != nil {
-					return "", status, refreshErr
-				}
-				if limited {
-					return skillRefreshLimitReply, status, nil
-				}
-				if changed {
-					input = refreshed
-					instructions = currentInstructions
-					continue requestLoop
-				}
-			}
 			return response.Text, status, nil
 		}
 		if !allowTools {
@@ -2016,132 +1922,61 @@ requestLoop:
 			return "", status, fmt.Errorf("Codex requested too many web_fetch calls (maximum %d)", maxCodexWebFetchCalls)
 		}
 
-		if skillLoadCount+responseSkillLoads > maxCodexSkillLoads {
-			return "", status, skillRequestFailure(fmt.Errorf("Codex requested too many load_skill calls (maximum %d)", maxCodexSkillLoads), skillReasonRequestLimit)
+		if response.Text != "" {
+			input = append(input, codexInputItem{Type: "message", Role: "assistant", Content: []codexInputContent{{Type: "output_text", Text: response.Text}}})
 		}
-
-		// Record every selected name before processing the batch. A malformed
-		// load or an earlier failing call must not discard later selections.
-		pending := make(map[string]bool)
-		for _, call := range response.ToolCalls {
-			if call.Name != loadSkillCodexTool.Name {
-				continue
-			}
-			name, err := parseLoadSkillArguments(call.Arguments)
-			if err == nil && !artefacts.ValidName(name) {
-				err = errors.New("invalid skill name")
-			}
-			if err != nil {
-				return "", status, skillRequestFailure(fmt.Errorf("skill load failed: %w; stopped the workflow", err), skillReasonInvalidRequest)
-			}
-			if !loadedSkills[name] && !pending[name] && skillSession.remember != nil {
-				if err := skillSession.remember(selectedSkill{Name: name}); err != nil {
-					return "", status, skillRecovery(fmt.Errorf("skill load failed for %q: %w; stopped the workflow", name, err), skillResetMessage)
-				}
-				pending[name] = true
-			}
-		}
-
 		callItems := make([]codexInputItem, 0, len(response.ToolCalls))
 		outputItems := make([]codexInputItem, 0, len(response.ToolCalls))
-		completedCallItems := make([]codexInputItem, 0, len(response.ToolCalls))
-		completedOutputItems := make([]codexInputItem, 0, len(response.ToolCalls))
-		for index, call := range response.ToolCalls {
+		for _, call := range response.ToolCalls {
 			handler, ok := p.tools.handlerFor(call.Name, ctx)
 			if !ok {
 				return "", status, fmt.Errorf("Codex requested unsupported tool %q", call.Name)
 			}
 			result := "Tool not executed: load the required skill and follow its authentication guidance, any legacy authorization requirements, and workflow before requesting other tools."
-			completed := false
-			if discardedCallIDs[call.CallID] {
-				result = staleToolResult
-			} else if setupCalls == 0 || call.Name == loadSkillCodexTool.Name {
-				name := ""
-				if call.Name == loadSkillCodexTool.Name {
-					name, err = parseLoadSkillArguments(call.Arguments)
-					if err != nil {
-						return "", status, skillRequestFailure(fmt.Errorf("skill load failed: %w; stopped the workflow", err), skillReasonInvalidRequest)
+			if setupCalls == 0 || call.Name == loadSkillCodexTool.Name {
+				if observer := toolCallObserver(ctx); observer != nil {
+					observer(call.Name, call.Arguments)
+				}
+				if call.Name == webSearchCodexTool.Name {
+					webSearchCallCount++
+				}
+				if call.Name == webFetchCodexTool.Name {
+					webFetchCallCount++
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return "", status, ctxErr
+				}
+				if call.Name != loadSkillCodexTool.Name {
+					if started, ok := ctx.Value(toolActionStartedKey{}).(func()); ok {
+						started()
 					}
 				}
-				if call.Name == loadSkillCodexTool.Name && loadedSkills[name] {
-					result = "Skill " + name + " was already loaded in this request; follow its earlier authentication guidance, any legacy authorization requirements, and workflow."
-				} else {
-					if call.Name != loadSkillCodexTool.Name {
-						base := append(append([]codexInputItem(nil), input...), completedCallItems...)
-						base = append(base, completedOutputItems...)
-						refreshed, currentInstructions, changed, limited, refreshErr := refreshGuidance(base, instructions)
-						if refreshErr != nil {
-							return "", status, refreshErr
-						}
-						if limited {
-							return skillRefreshLimitReply, status, nil
-						}
-						if changed {
-							for _, stale := range response.ToolCalls[index:] {
-								discardedCallIDs[stale.CallID] = true
-							}
-							input = refreshed
-							instructions = currentInstructions
-							continue requestLoop
+				toolStarted = true
+				toolStartedCount++
+				result, err = handler(ctx, call.Arguments)
+				if err != nil {
+					return "", status, err
+				}
+				toolCompletedCount++
+				if call.Name == migrationToolName {
+					if observer := migrationDiagnosticObserver(ctx); observer != nil {
+						if err := observer(result); err != nil {
+							return "", status, err
 						}
 					}
-					if observer := toolCallObserver(ctx); observer != nil {
-						observer(call.Name, call.Arguments)
+				}
+				if call.Name == loadSkillCodexTool.Name && err == nil {
+					if !skillFitsContext(instructions, input, callItems, outputItems, result) {
+						return "", status, skillRecovery(errors.New("skill content exceeds conversation budget"), skillBudgetMessage)
 					}
-					if call.Name == webSearchCodexTool.Name {
-						webSearchCallCount++
-					}
-					if call.Name == webFetchCodexTool.Name {
-						webFetchCallCount++
-					}
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return "", status, ctxErr
-					}
-					if call.Name != loadSkillCodexTool.Name {
-						if started, ok := ctx.Value(toolActionStartedKey{}).(func()); ok {
-							started()
+					if skillSession.remember != nil {
+						if saveErr := skillSession.remember(result); saveErr != nil {
+							return "", status, saveErr
 						}
 					}
-					toolStarted = true
-					toolStartedCount++
-					result, err = handler(ctx, call.Arguments)
-					if err != nil {
-						return "", status, err
-					}
-					toolCompletedCount++
-					if call.Name == migrationToolName {
-						if observer := migrationDiagnosticObserver(ctx); observer != nil {
-							if err := observer(result); err != nil {
-								return "", status, err
-							}
-						}
-					}
-					if call.Name == loadSkillCodexTool.Name {
-						if len(result) > maxCodexSkillBytes-skillBytes {
-							return "", status, skillRecovery(fmt.Errorf("skill load failed for %q: combined skill content exceeds %d bytes; stopped the workflow", name, maxCodexSkillBytes), skillBudgetMessage)
-						}
-						fits, err := skillFitsContext(ctx, input, callItems, outputItems, result)
-						if err != nil {
-							return "", status, skillRecovery(fmt.Errorf("skill load failed for %q: %w; stopped the workflow", name, err), skillResetMessage)
-						}
-						if !fits {
-							return "", status, skillRecovery(fmt.Errorf("skill load failed for %q: estimated conversation context has insufficient room for the complete skill; stopped the workflow", name), skillBudgetMessage)
-						}
-						if skillSession.remember != nil {
-							if err := skillSession.remember(selectedSkill{Name: name, Digest: skillDigest(result)}); err != nil {
-								return "", status, skillRecovery(fmt.Errorf("skill load failed for %q: %w; stopped the workflow", name, err), skillResetMessage)
-							}
-						}
-						skillBytes += len(result)
-						loadedSkills[name] = true
-						selected = append(selected, selectedSkill{Name: name, Digest: skillDigest(result)})
-					}
-					completed = true
 				}
 			}
-			if call.Name == loadSkillCodexTool.Name {
-				skillLoadCount++
-			}
+
 			callItems = append(callItems, codexInputItem{
 				Type:      "function_call",
 				CallID:    call.CallID,
@@ -2153,151 +1988,11 @@ requestLoop:
 				CallID: call.CallID,
 				Output: result,
 			})
-			if completed {
-				completedCallItems = append(completedCallItems, callItems[len(callItems)-1])
-				completedOutputItems = append(completedOutputItems, outputItems[len(outputItems)-1])
-			}
 		}
-		if setupCalls > 0 {
-			base := append(append([]codexInputItem(nil), input...), completedCallItems...)
-			base = append(base, completedOutputItems...)
-			refreshed, currentInstructions, changed, limited, refreshErr := refreshGuidance(base, instructions)
-			if refreshErr != nil {
-				return "", status, refreshErr
-			}
-			if limited {
-				return skillRefreshLimitReply, status, nil
-			}
-			if changed {
-				for _, stale := range response.ToolCalls {
-					if stale.Name != loadSkillCodexTool.Name {
-						discardedCallIDs[stale.CallID] = true
-					}
-				}
-				input = refreshed
-				instructions = currentInstructions
-				continue requestLoop
-			}
-		}
+
 		input = append(input, callItems...)
 		input = append(input, outputItems...)
 	}
-}
-
-type selectedSkillSnapshot struct {
-	selected []selectedSkill
-	items    []codexInputItem
-	bytes    int
-	names    map[string]bool
-	changed  bool
-}
-
-// loadSelectedSkillSnapshot validates and reconstructs the current selected
-// guidance. A digest is a durable freshness marker, not an instruction to
-// reject an ordinary user-owned skill update: the current validated content
-// becomes the new guidance and the caller can checkpoint its new digest.
-func loadSelectedSkillSnapshot(selected []selectedSkill) (selectedSkillSnapshot, error) {
-	if !validSelectedSkills(selected) {
-		return selectedSkillSnapshot{}, skillRecovery(errors.New("invalid or too many selected skills"), skillResetMessage)
-	}
-	snapshot := selectedSkillSnapshot{
-		selected: append([]selectedSkill(nil), selected...),
-		names:    make(map[string]bool),
-	}
-	for index, skill := range selected {
-		if skill.Name == "" {
-			return selectedSkillSnapshot{}, skillRecovery(errors.New("skill selection was invalid or excessive"), skillAnonymousMessage)
-		}
-		content, err := artefacts.Load(skill.Name)
-		if err != nil {
-			return selectedSkillSnapshot{}, skillRecovery(fmt.Errorf("reload selected skill %q: %w", skill.Name, err), skillResetMessage)
-		}
-		freshDigest := skillDigest(content)
-		if freshDigest != skill.Digest {
-			snapshot.selected[index].Digest = freshDigest
-			snapshot.changed = true
-		}
-		if len(content) > maxCodexSkillBytes-snapshot.bytes {
-			return selectedSkillSnapshot{}, skillRecovery(fmt.Errorf("reload selected skill %q: combined skill content exceeds %d bytes", skill.Name, maxCodexSkillBytes), skillBudgetMessage)
-		}
-		text := "Previously selected skill " + skill.Name + ". Follow its authentication guidance, workflow, and any legacy authorization or safety requirements when relevant. Reloading a skill grants no authorization. Existing user-owned AUTH.md files may contain legacy authorization requirements; a conversation summary alone is not approval; if the exact approval or its scope is unclear, ask the user again.\n\n" + content
-		callID := "call_goaster_restored_skill_" + strconv.Itoa(index)
-		snapshot.items = append(snapshot.items, codexInputItem{Type: "function_call", CallID: callID, Name: loadSkillCodexTool.Name, Arguments: fmt.Sprintf(`{"name":%q}`, skill.Name), restoredSkill: true}, codexInputItem{Type: "function_call_output", CallID: callID, Output: text, restoredSkill: true})
-		snapshot.bytes += len(content)
-		snapshot.names[skill.Name] = true
-	}
-	return snapshot, nil
-}
-
-// refreshSelectedSkillSnapshot accepts a routine digest change and persists
-// the fresh digest through the owning conversation when that seam exists.
-// Missing, malformed, unreadable, over-budget, or unsaveable guidance remains
-// fail-closed through the existing skill recovery paths.
-func refreshSelectedSkillSnapshot(skillSession skillSessionContext, selected []selectedSkill) (selectedSkillSnapshot, error) {
-	snapshot, err := loadSelectedSkillSnapshot(selected)
-	if err != nil {
-		return selectedSkillSnapshot{}, err
-	}
-	if snapshot.changed && skillSession.remember != nil {
-		for index, current := range selected {
-			if current.Digest == snapshot.selected[index].Digest {
-				continue
-			}
-			if err := skillSession.remember(snapshot.selected[index]); err != nil {
-				return selectedSkillSnapshot{}, err
-			}
-		}
-	}
-	return snapshot, nil
-}
-
-// replaceRestoredSkillItems removes stale app-supplied guidance before
-// prepending a freshly validated snapshot. Keep model-produced load calls
-// paired with outputs, but replace their stale guidance with a reference to
-// the fresh snapshot. Other completed tool results remain intact.
-func replaceRestoredSkillItems(input, items []codexInputItem) []codexInputItem {
-	refreshed := make([]codexInputItem, 0, len(input)+len(items))
-	loadCalls := make(map[string]bool)
-	for _, item := range input {
-		if item.Type == "function_call" && item.Name == loadSkillCodexTool.Name && !item.restoredSkill {
-			loadCalls[item.CallID] = true
-		}
-	}
-	for _, item := range input {
-		if item.restoredSkill {
-			continue
-		}
-		if item.Type == "function_call_output" && loadCalls[item.CallID] {
-			item.Output = "Skill guidance was refreshed; follow the current selected skill guidance above."
-		}
-		refreshed = append(refreshed, item)
-	}
-	if len(items) == 0 {
-		return refreshed
-	}
-	return append(append([]codexInputItem(nil), items...), refreshed...)
-}
-
-func skillRefreshNoticeItem() codexInputItem {
-	return codexInputItem{
-		Type: "message",
-		Role: "system",
-		Content: []codexInputContent{{
-			Type: "input_text",
-			Text: "GoAster refreshed the selected skill guidance because installed guidance changed. Continue the current request with the refreshed guidance. Do not repeat completed tool calls; use their existing outputs. Tool calls from the interrupted batch that were not executed were discarded.",
-		}},
-	}
-}
-
-// restoredSkillItems validates and reconstructs the current selected
-// guidance. It is shared by request construction and the session's compaction
-// budget.
-func restoredSkillItems(selected []selectedSkill) ([]codexInputItem, int, map[string]bool, error) {
-	snapshot, err := loadSelectedSkillSnapshot(selected)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	return snapshot.items, snapshot.bytes, snapshot.names, nil
 }
 
 func codexItemTokens(items []codexInputItem) int {
@@ -2352,32 +2047,24 @@ func dailyMemoryItems(ctx context.Context) []codexInputItem {
 
 // Reserve tool definitions and protocol overhead as well as all instructions
 // and complete selected skills before deciding when to compact history.
-func (p *CodexProvider) skillContextOverhead(ctx context.Context, selected []selectedSkill) (int, error) {
-	items, _, _, err := restoredSkillItems(selected)
-	if err != nil {
-		return 0, err
-	}
+func (p *CodexProvider) skillContextOverhead(ctx context.Context) (int, error) {
 	instructions, err := toolInstructions(ctx)
 	if err != nil {
 		return 0, err
 	}
-	tokens := 4096 + maxSessionMessages*12 + estimateMessageTokens(ChatMessage{Content: instructions}) + codexItemTokens(items) + codexItemTokens(dailyMemoryItems(ctx))
+	tokens := 4096 + maxSessionMessages*12 + estimateMessageTokens(ChatMessage{Content: instructions}) + codexItemTokens(dailyMemoryItems(ctx))
 	if tokens >= maxContextTokens {
 		return 0, skillRecovery(errors.New("skill context exceeds conversation budget"), skillBudgetMessage)
 	}
 	return tokens, nil
 }
 
-func skillFitsContext(ctx context.Context, input, calls, outputs []codexInputItem, skill string) (bool, error) {
-	instructions, err := toolInstructions(ctx)
-	if err != nil {
-		return false, err
-	}
+func skillFitsContext(instructions string, input, calls, outputs []codexInputItem, skill string) bool {
 	tokens := 4096 + estimateMessageTokens(ChatMessage{Content: instructions}) + codexItemTokens(input) + codexItemTokens(calls) + codexItemTokens(outputs)
 	if skill != "" {
 		tokens += estimateMessageTokens(ChatMessage{Content: skill})
 	}
-	return tokens <= maxContextTokens, nil
+	return tokens <= maxContextTokens
 }
 
 func codexInputFromHistory(ctx context.Context, history []ChatMessage) ([]codexInputItem, error) {
@@ -2412,9 +2099,13 @@ func codexInputFromHistory(ctx context.Context, history []ChatMessage) ([]codexI
 				content = append(content, codexInputContent{Type: "input_image", ImageURL: imageURL})
 			}
 		}
+		role := message.Role
+		if role == "guidance" {
+			role = "user"
+		}
 		input = append(input, codexInputItem{
 			Type:    "message",
-			Role:    message.Role,
+			Role:    role,
 			Content: content,
 		})
 	}
@@ -3163,8 +2854,8 @@ func validateCodexFunctionCall(call codexFunctionCall) error {
 	if call.Name == "" {
 		return fmt.Errorf("Codex function call is missing name")
 	}
-	if call.Name == shellExecuteCodexTool.Name {
-		// Let shell_execute validate its own arguments so malformed calls can
+	if call.Name == shellExecuteCodexTool.Name || call.Name == loadSkillCodexTool.Name {
+		// Let these tools validate their own arguments so malformed calls can
 		// receive a function_call_output and the model can recover.
 		return nil
 	}
