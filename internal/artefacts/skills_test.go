@@ -100,6 +100,44 @@ func TestDefaultFilesystemSkillContracts(t *testing.T) {
 	}
 }
 
+func TestTaskPlanningDefaultSkill(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assetDir)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(metadata, "name: task-planning\n") {
+		t.Fatal("task-planning is not discoverable after default installation")
+	}
+	content, err := Load("task-planning")
+	if err != nil {
+		t.Fatalf("load task-planning: %v", err)
+	}
+	for _, phrase := range []string{
+		"Use whenever the user asks to plan a task, project, or implementation.",
+		"[project-memory](../project-memory/SKILL.md)",
+		"Create or update PLAN.md beside those notes.",
+		"goal, ordered steps, and how to check completion",
+		"Reuse an existing relevant plan rather than creating duplicates.",
+		"Tell the user where the plan is saved.",
+		"Planning does not authorize implementation.",
+	} {
+		if !strings.Contains(content, phrase) {
+			t.Errorf("task-planning guidance missing %q", phrase)
+		}
+	}
+}
+
 func TestFeatureInspirationPolicy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
