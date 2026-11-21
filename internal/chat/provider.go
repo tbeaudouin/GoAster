@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -682,6 +683,29 @@ func IsClearCommand(message string) bool {
 	return len(fields) > 0 && fields[0] == "/clear"
 }
 
+// ValidClearCommand reports whether a clear command has valid arguments.
+func ValidClearCommand(message string) bool {
+	_, _, ok := parseClearCommand(message)
+	return ok
+}
+
+func parseClearCommand(message string) (int, bool, bool) {
+	fields := strings.Fields(message)
+	if len(fields) == 0 || fields[0] != "/clear" || len(fields) > 2 {
+		return 0, false, false
+	}
+	if len(fields) == 1 {
+		return 0, true, true
+	}
+	for _, c := range fields[1] {
+		if c < '0' || c > '9' {
+			return 0, false, false
+		}
+	}
+	n, err := strconv.Atoi(fields[1])
+	return n, false, err == nil && n > 0
+}
+
 // HistoryProvider is optional so existing providers remain compatible with
 // the one-message Provider interface.
 type HistoryProvider interface {
@@ -906,11 +930,38 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		return "", errors.Join(ErrSessionBusy, errors.New("conversation recovery needs an interactive turn"))
 	}
 	if IsClearCommand(message) {
-		if strings.TrimSpace(message) != "/clear" || len(attachments) != 0 {
-			return "Usage: /clear", nil
+		count, all, valid := parseClearCommand(message)
+		if !valid || len(attachments) != 0 {
+			return "Usage: /clear [n]", nil
 		}
 		if s.migrationDiagnosticsPending {
 			return "", fatalRequestError(errors.Join(errConversationStateChanged, errMigrationDiagnosticsPending))
+		}
+		if !all {
+			if s.recoveryPending {
+				return "", recoverableRequestError(ErrConversationRecovery)
+			}
+			cut, removed := len(s.history), 0
+			for i := len(s.history) - 1; i >= 0 && removed < count; i-- {
+				if s.history[i].Role == "user" {
+					cut = i
+					removed++
+				}
+			}
+			next := cloneChatMessages(s.history[:cut])
+			if s.store != nil && removed > 0 {
+				version, err := s.store.saveStateWithVersion(s.summary, next, s.storeVersion, true)
+				if err != nil {
+					return "", fatalRequestError(conversationSaveError{operation: "save cleared recent turns", cause: err})
+				}
+				s.storeVersion = version
+			}
+			s.history = next
+			reply := fmt.Sprintf("Removed %d recent user turn(s).", removed)
+			if s.summary != "" {
+				reply += " Older summarized content remains and cannot be selectively removed."
+			}
+			return reply, nil
 		}
 		if s.store != nil {
 			version, err := s.store.saveStateWithVersionAndDiagnostics("", nil, s.storeVersion, true, nil, true)

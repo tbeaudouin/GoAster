@@ -521,7 +521,7 @@ func TestAgentClearIsChatScopedAndWorksWithoutAuthentication(t *testing.T) {
 
 	authAvailable = false
 	malformed := postChat(t, h, 101, "/clear extra")
-	if malformed.Code != http.StatusOK || !strings.Contains(malformed.Body.String(), `"reply":"Usage: /clear"`) {
+	if malformed.Code != http.StatusOK || !strings.Contains(malformed.Body.String(), `"reply":"Usage: /clear [n]"`) {
 		t.Fatalf("malformed clear response = %d %q", malformed.Code, malformed.Body.String())
 	}
 	unavailable := postChat(t, h, 101, "provider request")
@@ -537,6 +537,10 @@ func TestAgentClearIsChatScopedAndWorksWithoutAuthentication(t *testing.T) {
 	}
 
 	authAvailable = false
+	recent := postChat(t, h, 101, "/clear 1")
+	if recent.Code != http.StatusOK || !strings.Contains(recent.Body.String(), "Removed 1 recent user turn") {
+		t.Fatalf("counted clear response = %d %q", recent.Code, recent.Body.String())
+	}
 	cleared := postChat(t, h, 101, "/clear")
 	if cleared.Code != http.StatusOK || !strings.Contains(cleared.Body.String(), `"reply":"Conversation history cleared."`) {
 		t.Fatalf("clear response = %d %q", cleared.Code, cleared.Body.String())

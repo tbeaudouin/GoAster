@@ -302,7 +302,7 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 				}
 				text = strings.TrimSpace(text)
 				isStop := text == telegramStopCommand
-				isClear := text == "/clear" && !m.hasAttachment() && a.authorizedClear(m)
+				isClear := chat.ValidClearCommand(text) && !m.hasAttachment() && a.authorizedClear(m)
 				if isClear {
 					if cancel := epochCancels[m.Chat.ID]; cancel != nil {
 						cancel()
@@ -594,7 +594,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 	if m.From.ID != pairedUserID {
 		return
 	}
-	if chat.IsClearCommand(text) && text == "/clear" && !hasAttachment && ctx.Value(telegramOrderedClearKey{}) == nil {
+	if chat.ValidClearCommand(text) && !hasAttachment && ctx.Value(telegramOrderedClearKey{}) == nil {
 		a.turnMu.Lock()
 		for key, turns := range a.activeTurns {
 			if key.chatID == m.Chat.ID {
@@ -835,7 +835,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 	}
 	if chat.IsClearCommand(text) {
 		if hasAttachment {
-			a.send(ctx, m.Chat.ID, "Usage: /clear")
+			a.send(ctx, m.Chat.ID, "Usage: /clear [n]")
 			return
 		}
 		reply, err := a.askAgent(ctx, text, m.Chat.ID, nil, nil)

@@ -69,10 +69,10 @@ var catalog = []Command{
 	},
 	{
 		Name:            "clear",
-		Usage:           "/clear",
+		Usage:           "/clear [n]",
 		HelpDescription: "Clear this chat's history.",
 		MenuDescription: "Clear this chat's history",
-		Access:          "Paired account only, in a private chat, group, or supergroup. It takes no attachment or argument and clears the chat's shared history across Telegram topics.",
+		Access:          "Paired account only, in a private chat, group, or supergroup. Without an argument it clears the chat's shared history; a positive count removes recent user turns. History is shared across Telegram topics. Attachments are not accepted.",
 	},
 	{
 		Name:            "m",
