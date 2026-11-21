@@ -78,6 +78,7 @@ type message struct {
 type voiceNote struct {
 	FileID   string `json:"file_id"`
 	FileSize int64  `json:"file_size"`
+	Duration int64  `json:"duration"`
 }
 
 type photoSize struct {

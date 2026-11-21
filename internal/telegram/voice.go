@@ -15,12 +15,13 @@ import (
 )
 
 const voiceMaxBytes int64 = 20 * 1024 * 1024
+const voiceMaxDurationSeconds int64 = 10 * 60
 const groqTranscriptionURL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
 // transcribeVoice keeps voice bytes in memory and never logs provider responses or credentials.
 func (a *adapter) transcribeVoice(ctx context.Context, voice *voiceNote) (string, error) {
 	fail := errors.New("voice transcription failed")
-	if voice == nil || strings.TrimSpace(voice.FileID) == "" || voice.FileSize < 0 || voice.FileSize > voiceMaxBytes {
+	if voice == nil || strings.TrimSpace(voice.FileID) == "" || voice.FileSize < 0 || voice.FileSize > voiceMaxBytes || voice.Duration < 0 || voice.Duration > voiceMaxDurationSeconds {
 		return "", fail
 	}
 	keySource := a.voiceKey

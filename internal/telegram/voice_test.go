@@ -63,7 +63,7 @@ func TestVoiceNoteRoutesTranscriptToAgent(t *testing.T) {
 			if string(b) != "audio" {
 				t.Fatal("wrong audio")
 			}
-			return response(200, `{"text":"hello agent"}`), nil
+			return response(200, `{"text":"bonjour à tous"}`), nil
 		}),
 		agent: doerFunc(func(r *http.Request) (*http.Response, error) {
 			if err := json.NewDecoder(r.Body).Decode(&forwarded); err != nil {
@@ -77,7 +77,7 @@ func TestVoiceNoteRoutesTranscriptToAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.handle(context.Background(), &m)
-	if forwarded.Message != "hello agent" || forwarded.ChatID != 42 || forwarded.ThreadID != 7 || sent != "hello back" {
+	if forwarded.Message != "bonjour à tous" || forwarded.ChatID != 42 || forwarded.ThreadID != 7 || sent != "hello back" {
 		t.Fatalf("route failed: %+v, reply %q", forwarded, sent)
 	}
 }
@@ -109,5 +109,83 @@ func TestVoiceProviderFailureDoesNotExposeResponse(t *testing.T) {
 	_, err := a.transcribeVoice(context.Background(), &voiceNote{FileID: "v"})
 	if err == nil || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "test-key") {
 		t.Fatal("provider failure not safely handled")
+	}
+}
+
+func TestVoiceDurationBoundBeforeNetwork(t *testing.T) {
+	calls := 0
+	a := &adapter{voiceKey: func() (string, error) { calls++; return "", nil }}
+	for _, duration := range []int64{-1, voiceMaxDurationSeconds + 1} {
+		if _, err := a.transcribeVoice(context.Background(), &voiceNote{FileID: "v", Duration: duration}); err == nil {
+			t.Errorf("accepted duration %d", duration)
+		}
+	}
+	if calls != 0 {
+		t.Fatal("invalid duration reached key or network")
+	}
+}
+
+func TestVoiceProviderErrorsAndCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"rate limited", 429, "private provider error"},
+		{"server error", 500, "private provider error"},
+		{"empty transcript", 200, `{"text":" "}`},
+		{"invalid response", 200, `not json`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			a := &adapter{token: testToken, apiBase: "https://example.invalid", voiceKey: func() (string, error) { return "test-key", nil },
+				client: doerFunc(func(r *http.Request) (*http.Response, error) {
+					if strings.HasSuffix(r.URL.Path, "/getFile") {
+						return response(200, `{"ok":true,"result":{"file_path":"voice/a.ogg"}}`), nil
+					}
+					return response(200, "audio"), nil
+				}),
+				voiceClient: doerFunc(func(r *http.Request) (*http.Response, error) { calls++; return response(tc.status, tc.body), nil }),
+			}
+			text, err := a.transcribeVoice(context.Background(), &voiceNote{FileID: "v"})
+			if err == nil || text != "" || calls != 1 || strings.Contains(err.Error(), "private") {
+				t.Fatal("unsafe failure or retry")
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a := &adapter{token: testToken, apiBase: "https://example.invalid", voiceKey: func() (string, error) { return "key", nil }, client: doerFunc(func(r *http.Request) (*http.Response, error) { return nil, r.Context().Err() })}
+	if text, err := a.transcribeVoice(ctx, &voiceNote{FileID: "v"}); err == nil || text != "" {
+		t.Fatal("cancelled request succeeded")
+	}
+}
+
+func TestVoiceFailureDoesNotDispatchToAgent(t *testing.T) {
+	agentCalls := 0
+	var sent string
+	a := &adapter{token: testToken, pairing: &pairing{userID: 42}, apiBase: "https://example.invalid",
+		voiceKey: func() (string, error) { return "", nil },
+		client: doerFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+				var p struct {
+					Text string `json:"text"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+					t.Fatal(err)
+				}
+				sent = p.Text
+			}
+			return response(200, `{"ok":true,"result":{}}`), nil
+		}),
+		agent: doerFunc(func(*http.Request) (*http.Response, error) { agentCalls++; return response(200, ""), nil }),
+	}
+	var m message
+	if err := json.Unmarshal([]byte(`{"voice":{"file_id":"v"},"chat":{"id":42,"type":"private"},"from":{"id":42}}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	a.handle(context.Background(), &m)
+	if agentCalls != 0 || !strings.Contains(sent, "could not be transcribed") {
+		t.Fatal("failure dispatched or not reported")
 	}
 }
