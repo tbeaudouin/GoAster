@@ -211,12 +211,12 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			}
 		case "local_stage":
 			switch field.Value {
-			case "post_stream", "tool_handler", "conversation_save":
+			case "post_stream", "tool_handler", "conversation_save", "configuration":
 				value = field.Value
 			}
 		case "local_reason":
 			switch field.Value {
-			case "handler_failed", "finish_tools", "finish_empty", "tool_free_request", "unsupported_tool", "skill_budget", "skill_checkpoint", "evidence_save", "save_failed":
+			case "tool_config_invalid", "tool_config_unavailable", "handler_failed", "finish_tools", "finish_empty", "tool_free_request", "unsupported_tool", "skill_budget", "skill_checkpoint", "evidence_save", "save_failed":
 				value = field.Value
 			}
 		case "save_operation":

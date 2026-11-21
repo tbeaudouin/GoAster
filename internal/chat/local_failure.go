@@ -10,6 +10,10 @@ type localFailure struct {
 
 func (err localFailure) Error() string {
 	switch err.reason {
+	case "tool_config_invalid":
+		return "GOASTER_TOOL_CALL_LIMIT must be a positive integer."
+	case "tool_config_unavailable":
+		return "Tool call limit configuration is unavailable."
 	case "tool_free_request":
 		return "A tool was requested for a tool-free request."
 	case "unsupported_tool":
@@ -30,5 +34,9 @@ func (err localFailure) Error() string {
 }
 func (err localFailure) Unwrap() error { return err.cause }
 func (err localFailure) DiagnosticFields() []diagnostics.Field {
-	return []diagnostics.Field{{Key: "local_stage", Value: "post_stream"}, {Key: "local_reason", Value: err.reason}}
+	stage := "post_stream"
+	if err.reason == "tool_config_invalid" || err.reason == "tool_config_unavailable" {
+		stage = "configuration"
+	}
+	return []diagnostics.Field{{Key: "local_stage", Value: stage}, {Key: "local_reason", Value: err.reason}}
 }
