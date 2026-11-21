@@ -1745,3 +1745,156 @@ func TestServeWiresOneShotCreateWithoutMigrationLifecycleRuntime(t *testing.T) {
 		t.Fatal("migration tool must be registered before the generic cron scheduler starts")
 	}
 }
+
+func TestRestartGuardRequiresAuthenticationAndRejectsBusy(t *testing.T) {
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntime(nil, chat.ModelRegistry{}, "guard-secret", nil, cronDeliveryQueue{})
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/internal/restart-guard", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, request)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", w.Code)
+	}
+	restartWorkMu.RLock()
+	defer restartWorkMu.RUnlock()
+	request = httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/internal/restart-guard", nil)
+	request.Header.Set(controlAuthorizationHeader, "guard-secret")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, request)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("busy status = %d", w.Code)
+	}
+}
+
+func TestRestartGuardReleaseExpiryAndBackground(t *testing.T) {
+	old := restartGuardDuration
+	restartGuardDuration = 30 * time.Millisecond
+	defer func() { restartGuardDuration = old }()
+	busy := false
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntime(nil, chat.ModelRegistry{}, "secret", nil, cronDeliveryQueue{}, func(context.Context) ([]command.BackgroundSession, error) {
+		if busy {
+			return []command.BackgroundSession{{State: "running"}}, nil
+		}
+		return nil, nil
+	})
+	request := func(method, id string) (int, string) {
+		r := httptest.NewRequest(method, "http://127.0.0.1:8765/internal/restart-guard", nil)
+		r.Header.Set(controlAuthorizationHeader, "secret")
+		r.Header.Set("X-Restart-Guard", id)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Header().Get("X-Restart-Guard")
+	}
+	busy = true
+	if code, _ := request(http.MethodPost, ""); code != http.StatusConflict {
+		t.Fatal(code)
+	}
+	busy = false
+	firstCode, first := request(http.MethodPost, "")
+	if firstCode != http.StatusNoContent || first == "" {
+		t.Fatal(firstCode)
+	}
+	if code, _ := request(http.MethodPost, ""); code != http.StatusConflict {
+		t.Fatal(code)
+	}
+	chatRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/chat", nil)
+	chatRequest.Header.Set(controlAuthorizationHeader, "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, chatRequest)
+	if w.Code != http.StatusConflict {
+		t.Fatal(w.Code)
+	}
+	request(http.MethodDelete, first)
+	second, _ := request(http.MethodPost, "")
+	if second != http.StatusNoContent {
+		t.Fatal(second)
+	}
+	request(http.MethodDelete, first)
+	if code, _ := request(http.MethodPost, ""); code != http.StatusConflict {
+		t.Fatal(code)
+	}
+	time.Sleep(60 * time.Millisecond)
+	thirdCode, third := request(http.MethodPost, "")
+	if thirdCode != http.StatusNoContent {
+		t.Fatal(thirdCode)
+	}
+	request(http.MethodDelete, third)
+}
+
+func TestRestartGuardConcurrentAdmissions(t *testing.T) {
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntime(nil, chat.ModelRegistry{}, "secret", nil, cronDeliveryQueue{})
+	const n = 20
+	type admissionResult struct {
+		code  int
+		token string
+	}
+	results := make(chan admissionResult, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/internal/restart-guard", nil)
+			r.Header.Set(controlAuthorizationHeader, "secret")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			results <- admissionResult{w.Code, w.Header().Get("X-Restart-Guard")}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	successes := 0
+	var token string
+	for w := range results {
+		if w.code == http.StatusNoContent {
+			successes++
+			token = w.token
+		} else if w.code != http.StatusConflict {
+			t.Fatal(w.code)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("admitted %d restarts", successes)
+	}
+	releaseRestartGuard(token)
+}
+
+func TestRestartGuardCommittedAndUnfinishedSessions(t *testing.T) {
+	old := restartGuardDuration
+	restartGuardDuration = 20 * time.Millisecond
+	defer func() { restartGuardDuration = old }()
+	state := "stopping"
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntime(nil, chat.ModelRegistry{}, "secret", nil, cronDeliveryQueue{}, func(context.Context) ([]command.BackgroundSession, error) {
+		return []command.BackgroundSession{{State: state}}, nil
+	})
+	request := func(method, id string) (int, string) {
+		r := httptest.NewRequest(method, "http://127.0.0.1:8765/internal/restart-guard", nil)
+		r.Header.Set(controlAuthorizationHeader, "secret")
+		r.Header.Set("X-Restart-Guard", id)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Header().Get("X-Restart-Guard")
+	}
+	for _, s := range []string{"stopping", "unknown"} {
+		state = s
+		if code, _ := request(http.MethodPost, ""); code != http.StatusConflict {
+			t.Fatal(s, code)
+		}
+	}
+	state = "exited"
+	code, id := request(http.MethodPost, "")
+	if code != http.StatusNoContent {
+		t.Fatal(code)
+	}
+	defer releaseRestartGuard(id)
+	if code, _ = request(http.MethodPut, id); code != http.StatusNoContent {
+		t.Fatal(code)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if code, _ = request(http.MethodPost, ""); code != http.StatusConflict {
+		t.Fatal(code)
+	}
+	if restartWorkMu.TryRLock() {
+		restartWorkMu.RUnlock()
+		t.Fatal("committed guard expired")
+	}
+}

@@ -50,7 +50,7 @@ func TestHelpContainsOnlyOneConciseLinePerCommand(t *testing.T) {
 }
 
 func TestMenuIncludesSupportedCommands(t *testing.T) {
-	want := []string{"help", "stop", "start", "pair", "clear", "m", "env", "getenv"}
+	want := []string{"help", "stop", "restart", "start", "pair", "clear", "m", "env", "getenv"}
 	menu := Menu()
 	if len(menu) != len(want) {
 		t.Fatalf("menu count = %d, want %d: %#v", len(menu), len(want), menu)

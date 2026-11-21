@@ -70,6 +70,10 @@ func newCronSchedulerWithMigrationAt(sessionFor func(int64, int64) agentSession,
 	created, err := scheduler.New(scheduler.Options{
 		Now: now,
 		JobExecutor: func(ctx context.Context, job scheduler.Job) error {
+			if !restartWorkMu.TryRLock() {
+				return scheduler.ErrRetry
+			}
+			defer restartWorkMu.RUnlock()
 			return executeAgentCronJob(ctx, job, jobs, sessionFor, enqueue, create)
 		},
 	})

@@ -166,7 +166,19 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 		}
 		value := ""
 		switch field.Key {
+		case "restart_reason":
+			switch field.Value {
+			case "unavailable", "http_status", "missing_token", "missing_response", "transport_failure", "commit_uncertain", "predispatch_failure", "completion_uncertain":
+				record += " restart_reason=" + field.Value
+			default:
+				record += " restart_reason=unrecognized"
+			}
+		case "exit_code":
+			record += " exit_code=" + restartExitCode(field.Value)
 		case "status":
+			if field.Value == "absent" || field.Value == "unrecognized" {
+				value = field.Value
+			}
 			if len(field.Value) >= 3 {
 				if n, e := strconv.Atoi(field.Value[:3]); e == nil && n >= 100 && n <= 599 {
 					value = field.Value[:3]
@@ -685,4 +697,15 @@ func RemoteMessage(value string) string {
 		return value
 	}
 	return ""
+}
+
+func restartExitCode(value string) string {
+	if value == "absent" {
+		return value
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < -1 || n > 255 {
+		return "unrecognized"
+	}
+	return strconv.Itoa(n)
 }

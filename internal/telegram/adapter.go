@@ -37,6 +37,9 @@ type adapter struct {
 	turnMu                   sync.Mutex
 	activeTurns              map[telegramTurnKey][]telegramActiveTurn
 	nextTurnID               uint64
+	queuedWork               int
+	restarting               bool
+	restartService           func(context.Context) error
 	environmentMu            sync.Mutex
 	environmentBlocked       map[environmentProposalKey]bool
 	client                   httpDoer
@@ -55,6 +58,7 @@ type update struct {
 type telegramBotCommand = telegramcommands.MenuCommand
 
 type message struct {
+	Date            int64       `json:"date"`
 	Text            string      `json:"text"`
 	Caption         string      `json:"caption"`
 	Photo           []photoSize `json:"photo"`
@@ -256,6 +260,7 @@ func newAgentClient() (httpDoer, error) {
 }
 
 func (a *adapter) run(ctx context.Context, ready func() error) error {
+	startupTime := time.Now().Unix()
 	if !a.agentEndpointAvailable(ctx, "/livez") {
 		return fmt.Errorf("remote agent is unavailable")
 	}
@@ -274,6 +279,7 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 		}
 	}
 	var offset int64
+	startupUpdates := true
 	var handlers sync.WaitGroup
 	tails := make(map[int64]chan struct{})
 	epochs := make(map[int64]context.Context)
@@ -285,7 +291,8 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 	}()
 	defer handlers.Wait()
 	for {
-		for _, item := range updates {
+		restartSeen := false
+		for updateIndex, item := range updates {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -294,6 +301,25 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 			}
 			if item.Message != nil {
 				m := item.Message
+				startupText := m.Text
+				if startupText == "" {
+					startupText = m.Caption
+				}
+				if isRestartCommand(startupText) && (startupUpdates || m.Date == 0 || m.Date <= startupTime) {
+					if item.ID < int64(^uint64(0)>>1) {
+						offset = item.ID + 1
+					}
+					continue
+				}
+				if isRestartCommand(startupText) {
+					if restartSeen {
+						if item.ID < int64(^uint64(0)>>1) {
+							offset = item.ID + 1
+						}
+						continue
+					}
+					restartSeen = true
+				}
 				started := make(chan struct{})
 				handlerCtx := context.WithValue(ctx, telegramStartedKey{}, started)
 				text := m.Text
@@ -310,7 +336,16 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 					epochs[m.Chat.ID], epochCancels[m.Chat.ID] = context.WithCancel(ctx)
 					handlerCtx = context.WithValue(handlerCtx, telegramOrderedClearKey{}, true)
 				}
-				isControl := isStop || !isClear && (chat.IsClearCommand(text) || chat.IsModelCommand(text))
+				isRestart := isRestartCommand(text)
+				if isRestart {
+					for _, later := range updates[updateIndex+1:] {
+						if later.Message != nil && !isRestartCommand(later.Message.Text) && strings.TrimSpace(later.Message.Text) != telegramStopCommand {
+							handlerCtx = context.WithValue(handlerCtx, telegramPendingBatchKey{}, true)
+							break
+						}
+					}
+				}
+				isControl := isRestart || isStop || !isClear && (chat.IsClearCommand(text) || chat.IsModelCommand(text))
 				if !isControl && !isClear {
 					if epochs[m.Chat.ID] == nil {
 						epochs[m.Chat.ID], epochCancels[m.Chat.ID] = context.WithCancel(ctx)
@@ -332,9 +367,17 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 					default:
 					}
 				}
+				if !isControl {
+					a.turnMu.Lock()
+					a.queuedWork++
+					a.turnMu.Unlock()
+				}
 				handlers.Add(1)
 				go func() {
 					defer handlers.Done()
+					if !isControl {
+						defer func() { a.turnMu.Lock(); a.queuedWork--; a.turnMu.Unlock() }()
+					}
 					if done != nil {
 						defer close(done)
 					}
@@ -363,6 +406,7 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 				offset = item.ID + 1
 			}
 		}
+		startupUpdates = false
 		if a.scheduledDeliveryEnabled || a.controlSecret != "" {
 			deliverScheduled(ctx, func(sendContext context.Context, chatID int64, text string) error {
 				return a.send(sendContext, chatID, text)
@@ -520,6 +564,7 @@ func (a *adapter) authorizedClear(m *message) bool {
 	return a.pairing.userID != 0 && a.pairing.userID == m.From.ID
 }
 
+type telegramPendingBatchKey struct{}
 type telegramOrderedClearKey struct{}
 type telegramStartedKey struct{}
 type telegramThreadKey struct{}
@@ -594,6 +639,19 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 	if m.From.ID != pairedUserID {
 		return
 	}
+	if isRestartCommand(text) {
+		signalStarted()
+		if text != "/restart" || hasAttachment {
+			a.send(ctx, m.Chat.ID, "Use /restart without arguments or attachments.")
+			return
+		}
+		if ctx.Value(telegramPendingBatchKey{}) != nil {
+			a.send(ctx, m.Chat.ID, "Agent is busy. Use /stop for active work and try again when idle.")
+			return
+		}
+		a.restart(ctx, m.Chat.ID)
+		return
+	}
 	if chat.ValidClearCommand(text) && !hasAttachment && ctx.Value(telegramOrderedClearKey{}) == nil {
 		a.turnMu.Lock()
 		for key, turns := range a.activeTurns {
@@ -640,9 +698,15 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		}
 		return
 	}
+	a.turnMu.Lock()
+	if a.restarting {
+		a.turnMu.Unlock()
+		signalStarted()
+		a.send(ctx, m.Chat.ID, "Agent restart in progress. Please try again shortly.")
+		return
+	}
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	key := telegramTurnKeyForMessage(*m)
-	a.turnMu.Lock()
 	if a.activeTurns == nil {
 		a.activeTurns = make(map[telegramTurnKey][]telegramActiveTurn)
 	}

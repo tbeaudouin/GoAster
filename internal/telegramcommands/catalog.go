@@ -10,6 +10,7 @@ import (
 const (
 	HelpCommand              = "/help"
 	StopCommand              = "/stop"
+	RestartCommand           = "/restart"
 	StartCommand             = "/start"
 	PairCommand              = "/pair"
 	ClearCommand             = "/clear"
@@ -52,6 +53,9 @@ var catalog = []Command{
 		HelpDescription: "Cancel this chat's active turn.",
 		MenuDescription: "Cancel the current agent turn",
 		Access:          "Paired account only, in the same chat and Telegram topic as the active turn. Use the bare command in a private chat, group, or supergroup; addressed command mentions are ignored.",
+	},
+	{
+		Name: "restart", Usage: "/restart", HelpDescription: "Restart the idle agent.", MenuDescription: "Restart the idle agent", Access: "Paired account only. Use bare /restart without attachments; active work must finish first.",
 	},
 	{
 		Name:            "start",
