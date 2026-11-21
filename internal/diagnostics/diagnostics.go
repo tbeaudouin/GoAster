@@ -216,7 +216,7 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			}
 		case "local_reason":
 			switch field.Value {
-			case "handler_failed", "tool_free_request", "unsupported_tool", "web_search_limit", "web_fetch_limit", "skill_budget", "skill_checkpoint", "evidence_save", "save_failed":
+			case "handler_failed", "finish_tools", "finish_empty", "tool_free_request", "unsupported_tool", "skill_budget", "skill_checkpoint", "evidence_save", "save_failed":
 				value = field.Value
 			}
 		case "save_operation":

@@ -14,7 +14,7 @@ func TestLocalFailureDiagnosticAndMessageRedactCause(t *testing.T) {
 	cause := errors.New(secret)
 	for _, tc := range []struct{ reason, message string }{
 		{"tool_free_request", "tool-free request"}, {"unsupported_tool", "unsupported tool"},
-		{"web_search_limit", "too many web_search"}, {"web_fetch_limit", "too many web_fetch"},
+		{"finish_tools", "tool-free finish requested a tool"}, {"finish_empty", "tool-free finish returned an empty report"},
 		{"skill_budget", "conversation budget"}, {"skill_checkpoint", "checkpoint could not be saved"},
 		{"evidence_save", "Tool evidence could not be saved"},
 	} {

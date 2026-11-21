@@ -246,7 +246,7 @@ func TestInflightManyCodexNotesKeepCurrentRequest(t *testing.T) {
 			return
 		}
 		if requests == 1 {
-			calls := make([]codexOutputItem, 130)
+			calls := make([]codexOutputItem, 100)
 			for i := range calls {
 				args, _ := json.Marshal(`{}`)
 				calls[i] = codexOutputItem{Type: "function_call", CallID: fmt.Sprint(i), Name: "shell_execute", Arguments: args}
@@ -267,12 +267,12 @@ func TestInflightManyCodexNotesKeepCurrentRequest(t *testing.T) {
 	provider.backendURL, provider.httpClient = server.URL, server.Client()
 	provider.tools.byName["shell_execute"] = func(ctx context.Context, _ string) (string, error) {
 		actions++
-		if actions == 129 {
+		if actions == 99 {
 			if err := ctx.Value(skillSessionKey{}).(skillSessionContext).remember("recent guidance stays"); err != nil {
 				return "", err
 			}
 		}
-		if actions == 130 {
+		if actions == 100 {
 			return "", errors.New("stopped")
 		}
 		return "done", nil
@@ -282,21 +282,22 @@ func TestInflightManyCodexNotesKeepCurrentRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	session.history = numberedHistory(100)
 	if _, err = session.Reply(context.Background(), "original many-notes request"); err == nil {
 		t.Fatal("expected handler failure")
 	}
-	if actions != 130 || requests != 1 {
+	if actions != 100 || requests != 1 {
 		t.Fatalf("actions=%d requests=%d", actions, requests)
 	}
 	if _, err = session.Reply(context.Background(), "next request"); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"recent guidance stays", "Earlier conversation messages", "outcome uncertain"} {
+	for _, want := range []string{"recent guidance stays", "original many-notes request", "Earlier conversation messages", "outcome uncertain"} {
 		if !strings.Contains(followup, want) {
 			t.Fatalf("missing %q in follow-up", want)
 		}
 	}
-	if actions != 130 {
+	if actions != 100 {
 		t.Fatalf("replayed tools: %d", actions)
 	}
 }

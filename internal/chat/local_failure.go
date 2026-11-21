@@ -14,10 +14,10 @@ func (err localFailure) Error() string {
 		return "A tool was requested for a tool-free request."
 	case "unsupported_tool":
 		return "An unsupported tool was requested."
-	case "web_search_limit":
-		return "Codex requested too many web_search calls."
-	case "web_fetch_limit":
-		return "Codex requested too many web_fetch calls."
+	case "finish_tools":
+		return "The tool-free finish requested a tool."
+	case "finish_empty":
+		return "The tool-free finish returned an empty report."
 	case "skill_budget":
 		return "Skill guidance exceeded the conversation budget."
 	case "skill_checkpoint":

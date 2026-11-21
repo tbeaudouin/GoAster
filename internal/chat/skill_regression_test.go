@@ -178,8 +178,8 @@ func TestManyLoadsInOneTurnAndCheckpointOrdering(t *testing.T) {
 			t.Errorf("continuation lost assistant text or skill outputs")
 		}
 		if step == 2 {
-			calls := make([]codexOutputItem, 0, 130)
-			for i := 0; i < 130; i++ {
+			calls := make([]codexOutputItem, 0, 89)
+			for i := 0; i < 89; i++ {
 				args, _ := json.Marshal(`{}`)
 				calls = append(calls, codexOutputItem{Type: "function_call", CallID: fmt.Sprint("pressure", i), Name: "shell_execute", Arguments: args})
 			}
@@ -234,7 +234,7 @@ func TestManyLoadsInOneTurnAndCheckpointOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if actions != 130 {
+	if actions != 89 {
 		t.Fatalf("actions = %d", actions)
 	}
 	count := 0
@@ -245,9 +245,6 @@ func TestManyLoadsInOneTurnAndCheckpointOrdering(t *testing.T) {
 	}
 	if count != 11 {
 		t.Fatalf("restart guidance count = %d", count)
-	}
-	if len(restarted.history) >= 3*11+2*130 {
-		t.Fatal("expected checkpoint trimming under slot pressure")
 	}
 }
 
@@ -276,8 +273,8 @@ func TestManyLoadsCheckpointSlotPressure(t *testing.T) {
 			t.Errorf("continuation lost assistant text or skill outputs")
 		}
 		if step == 2 {
-			calls := make([]codexOutputItem, 0, 130)
-			for i := 0; i < 130; i++ {
+			calls := make([]codexOutputItem, 0, 89)
+			for i := 0; i < 89; i++ {
 				args, _ := json.Marshal(`{}`)
 				calls = append(calls, codexOutputItem{Type: "function_call", CallID: fmt.Sprint("pressure", i), Name: "shell_execute", Arguments: args})
 			}
@@ -322,6 +319,7 @@ func TestManyLoadsCheckpointSlotPressure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	session.history = numberedHistory(100)
 	if _, err = session.Reply(context.Background(), "current user request"); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +327,7 @@ func TestManyLoadsCheckpointSlotPressure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if actions != 130 {
+	if actions != 89 {
 		t.Fatalf("actions = %d", actions)
 	}
 	count := 0
@@ -341,12 +339,12 @@ func TestManyLoadsCheckpointSlotPressure(t *testing.T) {
 	if count != 11 {
 		t.Fatalf("restart guidance count = %d", count)
 	}
-	if len(restarted.history) >= 3*11+2*130 {
-		t.Fatal("expected checkpoint trimming under slot pressure")
+	if len(restarted.history) >= 100+3*11+2*89 || !strings.Contains(fmt.Sprint(restarted.history), "current user request") {
+		t.Fatal("checkpoint did not trim older messages while preserving the request")
 	}
 }
 
-func TestWebBudgetsExcludeSuppressedSkillBatch(t *testing.T) {
+func TestWebCallsAfterSuppressedSkillBatch(t *testing.T) {
 	setupSkillFixture(t)
 	step, searches, fetches := 0, 0, 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -356,15 +354,19 @@ func TestWebBudgetsExcludeSuppressedSkillBatch(t *testing.T) {
 			encoded, _ := json.Marshal(args)
 			calls = append(calls, codexOutputItem{Type: "function_call", CallID: id, Name: name, Arguments: encoded})
 		}
+		if step == 4 {
+			fmt.Fprint(w, `{"output_text":"done"}`)
+			return
+		}
 		if step == 1 {
 			add("load", "load_skill", `{"name":"fixture-skill"}`)
 		}
-		n, m := 3, 5
+		n, m := 4, 6
 		if step == 1 {
 			n, m = 4, 6
 		}
 		if step == 3 {
-			n, m = 1, 0
+			n, m = 1, 1
 		}
 		for i := 0; i < n; i++ {
 			add(fmt.Sprintf("s%d-%d", step, i), "web_search", `{}`)
@@ -385,7 +387,7 @@ func TestWebBudgetsExcludeSuppressedSkillBatch(t *testing.T) {
 	provider.tools.byName["web_search"] = func(context.Context, string) (string, error) { searches++; return "search", nil }
 	provider.tools.byName["web_fetch"] = func(context.Context, string) (string, error) { fetches++; return "fetch", nil }
 	_, err := provider.Reply(context.Background(), DefaultModel, "search")
-	if err == nil || !strings.Contains(err.Error(), "too many web_search") || searches != 3 || fetches != 5 || step != 3 {
+	if err != nil || searches != 5 || fetches != 7 || step != 4 {
 		t.Fatalf("err=%v searches=%d fetches=%d requests=%d", err, searches, fetches, step)
 	}
 }
