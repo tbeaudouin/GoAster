@@ -940,6 +940,21 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 			sendFinal("The transcript contains the bot token and was not sent to the agent.")
 			return
 		}
+		// Send the transcript as plain text before dispatch, without interpreting
+		// speech as Markdown. Stop if delivery fails rather than answering first.
+		transcript := []rune("Transcript: " + text)
+		for len(transcript) > 0 {
+			n := min(len(transcript), 2000)
+			err := a.call(ctx, "sendMessage", struct {
+				ChatID   int64  `json:"chat_id"`
+				ThreadID int64  `json:"message_thread_id,omitempty"`
+				Text     string `json:"text"`
+			}{m.Chat.ID, telegramThreadID(ctx), string(transcript[:n])}, nil)
+			if err != nil {
+				return
+			}
+			transcript = transcript[n:]
+		}
 	}
 	attachments, err := a.downloadAttachments(ctx, m)
 	if err != nil {

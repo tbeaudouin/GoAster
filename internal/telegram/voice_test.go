@@ -15,7 +15,7 @@ func TestVoiceNoteRoutesTranscriptToAgent(t *testing.T) {
 		ChatID   int64  `json:"chat_id"`
 		ThreadID int64  `json:"thread_id"`
 	}
-	var sent string
+	var sent []string
 	a := &adapter{token: testToken, pairing: &pairing{userID: 42}, apiBase: "https://example.invalid",
 		voiceKey: func() (string, error) { return "test-key", nil },
 		client: doerFunc(func(r *http.Request) (*http.Response, error) {
@@ -37,7 +37,7 @@ func TestVoiceNoteRoutesTranscriptToAgent(t *testing.T) {
 				if p.ThreadID != 7 {
 					t.Errorf("thread %d", p.ThreadID)
 				}
-				sent = p.Text
+				sent = append(sent, p.Text)
 				return response(200, `{"ok":true,"result":{}}`), nil
 			default:
 				t.Fatalf("unexpected telegram request %s", r.URL.Path)
@@ -77,8 +77,8 @@ func TestVoiceNoteRoutesTranscriptToAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.handle(context.Background(), &m)
-	if forwarded.Message != "bonjour à tous" || forwarded.ChatID != 42 || forwarded.ThreadID != 7 || sent != "hello back" {
-		t.Fatalf("route failed: %+v, reply %q", forwarded, sent)
+	if forwarded.Message != "bonjour à tous" || forwarded.ChatID != 42 || forwarded.ThreadID != 7 || (len(sent) != 2 || sent[0] != "Transcript: bonjour à tous" || sent[1] != "hello back") {
+		t.Fatalf("route failed: %+v, replies %q", forwarded, sent)
 	}
 }
 
@@ -187,5 +187,37 @@ func TestVoiceFailureDoesNotDispatchToAgent(t *testing.T) {
 	a.handle(context.Background(), &m)
 	if agentCalls != 0 || !strings.Contains(sent, "could not be transcribed") {
 		t.Fatal("failure dispatched or not reported")
+	}
+}
+
+func TestVoiceTranscriptDeliveryFailureStopsAgent(t *testing.T) {
+	calls := 0
+	a := &adapter{token: testToken, pairing: &pairing{userID: 42}, apiBase: "https://example.invalid", voiceKey: func() (string, error) { return "test-key", nil }}
+	a.client = doerFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getFile"):
+			return response(200, `{"ok":true,"result":{"file_path":"voice/a.ogg"}}`), nil
+		case strings.HasPrefix(r.URL.Path, "/file/bot"):
+			return response(200, "audio"), nil
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			return response(500, `{"ok":false}`), nil
+		default:
+			return response(200, `{"ok":true,"result":true}`), nil
+		}
+	})
+	a.voiceClient = doerFunc(func(*http.Request) (*http.Response, error) {
+		return response(200, `{"text":"voice text"}`), nil
+	})
+	a.agent = doerFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return response(200, ""), nil
+	})
+	var m message
+	if err := json.Unmarshal([]byte(`{"voice":{"file_id":"v"},"chat":{"id":42,"type":"private"},"from":{"id":42}}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	a.handle(context.Background(), &m)
+	if calls != 0 {
+		t.Fatal("agent called despite failed transcript delivery")
 	}
 }
