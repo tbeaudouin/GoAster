@@ -308,7 +308,7 @@ func TestCompactionIsCheckpointedBeforeReplyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Summary != "important earlier facts" || len(loaded.Messages) != recentMessagesToKeep-1 || containsMessage(loaded.Messages, "user", "unsent question") {
+	if loaded.Summary != "important earlier facts" || len(loaded.Messages) != recentMessagesToKeep+1 || !containsMessage(loaded.Messages, "user", "unsent question") || !strings.Contains(loaded.Messages[len(loaded.Messages)-1].Content, "Turn interrupted") {
 		t.Fatalf("checkpoint = %+v", loaded)
 	}
 }
@@ -359,7 +359,7 @@ func TestConcurrentRepliesSummarizeOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestCanceledSummaryLeavesConversationUnchanged(t *testing.T) {
+func TestCanceledSummaryRetainsBoundedHistory(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	provider := &summaryTestProvider{summarize: func() (string, error) {
@@ -381,8 +381,13 @@ func TestCanceledSummaryLeavesConversationUnchanged(t *testing.T) {
 		t.Fatalf("error = %v, want context cancellation", err)
 	}
 	_, histories := provider.calls()
+	original = append(original, ChatMessage{Role: "user", Content: "question"})
+	original, _, _ = boundInflightMessages("", original, maxContextTokens, maxSessionMessages)
+	if len(session.history) == 0 || session.history[len(session.history)-1].Content != "question" {
+		t.Fatal("current user message was not retained")
+	}
 	if session.summary != "" || !reflect.DeepEqual(session.history, original) || len(histories) != 0 {
-		t.Fatal("canceled summary changed or sent the conversation")
+		t.Fatal("canceled summary changed retained history or sent the conversation")
 	}
 }
 

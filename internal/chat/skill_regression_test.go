@@ -153,7 +153,10 @@ func TestSkillFailureDiagnosticsRedactPrivateDetails(t *testing.T) {
 
 func TestManyLoadsInOneTurnAndCheckpointOrdering(t *testing.T) {
 	setupSkillFixture(t)
+	home, _ := os.UserHomeDir()
+	writeFixture(t, filepath.Join(home, ".goaster", "artefacts", "skills", "fixture-skill", "SKILL.md"), "PRIVATE WORKFLOW TEXT"+strings.Repeat("x", 105000))
 	step := 0
+	path := filepath.Join(t.TempDir(), "session.json")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req codexRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -174,6 +177,15 @@ func TestManyLoadsInOneTurnAndCheckpointOrdering(t *testing.T) {
 		if !strings.Contains(text, "thinking before load") || strings.Count(text, "PRIVATE WORKFLOW TEXT") != 11 {
 			t.Errorf("continuation lost assistant text or skill outputs")
 		}
+		if step == 2 {
+			calls := make([]codexOutputItem, 0, 130)
+			for i := 0; i < 130; i++ {
+				args, _ := json.Marshal(`{}`)
+				calls = append(calls, codexOutputItem{Type: "function_call", CallID: fmt.Sprint("pressure", i), Name: "shell_execute", Arguments: args})
+			}
+			json.NewEncoder(w).Encode(codexResponse{Output: calls})
+			return
+		}
 		fmt.Fprint(w, `{"output_text":"done"}`)
 	}))
 	defer server.Close()
@@ -184,7 +196,33 @@ func TestManyLoadsInOneTurnAndCheckpointOrdering(t *testing.T) {
 	provider := NewCodexProvider(creds)
 	provider.backendURL = server.URL
 	provider.httpClient = server.Client()
-	path := filepath.Join(t.TempDir(), "session.json")
+	actions := 0
+	provider.tools.byName["shell_execute"] = func(context.Context, string) (string, error) {
+		actions++
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		var state struct {
+			Messages []ChatMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(data, &state); err != nil {
+			return "", err
+		}
+		if actions == 80 && len(state.Messages) >= 1+33+2*80-1 {
+			return "", fmt.Errorf("expected token pressure before slot limit: %d messages", len(state.Messages))
+		}
+		count := 0
+		for _, message := range state.Messages {
+			if message.Role == "guidance" && strings.Contains(message.Content, "PRIVATE WORKFLOW TEXT") {
+				count++
+			}
+		}
+		if count != 11 {
+			return "", fmt.Errorf("durable guidance count = %d", count)
+		}
+		return "checked", nil
+	}
 	session, err := NewPersistentSessionAt(Config{Model: DefaultModel}, provider, path)
 	if err != nil {
 		t.Fatal(err)
@@ -196,8 +234,115 @@ func TestManyLoadsInOneTurnAndCheckpointOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(restarted.history) != 13 || restarted.history[0].Role != "user" || restarted.history[0].Content != "current user request" || restarted.history[1].Role != "guidance" || restarted.history[12].Role != "assistant" {
-		t.Fatalf("unexpected checkpoint order: %#v", restarted.history)
+	if actions != 130 {
+		t.Fatalf("actions = %d", actions)
+	}
+	count := 0
+	for _, message := range restarted.history {
+		if message.Role == "guidance" && strings.Contains(message.Content, "PRIVATE WORKFLOW TEXT") {
+			count++
+		}
+	}
+	if count != 11 {
+		t.Fatalf("restart guidance count = %d", count)
+	}
+	if len(restarted.history) >= 3*11+2*130 {
+		t.Fatal("expected checkpoint trimming under slot pressure")
+	}
+}
+
+func TestManyLoadsCheckpointSlotPressure(t *testing.T) {
+	setupSkillFixture(t)
+	step := 0
+	path := filepath.Join(t.TempDir(), "session.json")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req codexRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		step++
+		if step == 1 {
+			calls := make([]codexOutputItem, 0, 11)
+			for i := 0; i < 11; i++ {
+				args, _ := json.Marshal(`{"name":"fixture-skill"}`)
+				calls = append(calls, codexOutputItem{Type: "function_call", CallID: fmt.Sprint(i), Name: "load_skill", Arguments: args})
+			}
+			json.NewEncoder(w).Encode(codexResponse{OutputText: "thinking before load", Output: calls})
+			return
+		}
+		data, _ := json.Marshal(req.Input)
+		text := string(data)
+		if !strings.Contains(text, "thinking before load") || strings.Count(text, "PRIVATE WORKFLOW TEXT") != 11 {
+			t.Errorf("continuation lost assistant text or skill outputs")
+		}
+		if step == 2 {
+			calls := make([]codexOutputItem, 0, 130)
+			for i := 0; i < 130; i++ {
+				args, _ := json.Marshal(`{}`)
+				calls = append(calls, codexOutputItem{Type: "function_call", CallID: fmt.Sprint("pressure", i), Name: "shell_execute", Arguments: args})
+			}
+			json.NewEncoder(w).Encode(codexResponse{Output: calls})
+			return
+		}
+		fmt.Fprint(w, `{"output_text":"done"}`)
+	}))
+	defer server.Close()
+	creds := CredentialStore{Path: filepath.Join(t.TempDir(), "credentials")}
+	if err := creds.Save(Credential{AccessToken: "test", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	provider := NewCodexProvider(creds)
+	provider.backendURL = server.URL
+	provider.httpClient = server.Client()
+	actions := 0
+	provider.tools.byName["shell_execute"] = func(context.Context, string) (string, error) {
+		actions++
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		var state struct {
+			Messages []ChatMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(data, &state); err != nil {
+			return "", err
+		}
+		count := 0
+		for _, message := range state.Messages {
+			if message.Role == "guidance" && strings.Contains(message.Content, "PRIVATE WORKFLOW TEXT") {
+				count++
+			}
+		}
+		if count != 11 {
+			return "", fmt.Errorf("durable guidance count = %d", count)
+		}
+		return "checked", nil
+	}
+	session, err := NewPersistentSessionAt(Config{Model: DefaultModel}, provider, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = session.Reply(context.Background(), "current user request"); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewPersistentSessionAt(Config{Model: DefaultModel}, provider, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actions != 130 {
+		t.Fatalf("actions = %d", actions)
+	}
+	count := 0
+	for _, message := range restarted.history {
+		if message.Role == "guidance" && strings.Contains(message.Content, "PRIVATE WORKFLOW TEXT") {
+			count++
+		}
+	}
+	if count != 11 {
+		t.Fatalf("restart guidance count = %d", count)
+	}
+	if len(restarted.history) >= 3*11+2*130 {
+		t.Fatal("expected checkpoint trimming under slot pressure")
 	}
 }
 
@@ -265,7 +410,14 @@ func TestSkillCheckpointSaveFailureStopsContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	cause := errors.New("private checkpoint failure")
-	session.store.syncDirectory = func(string) error { return cause }
+	saves := 0
+	session.store.syncDirectory = func(string) error {
+		saves++
+		if saves == 4 {
+			return cause
+		}
+		return nil
+	}
 	log := captureChatDiagnostics(t, func() { _, err = session.Reply(context.Background(), "private prompt") })
 	if !errors.Is(err, cause) || !errors.Is(err, errFatalRequest) || requests != 1 {
 		t.Fatalf("failure=%v requests=%d", err, requests)

@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"goaster/internal/artefacts"
+	"goaster/internal/diagnostics"
 	"goaster/internal/filesync"
 )
 
@@ -73,7 +74,10 @@ type conversationSaveError struct {
 }
 
 func (err conversationSaveError) Error() string {
-	return fmt.Sprintf("%s: %v", err.operation, err.cause)
+	return "Conversation state could not be saved."
+}
+func (err conversationSaveError) DiagnosticFields() []diagnostics.Field {
+	return []diagnostics.Field{{Key: "local_stage", Value: "conversation_save"}, {Key: "local_reason", Value: "save_failed"}, {Key: "save_operation", Value: err.operation}}
 }
 func (err conversationSaveError) Unwrap() error        { return err.cause }
 func (err conversationSaveError) Is(target error) bool { return target == errConversationSaveFailed }
@@ -839,4 +843,76 @@ func syncSessionDirectory(directory string) error {
 
 func syncSessionDirectoryFile(file filesync.Directory) error {
 	return filesync.DirectoryFile(file)
+}
+
+// boundInflightMessages retains the current user request, current-turn guidance, and newest event.
+// Other messages are selected newest first, without assuming trimming is a prefix.
+func boundInflightMessages(summary string, messages []ChatMessage, budget, maxMessages int) ([]ChatMessage, bool, error) {
+	// Leave room for a subsequent user turn and its context notice.
+	maxMessages -= 2
+	if summary != "" {
+		budget -= estimateMessageTokens(summaryMessage(summary))
+		maxMessages--
+	}
+	user := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			user = i
+			break
+		}
+	}
+	last := len(messages) - 1
+	if user < 0 || last < 0 {
+		return nil, false, errors.New("in-flight checkpoint has no current user request")
+	}
+	notice := ChatMessage{Role: "assistant", Content: "[" + contextTrimNotice + "]"}
+	available := budget - estimateMessageTokens(notice) - estimateMessageTokens(messages[user])
+	slots := maxMessages - 2
+	if last != user {
+		available -= estimateMessageTokens(messages[last])
+		slots--
+	}
+	if available < 0 || slots < 0 {
+		if messages[last].Role == "guidance" {
+			return nil, false, errors.New("current-turn guidance exceeds in-flight context budget")
+		}
+		return nil, false, errors.New("in-flight request and progress exceed context budget")
+	}
+	keep := make([]bool, len(messages))
+	keep[user], keep[last] = true, true
+	for i := user + 1; i < last; i++ {
+		if messages[i].Role != "guidance" {
+			continue
+		}
+		available -= estimateMessageTokens(messages[i])
+		slots--
+		keep[i] = true
+	}
+	if available < 0 || slots < 0 {
+		return nil, false, errors.New("current-turn guidance exceeds in-flight context budget")
+	}
+	trimmed := false
+	for i := last - 1; i >= 0; i-- {
+		if keep[i] {
+			continue
+		}
+		cost := estimateMessageTokens(messages[i])
+		if slots == 0 || cost > available {
+			trimmed = true
+			continue
+		}
+		keep[i] = true
+		available -= cost
+		slots--
+	}
+	result := make([]ChatMessage, 0, len(messages)+1)
+	if trimmed {
+		result = append(result, notice)
+	}
+	for i, message := range messages {
+		if keep[i] {
+			result = append(result, message)
+		}
+	}
+	return result, trimmed, nil
 }

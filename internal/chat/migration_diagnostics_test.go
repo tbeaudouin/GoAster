@@ -383,7 +383,7 @@ func TestMigrationDiagnosticsPersistAfterModelFailureAndCancellation(t *testing.
 			if len(loaded.MigrationDiagnostics) != 1 || loaded.MigrationDiagnostics[0].Code != "invalid_input" {
 				t.Fatalf("failed-turn diagnostics = %+v", loaded.MigrationDiagnostics)
 			}
-			if len(loaded.Messages) != 0 {
+			if len(loaded.Messages) != 2 || !containsMessage(loaded.Messages, "user", "failed migration turn") || !strings.Contains(loaded.Messages[1].Content, "Turn interrupted") {
 				t.Fatalf("failed migration turn created conversation claims: %+v", loaded.Messages)
 			}
 
@@ -413,7 +413,14 @@ func TestMigrationDiagnosticCheckpointPreservesSaveFailureCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	saveCause := errors.New("diagnostic checkpoint sync failed")
-	session.store.syncDirectory = func(string) error { return saveCause }
+	saves := 0
+	session.store.syncDirectory = func(string) error {
+		saves++
+		if saves == 2 {
+			return saveCause
+		}
+		return nil
+	}
 	if _, err := session.Reply(context.Background(), "migration"); err == nil || !errors.Is(err, saveCause) {
 		t.Fatalf("checkpoint failure = %v", err)
 	}

@@ -361,6 +361,7 @@ func TestSessionFailedSaveDoesNotRetainUndisplayedTurn(t *testing.T) {
 				wantHistory = cloneChatMessages(session.history[maxSessionMessages-recentMessagesToKeep+1:])
 				wantSummary = "important earlier facts"
 			}
+			wantHistory = append(wantHistory, ChatMessage{Role: "user", Content: "undisplayed question"})
 			var unlock func()
 			provider.beforeReply = func() {
 				var err error
@@ -387,8 +388,8 @@ func TestSessionFailedSaveDoesNotRetainUndisplayedTurn(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, histories := provider.calls()
-			if containsMessage(histories[len(histories)-1], "user", "undisplayed question") {
-				t.Fatal("retry included undisplayed turn")
+			if !containsMessage(histories[len(histories)-1], "user", "undisplayed question") {
+				t.Fatal("retry omitted persisted user turn")
 			}
 			if compact {
 				session.history = numberedHistory(maxSessionMessages)
@@ -401,8 +402,8 @@ func TestSessionFailedSaveDoesNotRetainUndisplayedTurn(t *testing.T) {
 				session.store.syncDirectory = func(string) error { return fmt.Errorf("%s: %w", path, cause) }
 				_, err = session.Reply(context.Background(), "compaction checkpoint")
 				diagnostic := safeRequestDiagnosticError(err)
-				if !errors.Is(diagnostic, errConversationSaveFailed) || !errors.Is(diagnostic, cause) || !strings.Contains(diagnostic.Error(), requestFailureStateSave) || !strings.Contains(diagnostic.Error(), "PRIVATE_COMPACTION_SAVE_CAUSE") || !strings.Contains(diagnostic.Error(), path) {
-					t.Fatalf("compaction save diagnostic omitted underlying details = %v", diagnostic)
+				if !errors.Is(diagnostic, errConversationSaveFailed) || !errors.Is(diagnostic, cause) || !strings.Contains(diagnostic.Error(), requestFailureStateSave) || strings.Contains(diagnostic.Error(), "PRIVATE_COMPACTION_SAVE_CAUSE") || strings.Contains(diagnostic.Error(), path) {
+					t.Fatalf("compaction save diagnostic leaked underlying details = %v", diagnostic)
 				}
 			}
 		})

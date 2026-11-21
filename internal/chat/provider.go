@@ -100,6 +100,12 @@ func IsModelStreamError(err error) bool {
 
 func modelStreamCauseDetail(err error) string {
 	for _, current := range requestFailureErrors(err) {
+		if local, ok := current.(localFailure); ok {
+			return local.Error()
+		}
+		if _, ok := current.(toolHandlerError); ok {
+			return "Tool handler failed; its outcome is uncertain."
+		}
 		if backend, ok := current.(backendError); ok {
 			return backend.Error()
 		}
@@ -168,7 +174,11 @@ func ModelStreamMessageForError(err error, reference string) string {
 	if errorReference == "" {
 		errorReference = diagnostics.RequestReference(reference)
 	}
-	return SafeModelStreamMessage(classification, errorReference)
+	message := SafeModelStreamMessage(classification, errorReference)
+	if detail := modelStreamCauseDetail(err); detail != "" {
+		message += " " + detail
+	}
+	return message
 }
 
 type requestReferenceKey struct{}
@@ -512,8 +522,7 @@ func requestRecoveryDiagnostic(err error) string {
 	return ""
 }
 
-// requestFailureDetails keeps the full error text, including causes whose
-// outer error intentionally uses a user-facing marker message.
+// requestFailureDetails collects error text up to a safe local or stream boundary.
 func requestFailureDetails(err error) string {
 	if err == nil {
 		return ""
@@ -533,10 +542,10 @@ func requestFailureDetails(err error) string {
 			}
 			details.WriteString(message)
 		}
-		// ModelStreamError is the safe user-facing boundary. Its typed cause is
-		// still retained for errors.Is/diagnostics, but arbitrary wire/read text
-		// must not be copied into a terminal or agent-facing detail string.
-		if _, boundary := current.(ModelStreamError); boundary {
+		// These wrappers provide safe user-facing text while retaining their causes
+		// for errors.Is and typed diagnostics; do not expose cause text here.
+		switch current.(type) {
+		case ModelStreamError, conversationSaveError, toolHandlerError, localFailure:
 			return
 		}
 		if joined, ok := current.(interface{ Unwrap() []error }); ok {
@@ -696,6 +705,9 @@ type ToolCallObserver func(name, arguments string)
 
 type toolCallObserverKey struct{}
 type toolActionStartedKey struct{}
+type toolEvidenceObserverKey struct{}
+
+type toolEvidenceObserver func(name, arguments string, completed bool, output string) error
 type codexToolProgressKey struct{}
 type runtimeFailureOperationKey struct{}
 type providerFailureBoundaryKey struct{}
@@ -917,6 +929,10 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			return "", recoverableRequestError(s.memory.initErr)
 		}
 	}
+	historyMessage := attachment.HistoryPlaceholder(message, attachments)
+	if !scheduled && ((!utf8.ValidString(message) || len(message) > maxSessionMessageBytes || !utf8.ValidString(historyMessage)) || len(historyMessage) > maxSessionMessageBytes) {
+		return "", fatalRequestError(conversationSaveError{operation: "bound in-progress conversation", cause: errors.New("current user request cannot be represented")})
+	}
 	s.refreshModel()
 	// Build the same memory context used by the provider before calculating
 	// the budget, so instructions and restored skills have room alongside
@@ -944,15 +960,29 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		}
 	}
 
-	historyMessage := attachment.HistoryPlaceholder(message, attachments)
 	candidate := append(cloneChatMessages(s.history), ChatMessage{Role: "user", Content: historyMessage})
 	normalized, trimmed, err := normalizeChatMessages(candidate, false)
 	if err != nil {
 		normalized, trimmed = boundChatHistory(candidate)
 	}
 	candidate = normalized
+	summarize := shouldSummarize(s.summary, candidate, overhead)
 	summary := s.summary
-	if shouldSummarize(summary, candidate, overhead) {
+	if !scheduled {
+		checkpoint, _, boundErr := boundInflightMessages(summary, candidate, maxContextTokens-overhead, maxSessionMessages)
+		if boundErr != nil || len(checkpoint) == 0 || checkpoint[len(checkpoint)-1].Content != historyMessage {
+			return "", fatalRequestError(conversationSaveError{operation: "bound in-progress conversation", cause: errors.New("current user request exceeds context budget")})
+		}
+		if s.store != nil {
+			version, saveErr := s.store.saveStateWithVersion(summary, checkpoint, s.storeVersion, true)
+			if saveErr != nil {
+				return "", fatalRequestError(conversationSaveError{operation: "save in-progress conversation", cause: saveErr})
+			}
+			s.storeVersion = version
+		}
+		s.history = cloneChatMessages(checkpoint)
+	}
+	if summarize {
 		keepFrom := len(candidate) - recentMessagesToKeep
 		provider, canSummarize := s.provider.(conversationSummarizer)
 		_, canUseHistory := s.provider.(HistoryProvider)
@@ -990,9 +1020,11 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		if err == nil && compact != "" && utf8.ValidString(compact) && len(compact) <= maxSummaryBytes {
 			summary = compact
 			candidate = cloneChatMessages(candidate[keepFrom:])
-			// Checkpoint the compacted old conversation before the next model
-			// request, without recording a user turn that might fail.
-			previousTurns := cloneChatMessages(candidate[:len(candidate)-1])
+			// Preserve the current turn at compaction.
+			previousTurns := cloneChatMessages(candidate)
+			if scheduled {
+				previousTurns = cloneChatMessages(candidate[:len(candidate)-1])
+			}
 			if s.store != nil {
 				version, saveErr := s.store.saveStateWithVersion(summary, previousTurns, s.storeVersion, true)
 				if saveErr != nil {
@@ -1009,7 +1041,14 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			// prior summary remains useful even when newer history is trimmed.
 			var fallbackTrimmed bool
 			fallbackBudget := (maxContextTokens - overhead) / 2
-			candidate, fallbackTrimmed = boundSessionMessages(summary, candidate, true, fallbackBudget, maxSessionMessages/2)
+			if scheduled {
+				candidate, fallbackTrimmed = boundSessionMessages(summary, candidate, true, fallbackBudget, maxSessionMessages/2)
+			} else {
+				candidate, fallbackTrimmed, err = boundInflightMessages(summary, candidate, fallbackBudget, maxSessionMessages/2)
+				if err != nil {
+					return "", fatalRequestError(conversationSaveError{operation: "bound summarized conversation", cause: err})
+				}
+			}
 			trimmed = trimmed || fallbackTrimmed
 		}
 	}
@@ -1027,10 +1066,24 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		budget -= estimateMessageTokens(modelDiagnosticNotice)
 		maxMessages--
 	}
-	bounded, budgetTrimmed := boundSessionMessages(summary, candidate, trimmed, budget, maxMessages)
+	var bounded []ChatMessage
+	var budgetTrimmed bool
+	if scheduled {
+		bounded, budgetTrimmed = boundSessionMessages(summary, candidate, trimmed, budget, maxMessages)
+		if trimmed || budgetTrimmed {
+			bounded, _ = boundSessionMessages(summary, candidate, true, budget, maxMessages)
+		}
+	} else {
+		// Reserve the explicit context-trim notice even if earlier normalization trimmed history.
+		budget -= estimateMessageTokens(ChatMessage{Role: "system", Content: contextTrimNotice})
+		maxMessages--
+		bounded, budgetTrimmed, err = boundInflightMessages(summary, candidate, budget, maxMessages)
+		if err != nil {
+			return "", fatalRequestError(conversationSaveError{operation: "bound request conversation", cause: err})
+		}
+	}
 	trimmed = trimmed || budgetTrimmed
 	if trimmed {
-		bounded, _ = boundSessionMessages(summary, candidate, true, budget, maxMessages)
 		s.contextNotice = contextTrimNotice
 	}
 	requestHistory := make([]ChatMessage, 0, len(bounded)+2)
@@ -1048,28 +1101,67 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		requestHistory = append([]ChatMessage{modelNotice}, requestHistory...)
 	}
 	requestMessage := message
-	if len(bounded) > 0 {
-		requestMessage = bounded[len(bounded)-1].Content
+	for i := len(bounded) - 1; i >= 0; i-- {
+		if bounded[i].Role == "user" {
+			requestMessage = bounded[i].Content
+			break
+		}
 	}
 	if len(attachments) > 0 {
 		requestMessage = attachment.AddReferences(requestMessage, attachments)
-		if len(requestHistory) > 0 && requestHistory[len(requestHistory)-1].Role == "user" {
-			requestHistory[len(requestHistory)-1].Content = attachment.AddReferences(requestHistory[len(requestHistory)-1].Content, attachments)
+		for i := len(requestHistory) - 1; i >= 0; i-- {
+			if requestHistory[i].Role == "user" {
+				requestHistory[i].Content = attachment.AddReferences(requestHistory[i].Content, attachments)
+				break
+			}
 		}
 	}
 
+	// Checkpoints are independent snapshots: a failed save may have reached disk,
+	// but must not change the last acknowledged in-memory history.
+	checkpointProgress := func(message ChatMessage) error {
+		next := append(cloneChatMessages(bounded), message)
+		next, wasTrimmed, err := boundInflightMessages(summary, next, budget, maxMessages)
+		if err != nil {
+			return conversationSaveError{operation: "bound tool evidence", cause: err}
+		}
+		if s.store != nil {
+			version, saveErr := s.store.saveStateWithVersion(summary, next, s.storeVersion, true)
+			if saveErr != nil {
+				return conversationSaveError{operation: "save tool evidence", cause: saveErr}
+			}
+			s.storeVersion = version
+		}
+		bounded = next
+		if wasTrimmed {
+			s.contextNotice = contextTrimNotice
+		}
+		s.summary, s.history = summary, cloneChatMessages(next)
+		return nil
+	}
+	if !scheduled {
+		replyContext = context.WithValue(replyContext, toolEvidenceObserverKey{}, toolEvidenceObserver(func(name, arguments string, completed bool, output string) error {
+			return checkpointProgress(ChatMessage{Role: "assistant", Content: toolEvidenceNote(name, arguments, completed, output)})
+		}))
+	}
 	// Checkpoint guidance with the current user turn before any later tool action.
 	replyContext = context.WithValue(replyContext, skillSessionKey{}, skillSessionContext{
 		remember: func(content string) error {
-			bounded = append(bounded, ChatMessage{Role: "guidance", Content: content})
-			if s.store != nil {
-				version, err := s.store.saveStateWithVersion(summary, bounded, s.storeVersion, true)
-				if err != nil {
-					return fatalRequestError(conversationSaveError{operation: "save skill guidance", cause: err})
+			if scheduled {
+				bounded = append(bounded, ChatMessage{Role: "guidance", Content: content})
+				if s.store != nil {
+					version, err := s.store.saveStateWithVersion(summary, bounded, s.storeVersion, true)
+					if err != nil {
+						return fatalRequestError(conversationSaveError{operation: "save skill guidance", cause: err})
+					}
+					s.storeVersion = version
 				}
-				s.storeVersion = version
+				s.summary, s.history = summary, cloneChatMessages(bounded)
+				return nil
 			}
-			s.summary, s.history = summary, cloneChatMessages(bounded)
+			if err := checkpointProgress(ChatMessage{Role: "guidance", Content: content}); err != nil {
+				return fatalRequestError(err)
+			}
 			return nil
 		},
 	})
@@ -1112,6 +1204,25 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	})
 	reply, err = s.replyWithHistory(replyContext, requestMessage, requestHistory)
 	if err != nil {
+		// A failed checkpoint may have an uncertain on-disk result; never write over it.
+		if !scheduled && !errors.Is(err, errConversationSaveFailed) {
+			interrupted := append(cloneChatMessages(bounded), ChatMessage{Role: "assistant", Content: "[Turn interrupted; no final assistant response was received.]"})
+			interrupted, _, boundErr := boundInflightMessages(summary, interrupted, budget, maxMessages)
+			if boundErr != nil {
+				interrupted = cloneChatMessages(bounded)
+			}
+			if s.store != nil {
+				version, saveErr := s.store.saveStateWithVersion(summary, interrupted, s.storeVersion, true)
+				if saveErr != nil {
+					err = errors.Join(err, conversationSaveError{operation: "save interrupted conversation", cause: saveErr})
+				} else {
+					s.storeVersion = version
+					s.summary, s.history = summary, cloneChatMessages(interrupted)
+				}
+			} else {
+				s.summary, s.history = summary, cloneChatMessages(interrupted)
+			}
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if PostToolAuthenticationReviewMessage(err) != "" {
 				return "", fatalRequestError(postToolAuthenticationError{cause: errors.Join(err, ctxErr), parentErr: ctxErr})
@@ -1165,12 +1276,22 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			}
 		}
 	}
-	completedCandidate := append(cloneChatMessages(bounded), ChatMessage{Role: "assistant", Content: historyReply})
+	completedCandidate := cloneChatMessages(bounded)
+	completedCandidate = append(completedCandidate, ChatMessage{Role: "assistant", Content: historyReply})
 	completed, completedTrimmed, err := normalizeChatMessages(completedCandidate, false)
 	if err != nil {
 		completed, completedTrimmed = boundChatHistory(completedCandidate)
 	}
-	completed, completedBudgetTrimmed := boundSessionMessages(summary, completed, false, maxContextTokens-overhead, maxSessionMessages)
+	var completedBudgetTrimmed bool
+	var boundErr error
+	if scheduled {
+		completed, completedBudgetTrimmed = boundSessionMessages(summary, completed, false, maxContextTokens-overhead, maxSessionMessages)
+	} else {
+		completed, completedBudgetTrimmed, boundErr = boundInflightMessages(summary, completed, maxContextTokens-overhead, maxSessionMessages)
+	}
+	if boundErr != nil {
+		return "", fatalRequestError(conversationSaveError{operation: "bound completed conversation", cause: boundErr})
+	}
 	if completedTrimmed || completedBudgetTrimmed {
 		s.contextNotice = contextTrimNotice
 	}

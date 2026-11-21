@@ -395,8 +395,8 @@ func TestInteractiveRequestDiagnosticsExposeRecoverableAndFatalDetails(t *testin
 		} else if !errors.Is(err, errConversationSaveFailed) || !errors.Is(err, saveCause) || !strings.Contains(err.Error(), requestFailureStateSave) {
 			t.Fatalf("request save diagnostic = %v", err)
 		}
-		if !strings.Contains(output, "PRIVATE_SAVE_CAUSE") && (err == nil || !strings.Contains(err.Error(), "PRIVATE_SAVE_CAUSE")) {
-			t.Fatalf("save diagnostic omitted the underlying cause: error %v, output %q", err, output)
+		if strings.Contains(output, "PRIVATE_SAVE_CAUSE") || (err != nil && strings.Contains(err.Error(), "PRIVATE_SAVE_CAUSE")) {
+			t.Fatalf("save diagnostic exposed the underlying cause: error %v, output %q", err, output)
 		}
 	}
 	{
@@ -420,7 +420,7 @@ func TestInteractiveRequestDiagnosticsExposeRecoverableAndFatalDetails(t *testin
 			session, store, EnvironmentFilePickerFunc(func() (string, error) { return "", ErrEnvironmentFilePickerCanceled }),
 			terminalUI{interactive: true, width: 100},
 		)
-		if !errors.Is(err, errConversationSaveFailed) || !errors.Is(err, saveCause) || !errors.Is(err, outputCause) || !strings.Contains(err.Error(), requestFailureStateSave) || !strings.Contains(err.Error(), "PRIVATE_SAVE_CAUSE") || !strings.Contains(err.Error(), "PRIVATE_OUTPUT_CAUSE") {
+		if !errors.Is(err, errConversationSaveFailed) || !errors.Is(err, saveCause) || !errors.Is(err, outputCause) || !strings.Contains(err.Error(), requestFailureStateSave) || strings.Contains(err.Error(), "PRIVATE_SAVE_CAUSE") {
 			t.Fatalf("clear output failure lost a cause or request details: %v", err)
 		}
 	}
@@ -594,7 +594,7 @@ func TestModelUncertaintyInstructionRemainsAfterSessionReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(resumedInput), "first question") || !strings.Contains(string(resumedInput), "second question") || strings.Contains(string(resumedInput), "failed action") || strings.Contains(string(resumedInput), "TOOL_OUTPUT_NOT_PERSISTED") {
+	if !strings.Contains(string(resumedInput), "first question") || !strings.Contains(string(resumedInput), "second question") || !strings.Contains(string(resumedInput), "failed action") || !strings.Contains(string(resumedInput), "record_action completed") || !strings.Contains(string(resumedInput), "Turn interrupted") || strings.Contains(string(resumedInput), "TOOL_OUTPUT_NOT_PERSISTED") {
 		t.Fatalf("reloaded history did not reflect the failed attempt: %s", resumedInput)
 	}
 	for _, request := range gotRequests[6:] {
@@ -607,7 +607,7 @@ func TestModelUncertaintyInstructionRemainsAfterSessionReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(saved), requestUncertaintyWarning) || strings.Contains(string(saved), requestHistoryWarning) || strings.Contains(string(saved), requestScheduledRepeatWarning) || strings.Contains(string(saved), "failed action") || strings.Contains(string(saved), "TOOL_OUTPUT_NOT_PERSISTED") {
+	if strings.Contains(string(saved), requestUncertaintyWarning) || strings.Contains(string(saved), requestHistoryWarning) || strings.Contains(string(saved), requestScheduledRepeatWarning) || !strings.Contains(string(saved), "failed action") || strings.Contains(string(saved), "TOOL_OUTPUT_NOT_PERSISTED") {
 		t.Fatalf("unexpected data in saved conversation: %s", saved)
 	}
 }

@@ -209,6 +209,21 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			if n, e := strconv.Atoi(field.Value); e == nil && n >= 100 && n <= 599 {
 				value = strconv.Itoa(n)
 			}
+		case "local_stage":
+			switch field.Value {
+			case "post_stream", "tool_handler", "conversation_save":
+				value = field.Value
+			}
+		case "local_reason":
+			switch field.Value {
+			case "handler_failed", "tool_free_request", "unsupported_tool", "web_search_limit", "web_fetch_limit", "skill_budget", "skill_checkpoint", "evidence_save", "save_failed":
+				value = field.Value
+			}
+		case "save_operation":
+			switch field.Value {
+			case "save tool evidence", "save skill guidance", "save migration diagnostic checkpoint", "save conversation state", "save in-progress conversation", "save interrupted conversation", "save cleared conversation state":
+				value = field.Value
+			}
 		case "skill_stage":
 			switch field.Value {
 			case "load", "validate", "checkpoint", "restore", "request":

@@ -841,6 +841,14 @@ func tokenExpiry(token string) time.Time {
 	return time.Unix(seconds, 0)
 }
 
+type toolHandlerError struct{ cause error }
+
+func (err toolHandlerError) Error() string { return "tool handler failed; outcome uncertain" }
+func (err toolHandlerError) Unwrap() error { return err.cause }
+func (err toolHandlerError) DiagnosticFields() []diagnostics.Field {
+	return []diagnostics.Field{{Key: "local_stage", Value: "tool_handler"}, {Key: "local_reason", Value: "handler_failed"}}
+}
+
 type providerFailure struct {
 	phase  string
 	status int
@@ -1846,6 +1854,9 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		if replyErr == nil {
 			return
 		}
+		if phase == "post-stream" && !IsModelStreamError(replyErr) && !errors.Is(replyErr, context.Canceled) && !errors.Is(replyErr, context.DeadlineExceeded) {
+			replyErr = ModelStreamError{Classification: modelRequestFailureClassification, Reference: requestReference(ctx), Cause: replyErr}
+		}
 		if _, _, ok := providerFailureInfo(replyErr); !ok {
 			replyErr = providerFailure{phase: phase, status: status, cause: replyErr}
 		}
@@ -1878,6 +1889,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 			requestContext = context.WithValue(ctx, toolInstructionsKey{}, instructions)
 		}
 		requestContext = withCodexToolProgress(requestContext, ToolProgress{Started: toolStartedCount, Completed: toolCompletedCount})
+		phase = "pre-stream"
 		response, status, err := p.requestCodex(requestContext, credential, model, input, allowTools)
 		if err != nil {
 			if status == http.StatusUnauthorized && toolStarted {
@@ -1896,7 +1908,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 			return response.Text, status, nil
 		}
 		if !allowTools {
-			return "", status, errors.New("Codex requested a tool in a tool-free request")
+			return "", status, localFailure{reason: "tool_free_request"}
 		}
 		responseWebSearchCalls := 0
 		responseWebFetchCalls := 0
@@ -1916,10 +1928,10 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		// A batch containing a setup call suppresses all other tools, so only
 		// count web calls in batches that can actually execute them.
 		if setupCalls == 0 && webSearchCallCount+responseWebSearchCalls > maxCodexWebSearchCalls {
-			return "", status, fmt.Errorf("Codex requested too many web_search calls (maximum %d)", maxCodexWebSearchCalls)
+			return "", status, localFailure{reason: "web_search_limit"}
 		}
 		if setupCalls == 0 && webFetchCallCount+responseWebFetchCalls > maxCodexWebFetchCalls {
-			return "", status, fmt.Errorf("Codex requested too many web_fetch calls (maximum %d)", maxCodexWebFetchCalls)
+			return "", status, localFailure{reason: "web_fetch_limit"}
 		}
 
 		if response.Text != "" {
@@ -1930,7 +1942,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		for _, call := range response.ToolCalls {
 			handler, ok := p.tools.handlerFor(call.Name, ctx)
 			if !ok {
-				return "", status, fmt.Errorf("Codex requested unsupported tool %q", call.Name)
+				return "", status, localFailure{reason: "unsupported_tool"}
 			}
 			result := "Tool not executed: load the required skill and follow its authentication guidance, any legacy authorization requirements, and workflow before requesting other tools."
 			if setupCalls == 0 || call.Name == loadSkillCodexTool.Name {
@@ -1946,6 +1958,11 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return "", status, ctxErr
 				}
+				if observer, ok := ctx.Value(toolEvidenceObserverKey{}).(toolEvidenceObserver); ok {
+					if err := observer(call.Name, call.Arguments, false, ""); err != nil {
+						return "", status, localFailure{reason: "evidence_save", cause: err}
+					}
+				}
 				if call.Name != loadSkillCodexTool.Name {
 					if started, ok := ctx.Value(toolActionStartedKey{}).(func()); ok {
 						started()
@@ -1955,23 +1972,28 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 				toolStartedCount++
 				result, err = handler(ctx, call.Arguments)
 				if err != nil {
-					return "", status, err
+					return "", status, toolHandlerError{cause: err}
 				}
 				toolCompletedCount++
 				if call.Name == migrationToolName {
 					if observer := migrationDiagnosticObserver(ctx); observer != nil {
 						if err := observer(result); err != nil {
-							return "", status, err
+							return "", status, localFailure{reason: "evidence_save", cause: err}
 						}
+					}
+				}
+				if observer, ok := ctx.Value(toolEvidenceObserverKey{}).(toolEvidenceObserver); ok {
+					if err := observer(call.Name, call.Arguments, true, result); err != nil {
+						return "", status, localFailure{reason: "evidence_save", cause: err}
 					}
 				}
 				if call.Name == loadSkillCodexTool.Name && err == nil {
 					if !skillFitsContext(instructions, input, callItems, outputItems, result) {
-						return "", status, skillRecovery(errors.New("skill content exceeds conversation budget"), skillBudgetMessage)
+						return "", status, localFailure{reason: "skill_budget", cause: skillRecovery(errors.New("skill content exceeds conversation budget"), skillBudgetMessage)}
 					}
 					if skillSession.remember != nil {
 						if saveErr := skillSession.remember(result); saveErr != nil {
-							return "", status, saveErr
+							return "", status, localFailure{reason: "skill_checkpoint", cause: saveErr}
 						}
 					}
 				}
