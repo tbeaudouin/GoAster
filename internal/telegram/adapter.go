@@ -39,6 +39,8 @@ type adapter struct {
 	nextTurnID               uint64
 	environmentMu            sync.Mutex
 	environmentBlocked       map[environmentProposalKey]bool
+	voiceClient              httpDoer               // test seam; nil uses a restricted HTTPS client.
+	voiceKey                 func() (string, error) // test seam.
 	client                   httpDoer
 	agent                    httpDoer
 	controlSecret            string
@@ -59,6 +61,7 @@ type message struct {
 	Caption         string      `json:"caption"`
 	Photo           []photoSize `json:"photo"`
 	Document        *document   `json:"document"`
+	Voice           *voiceNote  `json:"voice"`
 	MediaGroupID    string      `json:"media_group_id"`
 	MessageThreadID int64       `json:"message_thread_id"`
 	Chat            struct {
@@ -70,6 +73,11 @@ type message struct {
 		IsBot bool  `json:"is_bot"`
 	} `json:"from"`
 	SenderChat json.RawMessage `json:"sender_chat"`
+}
+
+type voiceNote struct {
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size"`
 }
 
 type photoSize struct {
@@ -878,7 +886,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		a.send(ctx, m.Chat.ID, "That message contains the bot token and was not sent to the agent.")
 		return
 	}
-	if text == "" && !hasAttachment {
+	if text == "" && !hasAttachment && m.Voice == nil {
 		return
 	}
 	stopTyping := a.startTyping(ctx, m.Chat.ID)
@@ -912,6 +920,24 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		}
 		for _, chunk := range chunks {
 			a.send(ctx, m.Chat.ID, chunk)
+		}
+	}
+	if m.Voice != nil {
+		if hasAttachment || text != "" || strings.TrimSpace(m.Caption) != "" {
+			sendFinal("Please send the voice note without other media or a caption.")
+			return
+		}
+		var err error
+		text, err = a.transcribeVoice(ctx, m.Voice)
+		if err != nil {
+			if ctx.Err() == nil {
+				sendFinal("The voice note could not be transcribed. Check the Groq integration and try again.")
+			}
+			return
+		}
+		if a.token != "" && strings.Contains(text, a.token) {
+			sendFinal("The transcript contains the bot token and was not sent to the agent.")
+			return
 		}
 	}
 	attachments, err := a.downloadAttachments(ctx, m)
