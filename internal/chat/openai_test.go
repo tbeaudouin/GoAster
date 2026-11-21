@@ -1272,13 +1272,18 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	if err := terminalStore.Load(); err != nil {
 		t.Fatal(err)
 	}
-	checkLineError := func(want string) {
+	checkLineError := func(want string, causes ...string) {
 		t.Helper()
 		err := runChatLoopWithUI(context.Background(), TerminalInput{reader: strings.NewReader("hello\n")}, io.Discard,
 			NewSession(Config{Model: "gpt-test"}, provider), terminalStore,
 			EnvironmentFilePickerFunc(func() (string, error) { return "", ErrEnvironmentFilePickerCanceled }), terminalUI{})
-		if err == nil || err.Error() != "model gpt-test: "+want {
+		if err == nil || !strings.HasPrefix(err.Error(), "model gpt-test: "+want) {
 			t.Fatalf("noninteractive authentication error = %v, want %q", err, want)
+		}
+		for _, cause := range causes {
+			if !strings.Contains(err.Error(), cause) {
+				t.Fatalf("noninteractive error missing cause %q: %v", cause, err)
+			}
 		}
 	}
 	var output bytes.Buffer
@@ -1319,25 +1324,34 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	}
 	refreshStatus.Store(http.StatusUnauthorized)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	rejectedRefreshError := "OpenAI session expired; restart GoAster to authenticate: Codex backend request failed with status 401 Unauthorized\nOpenAI subscription authentication required: saved refresh token was rejected with status 401 Unauthorized"
-	if !errors.Is(err, ErrLoginRequired) || err.Error() != rejectedRefreshError || !strings.Contains(requestFailureDiagnostic(err), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
+	rejectedRefreshError := "OpenAI session expired; restart GoAster to authenticate:"
+	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refresh error = %v", err)
 	}
-	checkLineError(rejectedRefreshError)
+	if !strings.Contains(err.Error(), "Codex backend request failed with status 401 Unauthorized") || !strings.Contains(err.Error(), "saved refresh token was rejected with status 401 Unauthorized") {
+		t.Fatalf("missing rejection causes: %v", err)
+	}
+	checkLineError(rejectedRefreshError, "Codex backend request failed with status 401 Unauthorized", "saved refresh token was rejected with status 401 Unauthorized")
 	refreshStatus.Store(http.StatusInternalServerError)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	refreshFailureError := "OpenAI credential refresh failed: Codex backend request failed with status 401 Unauthorized\ntoken refresh failed with status 500 Internal Server Error"
-	if errors.Is(err, ErrLoginRequired) || errors.Is(err, errRequestAuthentication) || err.Error() != refreshFailureError || !strings.Contains(requestFailureDiagnostic(err), refreshFailureError) || strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
+	refreshFailureError := "OpenAI credential refresh failed:"
+	if errors.Is(err, ErrLoginRequired) || errors.Is(err, errRequestAuthentication) || !strings.HasPrefix(err.Error(), refreshFailureError) || !strings.Contains(requestFailureDiagnostic(err), refreshFailureError) || strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("refresh failure error = %v", err)
 	}
-	checkLineError(refreshFailureError)
+	if !strings.Contains(err.Error(), "Codex backend request failed with status 401 Unauthorized") || !strings.Contains(err.Error(), "token refresh failed with status 500 Internal Server Error") {
+		t.Fatalf("missing refresh causes: %v", err)
+	}
+	checkLineError(refreshFailureError, "Codex backend request failed with status 401 Unauthorized", "token refresh failed with status 500 Internal Server Error")
 	refreshStatus.Store(http.StatusOK)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	unauthorizedError := "OpenAI subscription authentication required; restart GoAster to authenticate: Codex backend request failed with status 401 Unauthorized\nCodex backend request failed with status 401 Unauthorized"
-	if !errors.Is(err, ErrLoginRequired) || err.Error() != unauthorizedError || !strings.Contains(requestFailureDiagnostic(err), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
+	unauthorizedError := "OpenAI subscription authentication required; restart GoAster to authenticate:"
+	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refreshed credentials error = %v", err)
 	}
-	checkLineError(unauthorizedError)
+	if strings.Count(err.Error(), "Codex backend request failed with status 401 Unauthorized") != 2 {
+		t.Fatalf("missing backend rejection causes: %v", err)
+	}
+	checkLineError(unauthorizedError, "Codex backend request failed with status 401 Unauthorized")
 
 	const customBatch = `{"output":[{"type":"function_call","call_id":"a","name":"custom_a","arguments":"{}"},{"type":"function_call","call_id":"b","name":"custom_b","arguments":"{}"}]}`
 	const builtinBatch = `{"output":[{"type":"function_call","call_id":"a","name":"web_search","arguments":"{}"},{"type":"function_call","call_id":"b","name":"web_fetch","arguments":"{}"},{"type":"function_call","call_id":"c","name":"shell_execute","arguments":"{}"}]}`

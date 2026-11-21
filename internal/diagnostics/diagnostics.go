@@ -161,7 +161,7 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 	}
 	walk(err, 0)
 	for i, field := range fields {
-		if i >= 32 {
+		if i >= 64 {
 			break
 		}
 		value := ""
@@ -180,13 +180,13 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			if len(field.Value) <= 96 && token(field.Value) == field.Value {
 				value = field.Value
 			}
-		case "model_detail", "status_detail", "backend_type_detail", "backend_code_detail", "request_id_detail":
+		case "model_detail", "status_detail", "backend_type_detail", "backend_code_detail", "backend_message_detail", "request_id_detail", "summary_detail":
 			value = safeDetailState(field.Value)
 		case "attempt", "attempts":
 			value = safeAttempt(field.Value)
 		case "elapsed_ms", "retry_wait_ms":
 			value = safeMilliseconds(field.Value)
-		case "tool_started_count", "tool_completed_count":
+		case "tool_started_count", "tool_completed_count", "request_bytes", "input_items", "message_count", "user_messages", "assistant_messages", "system_messages", "tool_calls", "tool_outputs", "other_items", "summary_bytes":
 			value = safeCount(field.Value)
 		case "tool_started", "tool_completed":
 			value = safeBoolean(field.Value)

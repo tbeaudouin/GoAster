@@ -99,6 +99,8 @@ func IsModelStreamError(err error) bool {
 }
 
 func modelStreamCauseDetail(err error) string {
+	var first backendError
+	found := false
 	for _, current := range requestFailureErrors(err) {
 		if local, ok := current.(localFailure); ok {
 			return local.Error()
@@ -107,8 +109,15 @@ func modelStreamCauseDetail(err error) string {
 			return "Tool handler failed; its outcome is uncertain."
 		}
 		if backend, ok := current.(backendError); ok {
-			return backend.Error()
+			if !found {
+				first, found = backend, true
+			} else if first.requestID == "" && backend.requestID != "" {
+				first.requestID = diagnostics.RequestID(backend.requestID)
+			}
 		}
+	}
+	if found {
+		return first.Error()
 	}
 	return ""
 }
@@ -1116,6 +1125,8 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 			}
 		}
 	}
+
+	replyContext = context.WithValue(replyContext, codexSummarySizeKey{}, len(summary))
 
 	// Checkpoints are independent snapshots: a failed save may have reached disk,
 	// but must not change the last acknowledged in-memory history.
