@@ -16,14 +16,19 @@ approval requirements.
   `/srv/git`.
 - Inspect each existing path component as a trusted real directory with
   appropriate ownership and access controls. Reject symlinks, unexpected
-  owners, non-directories, or paths writable by untrusted identities. Do not
-  broadly change permissions or ownership.
+  owners, non-directories, or paths writable by untrusted identities.
+- Use the existing service/session identity, including root if already running
+  as root; ordinary checkout setup requires no new user or identity switch.
+  Create only missing trusted parent directories needed for the approved
+  checkout, using that identity. Keep new directories non-world-writable and
+  inspect them before continuing; missing directories alone are not a blocker.
+  Do not change existing ownership or permissions or silently escalate identity.
 - Clone only to a nonexistent final destination. After cloning, verify that
   the destination is the exact Git root and that `origin` identifies the
   intended repository before using it.
-- If the approved identity cannot use the required path, stop and report the
-  exact path that needs scoped provisioning. Do not fall back elsewhere, use
-  root, or silently use `sudo`.
+- If a component is unsafe or the existing identity cannot safely create or
+  access the required path, stop and report the exact path and problem needing
+  scoped provisioning. Do not fall back elsewhere or silently use `sudo`.
 
 ## Inspect an existing destination
 

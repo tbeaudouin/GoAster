@@ -83,6 +83,12 @@ func TestDefaultFilesystemSkillContracts(t *testing.T) {
 	for _, phrase := range []string{
 		"/srv/git/<owner>/<repo>", "explicit path", "Keep existing approved repositories where they are",
 		"single path components", "trusted real directory", "symlinks", "scoped provisioning",
+		"appropriate ownership and access controls", "paths writable by untrusted identities",
+		"existing service/session identity, including root if already running as root",
+		"requires no new user or identity switch", "only missing trusted parent directories needed for the approved checkout",
+		"non-world-writable", "inspect them before continuing", "missing directories alone are not a blocker",
+		"Do not change existing ownership or permissions or silently escalate identity",
+		"cannot safely create or access the required path", "component is unsafe",
 		"Do not fall back elsewhere", "git status --short --ignored", "exact Git root",
 		"origin", "nested clone", "`pull`, `reset`, or `checkout` automatically",
 		"`github-auth`", "tokens in URLs", "`goaster-fork` workflow",
