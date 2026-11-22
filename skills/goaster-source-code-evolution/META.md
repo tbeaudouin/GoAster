@@ -1,2 +1,2 @@
 name: goaster-source-code-evolution
-description: Coordinate a requested GoAster source or skill change through testing, backup, deployment and verification under one approval.
+description: Coordinate GoAster source and binary changes under one approval; route local skill instructions to manage-skills.
