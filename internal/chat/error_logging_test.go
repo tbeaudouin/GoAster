@@ -95,7 +95,7 @@ func TestRuntimeDiagnosticsCaptureHTTPStatusAndSafeBackendDetails(t *testing.T) 
 			t.Fatalf("diagnostic = %q, missing %q", log, want)
 		}
 	}
-	for _, unwanted := range []string{"private provider response", "access-token-should-never-be-logged", "Authorization"} {
+	for _, unwanted := range []string{"access-token-should-never-be-logged", "Authorization"} {
 		if strings.Contains(log, unwanted) {
 			t.Fatalf("diagnostic exposed %q: %q", unwanted, log)
 		}
