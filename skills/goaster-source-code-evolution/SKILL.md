@@ -1,13 +1,7 @@
 # GoAster source code evolution
 
 Use this skill to evolve GoAster's own source code and safely update its active
-runtime. Before making source changes, ask the user: "Could a simple skill meet
-your need instead of changing GoAster's source code?" After that question is
-answered, offer once the optional research choice in
-[modify-goaster-source-code](../modify-goaster-source-code/SKILL.md): shared
-contributions, other agents' implementations, both, or neither. If that offer
-was already made, do not repeat it. Research may be skipped and never blocks
-approved implementation.
+runtime. Group the question “Could a simple skill meet your need instead of changing GoAster's source code?” and the optional research choice (shared contributions, other agents' implementations, both, or neither) into the single approval prompt below. Research is optional and never blocks approved implementation.
 
 ## Workflow
 
@@ -17,18 +11,9 @@ goaster-fork -> github-auth -> modify-goaster-source-code -> goaster-build-test 
 
 ## Coordinator boundaries
 
-This coordinator only sequences the named skills. Each stage keeps its own
-authentication, authorization, and approval gate. Upstream GitHub remains
-read-only, the user works in their own fork, and this workflow never creates a
-pull request.
+First load `goaster-env` and check `HCLOUD_TOKEN` in protected settings and then the process fallback as it directs. If missing, request setup through the private `/env` flow; never ask for the token in chat. If present, paginate `GET /v1/servers` and identify GoAster candidates from returned names and labels and available local runtime identity. If authentication fails or no candidates are found, report the actual problem and stop; do not ask for project or server IDs.
 
-Bind every approval to the exact GitHub host and fork identity, the
-`goaster-customization` branch, source SHA,
-local path, both built binary checksums, target host identity, affected
-services, release paths, and any helper path verified on that host. A change to
-any identity, SHA, path, or host invalidates the affected approval and all
-downstream results. Re-run the necessary preflight, build, or backup stage and
-obtain fresh approval; never carry an approval across a changed tuple.
+Present the discovered target and the whole process in one approval prompt: optional skill-versus-source and research choices, edits, fork and branch setup if needed, commit and push, builds and tests, snapshot with brief cost and retention information, deployment and restart. If there are multiple candidates, have the user choose among those discovered in this same prompt; do not guess. After approval, complete the process without stage-by-stage approval or reconfirming normal commits, SHA changes, backup, restart, or downstream stages. The delegated skills reuse this approval. Keep upstream read-only, work in the user's fork, and never create a pull request.
 
 Secrets remain in their approved local or server stores. Do not expose them in
 handoffs, logs, structured results, or backup manifests.

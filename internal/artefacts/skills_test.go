@@ -232,6 +232,35 @@ func TestFeatureInspirationPolicy(t *testing.T) {
 	}
 }
 
+func TestSourceWorkflowSingleApproval(t *testing.T) {
+	for _, tc := range []struct {
+		file      string
+		required  []string
+		forbidden []string
+	}{
+		{"goaster-source-code-evolution/SKILL.md", []string{"`goaster-env`", "`HCLOUD_TOKEN`", "process fallback", "private `/env`", "paginate `GET /v1/servers`", "returned names and labels", "multiple candidates", "one approval prompt", "without stage-by-stage approval"}, []string{"invalidates the affected approval"}},
+		{"goaster-fork/SKILL.md", []string{"reuse the source coordinator’s single approval", "coordinated work uses the existing approval"}, []string{"ask the user to explicitly choose whether to reuse"}},
+		{"goaster-build-test/SKILL.md", []string{"coordinated work continues under the existing approval"}, []string{"fresh approval", "separate review and approval"}},
+		{"goaster-backup/SKILL.md", []string{"coordinator's single approval", "snapshot is available"}, []string{"independent Hetzner access", "Confirm the server and Hetzner project"}},
+	} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "skills", tc.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := strings.Join(strings.Fields(string(data)), " ")
+		for _, want := range tc.required {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s missing %q", tc.file, want)
+			}
+		}
+		for _, unwanted := range tc.forbidden {
+			if strings.Contains(content, unwanted) {
+				t.Errorf("%s contains obsolete %q", tc.file, unwanted)
+			}
+		}
+	}
+}
+
 func TestInstallBundledStartersOnce(t *testing.T) {
 	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
 	if err != nil {

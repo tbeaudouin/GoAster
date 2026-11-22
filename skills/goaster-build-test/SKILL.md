@@ -1,7 +1,6 @@
 # GoAster build and test
 
-Validate an approved local GoAster fork and retain tested binaries for a
-separately approved runtime swap. This workflow does not deploy, contact
+Validate an approved local GoAster fork and retain tested binaries for a runtime swap. This workflow does not deploy, contact
 GitHub or a cloud provider, modify servers, send Telegram messages, or stop, restart,
 or replace the running agent.
 
@@ -14,8 +13,7 @@ or replace the running agent.
   approved checkout on the fork's `goaster-customization` branch, whether the
   implementation is a skill or source customization. Confirm the branch with
   `git branch --show-current`; stop if it differs. This branch requirement
-  does not authorize deployment. If the path or SHA changes, stop and obtain
-  fresh approval.
+  does not authorize deployment. Record any path or SHA change and verify the build against the actual checkout.
 - Preserve user changes. If requested Go files need formatting, run `gofmt`
   only on those files, inspect the diff, and report any changes.
 - Require a clean committed checkout, including ignored files. Check
@@ -28,8 +26,7 @@ or replace the running agent.
 ## Build and test
 
 Before running the full test suite, check whether any tests could contact
-external services or cause other side effects. Do not run those tests without
-the necessary approval.
+external services or cause other side effects. Include those tests in the approval plan; coordinated work uses the single approval.
 
 ```sh
 go build ./...
@@ -57,7 +54,7 @@ stop the running agent.
 
 The full-runtime check makes a real provider call with runtime tools, skills,
 and memory. It can execute model-selected tools despite the no-action prompt.
-Run it only when that risk and local state are approved. It starts a fresh
+Include that risk and local state in the approval plan; coordinated work uses the single approval. It starts a fresh
 session, so it does not test existing chat history or per-chat model choice.
 
 Set `SOURCE_ROOT` to the recorded checkout path, then run:
@@ -120,5 +117,4 @@ or runtime swap was performed.
 
 Clean up only the private task directory. Preserve authentication files and
 existing retained builds. A changed source, artifact, or checksum requires a
-new build/test result. Deployment and runtime swap require separate review
-and approval; see `goaster-deploy`.
+new build/test result. Standalone use does not authorize deployment; coordinated work continues under the existing approval via `goaster-deploy`.

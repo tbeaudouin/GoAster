@@ -3,15 +3,7 @@
 Before every deployment, create and verify a Hetzner snapshot of the exact
 target server. A successful, available snapshot is a required deployment gate.
 
-Before creating it:
-
-- Confirm the server and Hetzner project.
-- Obtain explicit approval for the snapshot, its expected cost and retention.
-- Explain that it can contain secrets and that a snapshot taken while the server
-  is running may not capture application data in a fully consistent state.
-- Identify essential data outside the server disk, including attached volumes,
-  and confirm a separate recovery plan for it.
-- Confirm the user has independent Hetzner access for manual recovery.
+Before creating it, identify the target server and explain the expected cost and retention. Include the snapshot in the coordinator's single approval; standalone backup requires approval. Explain that it can contain secrets and that a running snapshot may not capture application data consistently. Identify essential data outside the server disk, including attached volumes, for recovery planning.
 
 Wait for snapshot creation to complete,
 then verify that the snapshot is available and belongs to the target server.

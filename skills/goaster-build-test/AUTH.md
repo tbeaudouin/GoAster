@@ -11,6 +11,4 @@ cross-process refresh or concurrency guarantee. The tester is the running agent,
 so tests must never stop, restart, or replace it; doing so causes the test to
 fail.
 
-This workflow has no deployment or runtime-swap authorization. Retaining the
-two non-secret executables and their checksums does not authorize transferring
-or activating them.
+Standalone build/test does not authorize deployment. In the coordinated source workflow, the single approval also covers transfer and activation.

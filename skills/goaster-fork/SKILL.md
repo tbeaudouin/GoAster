@@ -18,8 +18,7 @@ or approval steps below.
 1. Verify the authenticated GitHub account and the public upstream
    repository, including its default branch and commit.
 
-2. Tell the user the fork will be public and named `GoAster`. Confirm
-   the GitHub account and, if local setup is requested, checkout path.
+2. Tell the user the fork will be public and named `GoAster`. Include the GitHub account and, if local setup is requested, checkout path in the approval plan.
    The fork owner must be the authenticated user.
 
 3. Check for `<account>/GoAster`. If it exists, verify that it is the
@@ -28,8 +27,7 @@ or approval steps below.
    report the blocker. If it is not the correct fork, stop and ask the user how
    to proceed. A 404 alone does not prove it is absent.
 
-4. Check the standard source branch if the fork exists. Ask the user
-   explicitly before reusing an existing branch at its observed commit.
+4. Check the standard source branch if the fork exists. Include reuse of an existing branch at its observed commit in the approval plan.
    For a missing branch, propose the fork's default commit as its base.
 
    If the fork does not exist, propose the verified upstream default
@@ -43,8 +41,7 @@ default branch and base commit, the standard branch name and its creation
 or reuse status, intended actions, and any local checkout path and setup. Do
 not ask the user to choose arbitrary branch names.
 
-Get explicit approval. If an approved detail changes, stop and obtain
-new approval. Recheck the account and target immediately before each
+Get explicit approval, or reuse the source coordinator’s single approval. Recheck the account and target immediately before each
 creation.
 
 ## Create and verify
@@ -56,8 +53,7 @@ creation.
    Do not automatically retry an uncertain creation.
 
 2. Recheck the standard branch. Create a missing branch at its approved
-   base commit. If a branch already exists, ask the user to explicitly
-   choose whether to reuse it at its observed commit. Never overwrite it.
+   base commit. If a branch already exists, reuse it as approved. Never overwrite it.
 
 3. If a creation fails or times out, inspect the result without writing.
    Stop if the result is uncertain; do not blindly retry.
@@ -78,10 +74,8 @@ Report the verified account, fork URL and visibility, upstream default
 branch and commit, the branch name and commit, whether it was created
 or reused, and the checkout path if applicable.
 
-Stop after verification. Never write to the upstream repository; do not modify
-or push to it. Only the approved fork may receive public changes. Before any
-commit or push, show the exact changes and destination branch and obtain
-explicit approval. Before an upstream pull request, verify that the complete
+When standalone, stop after verification. When coordinated, continue under the single approval. Never write to the upstream repository; do not modify
+or push to it. Only the approved fork may receive public changes. For standalone use, obtain approval before commit or push; coordinated work uses the existing approval. Before an upstream pull request, verify that the complete
 skill or source implementation is committed on `goaster-customization` and
 publicly accessible. Approval for one write does not authorize deletes,
 overwrites, force pushes, resets, changes to upstream contents, refs, settings,
