@@ -234,17 +234,43 @@ func TestSourceWorkflowSingleApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Check the discovered description itself: it is shown before full guidance is loaded.
+	for _, line := range strings.Split(metadata, "\n") {
+		if strings.Contains(line, "verify the exact project") {
+			t.Errorf("discovery retains project verification gate: %s", line)
+		}
+	}
+	if !strings.Contains(metadata, "token scoped to its Hetzner project") {
+		t.Error("Hetzner authentication metadata missing token scope")
+	}
+	root, err := Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{"SKILL.md", "AUTH.md"} {
+		data, err := os.ReadFile(filepath.Join(root, "skills", "hetzner-auth", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		guidance := strings.Join(strings.Fields(string(data)), " ")
+		for _, phrase := range []string{"token scopes its provider project", "project name or ID", "local identity", "If authentication fails"} {
+			if !strings.Contains(guidance, phrase) {
+				t.Errorf("hetzner-auth/%s missing %q", file, phrase)
+			}
+		}
+	}
 	for _, tc := range []struct {
 		name                string
 		required, forbidden []string
 	}{
-		{"goaster-source-code-evolution", []string{"`goaster-env`", "`HCLOUD_TOKEN`", "process fallback", "private `/env`", "Paginate accessible `GET /v1/servers`", "multiple candidates", "authenticated API", "Never ask the user for Hetzner project or server IDs", "`hetzner-auth`", "one approval prompt", "Skip research by default", "without stage-by-stage approval", "commit and push", "snapshot cost and retention", "verification"}, []string{"invalidates the affected approval"}},
+		{"hetzner-auth", []string{"Authentication guidance", "token scopes its provider project", "returned server evidence and local identity", "project name or ID", "If authentication fails", "remains ambiguous after selection in the existing approval"}, []string{"verify the exact project", "does not prove project identity", "verify the target independently"}},
+		{"goaster-source-code-evolution", []string{"`goaster-env`", "`HCLOUD_TOKEN`", "process fallback", "private `/env`", "Paginate accessible `GET /v1/servers`", "multiple candidates", "authenticated API", "Never ask for Hetzner project names or IDs, server IDs, or recovery plans", "`hetzner-auth`", "one approval prompt", "Skip research by default", "without stage-by-stage approval", "commit and push", "snapshot cost and retention", "estimate is unavailable", "proceed under it", "explicit user limit", "verification"}, []string{"invalidates the affected approval"}},
 		{"modify-goaster-source-code", []string{"single full-process coordinator", "Feature configuration is separate from core configuration", "do not require another approval"}, []string{"separately approved", "Before implementation, offer"}},
 		{"goaster-fork", []string{"coordinator's single approval", "branch reuse"}, []string{"explicitly chose", "Recheck the account and target immediately before each"}},
 		{"git-repositories", []string{"Ignored files alone are not a blocker", "single approval"}, []string{"git status --short --ignored", "Never overwrite an existing tree or run"}},
 		{"github-auth", []string{"authenticated API login as the account", "Necessary tool setup uses the source workflow's single approval, without another prompt"}, []string{"Confirm the login matches the account the user named", "report the missing CLI as a blocker"}},
 		{"goaster-build-test", []string{"optional, not a universal deployment gate", "continues under the existing approval", "Ignored files alone", "target OS and architecture"}, []string{"clean committed checkout, including ignored files", "full-runtime prompt check pass"}},
-		{"goaster-backup", []string{"coordinator's single approval", "snapshot is available"}, []string{"independent Hetzner access", "essential data outside the server disk"}},
+		{"goaster-backup", []string{"coordinator's single approval", "snapshot is available", "estimate is unavailable", "proceed under the existing approval", "operator recovery-access questionnaire", "user’s stated data-location scope"}, []string{"independent Hetzner access", "essential data outside the server disk"}},
 		{"goaster-deploy", []string{"Automatically check service status", "automatic continuation cannot be guaranteed", "Before restarting, save concise pickup state"}, []string{"must send a new message", "When the user asks for verification"}},
 		{"goaster-find-contributions", []string{"without another prompt", "Standalone discovery does not authorize adoption"}, []string{"Using one requires a separate user request"}},
 		{"goaster-feature-inspiration", []string{"optional research workflow"}, nil},

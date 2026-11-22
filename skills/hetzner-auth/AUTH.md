@@ -36,8 +36,11 @@ not a required pricing, discovery, or preapproval gate. Public Hetzner Cloud
 pages are the source for indicative catalogue and rough public price
 information; public rough prices are informational only, not a target, ceiling,
 ranking, or billing discussion, and do not guarantee
-capacity. Authentication does not prove project identity; do not invent a
-project metadata check. If authentication fails, stop auth-dependent work.
+capacity. The token scopes its provider project. Authenticate and verify the selected
+server using returned server evidence and local identity; stop if it is absent or
+remains ambiguous after selection in the existing approval. Do not ask for or invent a project name or ID, console screenshot,
+independent access proof, project metadata, or user questionnaire. If authentication
+fails, stop auth-dependent work.
 Emit one bounded ERROR diagnostic with safe operation and status context at
 runtime failure boundaries, as repository rules require.
 
