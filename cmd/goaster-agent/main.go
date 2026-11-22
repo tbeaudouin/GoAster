@@ -35,6 +35,31 @@ import (
 	"goaster/internal/telegram"
 )
 
+var restartWorkMu sync.RWMutex
+var restartGuardMu sync.Mutex
+var restartGuardID string
+var restartGuardHeld bool
+var restartGuardCommitted bool
+var restartGuardDuration = 50 * time.Second
+
+func expireRestartGuard(id string) {
+	restartGuardMu.Lock()
+	defer restartGuardMu.Unlock()
+	if restartGuardHeld && restartGuardID == id && !restartGuardCommitted {
+		restartGuardHeld = false
+		restartWorkMu.Unlock()
+	}
+}
+
+func releaseRestartGuard(id string) {
+	restartGuardMu.Lock()
+	defer restartGuardMu.Unlock()
+	if restartGuardHeld && restartGuardID == id {
+		restartGuardHeld = false
+		restartWorkMu.Unlock()
+	}
+}
+
 const maxChatEnvelopeBytes int64 = 1 << 20
 
 const (
@@ -340,7 +365,7 @@ func serve(store chat.CredentialStore) (serveErr error) {
 			serveErr = errors.Join(serveErr, err)
 		}
 	}()
-	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntime(provider.CheckAuth, setup.registry, controlSecret, sessionFor, deliveryQueue), ReadHeaderTimeout: 10 * time.Second}
+	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntime(provider.CheckAuth, setup.registry, controlSecret, sessionFor, deliveryQueue, backgroundManager.List), ReadHeaderTimeout: 10 * time.Second}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -386,7 +411,7 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 	}), cronDeliveryQueue{})
 }
 
-func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue) http.Handler {
+func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue, listBackground ...func(context.Context) ([]command.BackgroundSession, error)) http.Handler {
 	if sessionFor == nil {
 		sessionFor = func(int64, int64) agentSession { return nil }
 	}
@@ -492,6 +517,77 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			diagnostics.Error("agent.cron.outbox.ack_encode", err)
 		}
 	})
+	mux.HandleFunc("/internal/restart-guard", func(w http.ResponseWriter, r *http.Request) {
+		if !validControlRequest(r, controlSecret) {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodPut {
+			id := r.Header.Get("X-Restart-Guard")
+			restartGuardMu.Lock()
+			valid := restartGuardHeld && restartGuardID == id && len(id) == 32
+			if valid {
+				restartGuardCommitted = true
+			}
+			restartGuardMu.Unlock()
+			if !valid {
+				http.Error(w, "invalid guard", http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			id := r.Header.Get("X-Restart-Guard")
+			if len(id) != 32 {
+				http.Error(w, "invalid guard", http.StatusBadRequest)
+				return
+			}
+			releaseRestartGuard(id)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !restartWorkMu.TryLock() {
+			http.Error(w, "busy", http.StatusConflict)
+			return
+		}
+		if len(listBackground) > 0 && listBackground[0] != nil {
+			sessions, err := listBackground[0](r.Context())
+			if err != nil {
+				restartWorkMu.Unlock()
+				diagnostics.Error("agent.restart.background", err)
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			for _, session := range sessions {
+				if session.State != "exited" && session.State != "failed" && session.State != "stopped" && session.State != "timed_out" && session.State != "output_limited" {
+					restartWorkMu.Unlock()
+					http.Error(w, "busy", http.StatusConflict)
+					return
+				}
+			}
+		}
+		var token [16]byte
+		if _, err := cryptorand.Read(token[:]); err != nil {
+			restartWorkMu.Unlock()
+			diagnostics.Error("agent.restart.token", err)
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		id := hex.EncodeToString(token[:])
+		restartGuardMu.Lock()
+		restartGuardID = id
+		restartGuardHeld = true
+		restartGuardCommitted = false
+		restartGuardMu.Unlock()
+		time.AfterFunc(restartGuardDuration, func() { expireRestartGuard(id) })
+		w.Header().Set("X-Restart-Guard", id)
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		requestReference := newAgentRequestReference()
 		w.Header().Set(agentRequestReferenceHeader, requestReference)
@@ -503,6 +599,11 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
+		if !restartWorkMu.TryRLock() {
+			http.Error(w, "busy", http.StatusConflict)
+			return
+		}
+		defer restartWorkMu.RUnlock()
 		if r.Header.Get("Content-Type") != "application/json" {
 			http.Error(w, "expected application/json", http.StatusUnsupportedMediaType)
 			return

@@ -1,6 +1,3 @@
 # Authentication
 
-Each delegated stage supplies its own authentication guidance. Begin with
-`github-auth` for GitHub access and use the verified local or remote session
-for later stages. The coordinator does not collect, copy, or relay credentials
-between stages.
+First use `goaster-env` to check `HCLOUD_TOKEN` without exposing it, then authenticate server discovery. Follow each delegated stage's authentication guidance without collecting, copying, or relaying credentials. Authentication failures are reported as encountered.

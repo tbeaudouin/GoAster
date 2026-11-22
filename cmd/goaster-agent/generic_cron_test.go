@@ -866,3 +866,59 @@ func TestGenericCronNoCapacitySelfDisableWinsRetry(t *testing.T) {
 		t.Fatal("self-disabled job replayed")
 	}
 }
+
+func TestRestartGuardCronRetryPersistsBeforeExecution(t *testing.T) {
+	for _, kind := range []string{scheduler.ScheduleAt, scheduler.ScheduleEvery} {
+		t.Run(kind, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			now := time.Unix(2100000000, 0)
+			calls := 0
+			factory := func(int64, int64) agentSession {
+				return genericCronSession{replyScheduled: func(context.Context, string) (string, error) { calls++; return "done", nil }}
+			}
+			newJobs := func() cronSchedulerRuntime {
+				j, err := newCronSchedulerWithMigrationAt(factory, func(scheduler.Job, string) error { return nil }, nil, func() time.Time { return now })
+				if err != nil {
+					t.Fatal(err)
+				}
+				return j
+			}
+			jobs := newJobs()
+			job := scheduler.Job{Kind: kind, Message: "reminder", OriginChatID: 42, OriginChatType: "private", MaxRuns: 1}
+			if kind == scheduler.ScheduleAt {
+				job.AtSeconds = 1
+			} else {
+				job.EverySeconds = 1
+			}
+			added, err := jobs.Add(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(time.Second)
+			restartWorkMu.Lock()
+			jobs.RunDue(context.Background())
+			restartWorkMu.Unlock()
+			if calls != 0 {
+				t.Fatal("work ran under guard")
+			}
+			jobs = newJobs()
+			saved, ok := jobs.Get(added.ID)
+			if !ok || !saved.Enabled || saved.ReviewRequired || saved.RunCount != 0 || saved.NextRun == nil {
+				t.Fatalf("retry not durable: %+v", saved)
+			}
+			now = now.Add(6 * time.Second)
+			jobs.RunDue(context.Background())
+			jobs.RunDue(context.Background())
+			if calls != 1 {
+				t.Fatalf("executions = %d", calls)
+			}
+			jobs = newJobs()
+			saved, ok = jobs.Get(added.ID)
+			if ok && (saved.Enabled || saved.RunCount != 1) {
+				t.Fatalf("completed state: %+v", saved)
+			}
+		})
+	}
+}

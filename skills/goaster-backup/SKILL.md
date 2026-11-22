@@ -1,23 +1,7 @@
 # GoAster backup and recovery
 
-Before every deployment, create and verify a Hetzner snapshot of the exact
-target server. A successful, available snapshot is a required deployment gate.
+Use `goaster-env` and `hetzner-auth` to identify the target and keep credentials private. The coordinator's single approval covers snapshot cost and retention; a standalone snapshot requires one scoped approval covering these. Use a current official public snapshot estimate when obtainable; otherwise say the estimate is unavailable and proceed under the existing approval with that uncertainty, respecting any explicit user limit. Price lookup is agent best effort: never ask the user to research or quote the console snapshot price or supply its amount, currency, or billing period. Never invent zero, free, or an unverified quote. Do not delay for a price or retention-only approval after a quote becomes known. Use established retention or state the default to keep the snapshot until the user requests deletion alongside cost or uncertainty in the one approval; do not delete snapshots automatically. No pricing API call or separate approval is required.
 
-Before creating it:
+At the backup step, after the one applicable approval, create and verify the snapshot immediately, without first asking about essential off-server data, external databases, object storage, a separate recovery plan, or independent console access. External-data recovery planning is outside this routine snapshot workflow and is not a blocker. A snapshot scope limitation may be a concise FYI, not a question; do not assert that the snapshot covers off-server data. Accept the user’s stated data-location scope without asking again. Explain that snapshots can contain secrets and that a running snapshot may not capture application data consistently.
 
-- Confirm the server and Hetzner project.
-- Obtain explicit approval for the snapshot, its expected cost and retention.
-- Explain that it can contain secrets and that a snapshot taken while the server
-  is running may not capture application data in a fully consistent state.
-- Identify essential data outside the server disk, including attached volumes,
-  and confirm a separate recovery plan for it.
-- Confirm the user has independent Hetzner access for manual recovery.
-
-Wait for snapshot creation to complete,
-then verify that the snapshot is available and belongs to the target server.
-Record its ID for recovery.
-
-If any step fails or is unclear, stop. Do not deploy.
-
-Recovery is manual: if deployment fails, an operator decides whether to restore
-the snapshot. Do not set up automatic rollback.
+Create a snapshot of the target server, wait for completion, verify that the snapshot is available and belongs to the target server, and record its ID for recovery. Report actual failure and do not deploy without the verified snapshot. Verify an uncertain provider mutation before proceeding; do not repeat it. Do not ask for a project name or ID, operator recovery-access questionnaire, or another approval. Recovery is manual; do not set up automatic rollback.

@@ -1,17 +1,5 @@
 # GoAster deployment
 
-Deploy a new version of GoAster by building and testing the binaries, installing them, and restarting the services. GoAster owns its runtime after installation and does not depend on GoAsterWeb for later deployments.
+Use the coordinator's single approval for installation, restart and verification. For standalone deployment, obtain approval covering these actions and the snapshot. Read the README and verify the installed paths and service configuration. Build and test the requested revision, and use `goaster-backup` to create and verify an available snapshot before deployment. Stop and report actual failures.
 
-1. Read the GoAster README for the standard installation layout. Verify the actual binary paths and service configuration before deploying.
-2. Identify the source revision to deploy. All new binaries for deployment
-   must be built from the approved fork checkout's `goaster-customization`
-   branch, whether the implementation is a skill or source customization.
-   Confirm the branch and exact commit before building.
-3. Build and test the new binaries. Stop and report any failure.
-4. Safely replace the installed binaries in place.
-5. Arrange for the restart request to finish independently of the agent process being stopped.
-6. Warn the user that the restart will interrupt the conversation and that they must send a new message afterward to request verification.
-7. If both services are installed, request their restart together: systemctl restart goaster-agent.service goaster-telegram.service. If Telegram is not installed, restart only the agent service.
-8. When the user asks for verification after the restart, check the service status and confirm that the running binaries match the tested deployment. Report any failure or uncertainty.
-
-Use the read-write-temp-files skill for temporary files. Do not add automatic rollback or recovery mechanisms. Report exceptional cases clearly for manual follow-up.
+Install the tested binaries safely, preserving unrelated work. Arrange the restart request to finish independently of the process being stopped; restart both `goaster-agent.service` and `goaster-telegram.service` together if installed, otherwise restart the agent. Before restarting, save concise pickup state with the deployment and verification steps, factual approval and uncertainty status, and verified evidence; do not save obsolete permission questions as executable instructions. Tell the user that the conversation may be interrupted and automatic continuation cannot be guaranteed if the session is terminated. Automatically check service status and confirm the running binaries match the tested deployment if the session survives. Report failures or uncertainty. Do not add automatic rollback.

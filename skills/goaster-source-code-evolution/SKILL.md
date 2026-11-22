@@ -1,34 +1,11 @@
 # GoAster source code evolution
 
-Use this skill to evolve GoAster's own source code and safely update its active
-runtime. Before making source changes, ask the user: "Could a simple skill meet
-your need instead of changing GoAster's source code?" After that question is
-answered, offer once the optional research choice in
-[modify-goaster-source-code](../modify-goaster-source-code/SKILL.md): shared
-contributions, other agents' implementations, both, or neither. If that offer
-was already made, do not repeat it. Research may be skipped and never blocks
-approved implementation.
+Coordinate a requested source or skill change through installation and verification. Direct `modify-goaster-source-code` requests use this same coordinator.
 
-## Workflow
+First load `goaster-env` and check `HCLOUD_TOKEN` in protected settings and the process fallback. If missing, request setup only through private `/env`. Use `hetzner-auth` for provider discovery. Paginate accessible `GET /v1/servers` and identify GoAster candidates and target OS and architecture from available server evidence, returned names and labels, and local runtime identity. Never ask for Hetzner project names or IDs, server IDs, or recovery plans; use token-scoped discovery and available server evidence. Infer the GitHub account using the authenticated API, and inspect the existing public fork, standard branch and default checkout using `github-auth`, `goaster-fork` and `git-repositories`. Missing credentials or failed discovery are blockers; missing forks, branches and directories are routine setup.
 
-```text
-goaster-fork -> github-auth -> modify-goaster-source-code -> goaster-build-test -> goaster-backup -> goaster-deploy
-```
+Present one approval prompt covering the requested change, the discovered target server (select among discovered candidates if multiple candidates exist), public fork and checkout/branch setup, source/skill/docs/tests edits and fixes, necessary dependencies and tools, ordinary git operations, commit and push, build and test, snapshot cost and retention, installation, service restart and verification. A skill instead of source and research into shared contributions, other agents' implementations, both, or neither are optional choices in that prompt, never separate mandatory questions. Use a current official public snapshot estimate when obtainable; otherwise say the estimate is unavailable in the same approval and proceed under it, respecting any explicit user limit. Price lookup is agent best effort; never ask the user to research or quote the console snapshot price or supply its amount, currency, or billing period, and never invent zero, free, or an unverified quote. Do not delay for a price or retention-only approval after a quote becomes known. Use retention already set; otherwise state the reasonable default to keep the snapshot until the user requests deletion alongside cost or uncertainty in the one approval. Do not delete snapshots automatically. Skip research by default unless chosen there.
 
-## Coordinator boundaries
+After approval continue the whole process automatically through `goaster-fork`, `modify-goaster-source-code`, `goaster-build-test`, `goaster-backup` and `goaster-deploy`, without stage-by-stage approval or review handoff. The approval covers reuse of an existing branch, ordinary checkout, fetch, merge or rebase for this task, plan implementation, adopting researched ideas, test fixes and setup. Normal SHA, path or artifact changes do not expire it. Preserve unrelated user work and keep upstream read-only; do not publish a contribution or pull request. Report actual failures and missing credentials as blockers, not approval requests. Keep secrets out of chat, logs and artifacts.
 
-This coordinator only sequences the named skills. Each stage keeps its own
-authentication, authorization, and approval gate. Upstream GitHub remains
-read-only, the user works in their own fork, and this workflow never creates a
-pull request.
-
-Bind every approval to the exact GitHub host and fork identity, the
-`goaster-customization` branch, source SHA,
-local path, both built binary checksums, target host identity, affected
-services, release paths, and any helper path verified on that host. A change to
-any identity, SHA, path, or host invalidates the affected approval and all
-downstream results. Re-run the necessary preflight, build, or backup stage and
-obtain fresh approval; never carry an approval across a changed tuple.
-
-Secrets remain in their approved local or server stores. Do not expose them in
-handoffs, logs, structured results, or backup manifests.
+At the backup step, after the one applicable approval, create and verify the snapshot immediately, without first asking about essential off-server data, external databases, object storage, a separate recovery plan, or independent console access. External-data recovery planning is outside this routine snapshot workflow and is not a blocker. A snapshot scope limitation may be a concise FYI, not a question; do not assert that the snapshot covers off-server data. Verify an uncertain provider mutation before proceeding; do not repeat it.

@@ -636,7 +636,7 @@ type backendError struct {
 	kindState             string
 	codeState             string
 	requestIDState        string
-	message               string
+	messageState          string
 }
 
 func (err backendError) Error() string {
@@ -645,7 +645,7 @@ func (err backendError) Error() string {
 		message += fmt.Sprintf(" with status %d %s", err.status, http.StatusText(err.status))
 	}
 	for _, field := range err.DiagnosticFields() {
-		if field.Key != "status" && field.Key != "reason" && !strings.HasSuffix(field.Key, "_detail") {
+		if field.Key != "status" && field.Key != "reason" {
 			message += " " + field.Key + "=" + field.Value
 		}
 	}
@@ -653,9 +653,6 @@ func (err backendError) Error() string {
 }
 func (err backendError) DiagnosticFields() []diagnostics.Field {
 	fields := []diagnostics.Field{{Key: "reason", Value: err.prefix}}
-	if err.message != "" {
-		fields = append(fields, diagnostics.Field{Key: "backend_message", Value: err.message})
-	}
 	if err.status != 0 {
 		fields = append(fields, diagnostics.Field{Key: "status", Value: strconv.Itoa(err.status)})
 	}
@@ -669,6 +666,7 @@ func (err backendError) DiagnosticFields() []diagnostics.Field {
 	} else {
 		fields = append(fields, diagnostics.Field{Key: "backend_code_detail", Value: backendDetailState(err.codeState)})
 	}
+	fields = append(fields, diagnostics.Field{Key: "backend_message_detail", Value: backendDetailState(err.messageState)})
 	if err.requestID != "" {
 		fields = append(fields, diagnostics.Field{Key: "request_id", Value: err.requestID})
 	} else {
@@ -701,14 +699,19 @@ func newBackendError(prefix string, status int, body []byte, requestID string) e
 	return backendError{
 		prefix:         prefix,
 		status:         status,
-		message:        diagnostics.RemoteMessage(detail.Message),
 		kind:           kind,
 		code:           code,
 		requestID:      diagnostics.RequestID(requestID),
-		kindState:      backendDetailStateForValue(detail.Type, kind, typePresent),
-		codeState:      backendDetailStateForValue(detail.Code, code, codePresent),
-		requestIDState: backendDetailStateForValue(requestID, diagnostics.RequestID(requestID), strings.TrimSpace(requestID) != ""),
+		kindState:      backendDetailStateForValue(kind, typePresent),
+		codeState:      backendDetailStateForValue(code, codePresent),
+		requestIDState: backendDetailStateForValue(diagnostics.RequestID(requestID), strings.TrimSpace(requestID) != ""),
+		messageState:   backendDetailStateForValue("", rawFieldPresent(rawDetail, "message")),
 	}
+}
+
+func rawFieldPresent(fields map[string]json.RawMessage, key string) bool {
+	_, present := fields[key]
+	return present
 }
 
 func backendDetailState(state string) string {
@@ -718,11 +721,11 @@ func backendDetailState(state string) string {
 	return "absent"
 }
 
-func backendDetailStateForValue(raw, safe string, present bool) string {
+func backendDetailStateForValue(safe string, present bool) string {
 	if safe != "" {
 		return "present"
 	}
-	if !present || strings.TrimSpace(raw) == "" {
+	if !present {
 		return "absent"
 	}
 	return "unrecognized"
@@ -733,7 +736,7 @@ func backendErrorWithRequestID(prefix, requestID string) backendError {
 	return backendError{
 		prefix:         prefix,
 		requestID:      safeRequestID,
-		requestIDState: backendDetailStateForValue(requestID, safeRequestID, strings.TrimSpace(requestID) != ""),
+		requestIDState: backendDetailStateForValue(safeRequestID, strings.TrimSpace(requestID) != ""),
 	}
 }
 
@@ -861,6 +864,13 @@ func (err providerFailure) Error() string {
 	return err.cause.Error()
 }
 
+func (s codexRequestShape) summaryText() string {
+	if !s.summaryAvailable {
+		return "absent"
+	}
+	return strconv.Itoa(s.summaryBytes) + " bytes"
+}
+
 func (err providerFailure) Unwrap() error { return err.cause }
 
 func (err providerFailure) DiagnosticFields() []diagnostics.Field {
@@ -894,7 +904,57 @@ func providerFailureInfo(err error) (string, int, bool) {
 	return "", 0, false
 }
 
+type codexSummarySizeKey struct{}
+
+type codexRequestShape struct {
+	bytes, items, messages, users, assistants, systems, calls, outputs, other, summaryBytes int
+	summaryAvailable                                                                        bool
+}
+
+func (s codexRequestShape) fields() []diagnostics.Field {
+	fields := []diagnostics.Field{}
+	for _, v := range []struct {
+		key   string
+		value int
+	}{{"request_bytes", s.bytes}, {"input_items", s.items}, {"message_count", s.messages}, {"user_messages", s.users}, {"assistant_messages", s.assistants}, {"system_messages", s.systems}, {"tool_calls", s.calls}, {"tool_outputs", s.outputs}, {"other_items", s.other}} {
+		fields = append(fields, diagnostics.Field{Key: v.key, Value: strconv.Itoa(v.value)})
+	}
+	if s.summaryAvailable {
+		fields = append(fields, diagnostics.Field{Key: "summary_bytes", Value: strconv.Itoa(s.summaryBytes)})
+	} else {
+		fields = append(fields, diagnostics.Field{Key: "summary_detail", Value: "absent"})
+	}
+	return fields
+}
+
+func requestShape(ctx context.Context, payload []byte, input []codexInputItem) codexRequestShape {
+	s := codexRequestShape{bytes: len(payload), items: len(input)}
+	s.summaryBytes, s.summaryAvailable = ctx.Value(codexSummarySizeKey{}).(int)
+	for _, item := range input {
+		switch item.Type {
+		case "message":
+			s.messages++
+			switch item.Role {
+			case "user":
+				s.users++
+			case "assistant":
+				s.assistants++
+			case "system", "developer":
+				s.systems++
+			}
+		case "function_call":
+			s.calls++
+		case "function_call_output":
+			s.outputs++
+		default:
+			s.other++
+		}
+	}
+	return s
+}
+
 type codexAttemptFailure struct {
+	shape           codexRequestShape
 	cause           error
 	reference       string
 	model           string
@@ -914,7 +974,7 @@ func (err codexAttemptFailure) Error() string {
 	if err.cause == nil {
 		return "Codex request failed"
 	}
-	return err.cause.Error()
+	return err.cause.Error() + fmt.Sprintf(" (request bytes=%d input items=%d messages=%d user=%d assistant=%d system=%d tool calls=%d tool outputs=%d other=%d summary=%s)", err.shape.bytes, err.shape.items, err.shape.messages, err.shape.users, err.shape.assistants, err.shape.systems, err.shape.calls, err.shape.outputs, err.shape.other, err.shape.summaryText())
 }
 
 func (err codexAttemptFailure) Unwrap() error { return err.cause }
@@ -932,6 +992,7 @@ func (err codexAttemptFailure) DiagnosticFields() []diagnostics.Field {
 		{Key: "retry_decision", Value: err.retryDecision},
 		{Key: "reason", Value: err.reason},
 	}
+	fields = append(fields, err.shape.fields()...)
 	fields = append(fields,
 		diagnostics.Field{Key: "tool_started_count", Value: strconv.Itoa(err.toolProgress.Started)},
 		diagnostics.Field{Key: "tool_completed_count", Value: strconv.Itoa(err.toolProgress.Completed)},
@@ -2379,7 +2440,7 @@ func (p *CodexProvider) requestCodex(ctx context.Context, credential Credential,
 			}
 		}
 		failures = append(failures, codexAttemptFailure{
-			cause: err, reference: requestReference(ctx), model: codexDiagnosticModel(model), modelState: codexModelDetailState(model),
+			cause: err, shape: requestShape(ctx, payload, input), reference: requestReference(ctx), model: codexDiagnosticModel(model), modelState: codexModelDetailState(model),
 			status: status, attempt: attempt, elapsed: attemptResult.elapsed, retryWait: plan.wait,
 			retryWaitSource: plan.waitSource,
 			toolProgress:    codexToolProgressFromContext(ctx), retryDecision: decision, reason: reason,
@@ -2454,7 +2515,7 @@ type codexOutputContent struct {
 type codexStreamEvent struct {
 	Type      string           `json:"type"`
 	Code      string           `json:"code"`
-	Message   string           `json:"message"`
+	Message   json.RawMessage  `json:"message"`
 	Delta     string           `json:"delta"`
 	Text      string           `json:"text"`
 	ItemID    string           `json:"item_id"`
@@ -2467,9 +2528,9 @@ type codexStreamEvent struct {
 }
 
 type codexEventError struct {
-	Type    string `json:"type"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Type    string          `json:"type"`
+	Code    string          `json:"code"`
+	Message json.RawMessage `json:"message"`
 }
 
 type codexFunctionCall struct {
@@ -2684,12 +2745,25 @@ func parseCodexStreamResponse(body []byte) (codexParsedResponse, error) {
 		case "response.failed", "response.incomplete", "error":
 			sawKnownEvent = true
 			detail := codexEventError{Code: event.Code, Message: event.Message}
+			var rawEvent map[string]json.RawMessage
+			_ = json.Unmarshal([]byte(data), &rawEvent)
+			rawDetail := rawEvent
+			nestedDetail := false
 			if event.Error != nil {
+				nestedDetail = true
 				detail = *event.Error
+				rawDetail = nil
+				_ = json.Unmarshal(rawEvent["error"], &rawDetail)
 			}
 			if detail.Type == "" && detail.Code == "" && event.Response != nil {
 				detail = event.Response.Error
+				nestedDetail = true
+				var rawResponse map[string]json.RawMessage
+				_ = json.Unmarshal(rawEvent["response"], &rawResponse)
+				rawDetail = nil
+				_ = json.Unmarshal(rawResponse["error"], &rawDetail)
 			}
+			typePresent := nestedDetail && rawFieldPresent(rawDetail, "type")
 			kind := diagnostics.BackendValue(detail.Type)
 			code := diagnostics.BackendValue(detail.Code)
 			classification := modelStreamProviderError
@@ -2707,12 +2781,12 @@ func parseCodexStreamResponse(body []byte) (codexParsedResponse, error) {
 				Classification: classification,
 				Retryable:      retryable,
 				Cause: backendError{
-					prefix:    "Codex response failed: backend returned an error",
-					message:   diagnostics.RemoteMessage(detail.Message),
-					kind:      kind,
-					code:      code,
-					kindState: backendDetailStateForValue(detail.Type, kind, strings.TrimSpace(detail.Type) != ""),
-					codeState: backendDetailStateForValue(detail.Code, code, strings.TrimSpace(detail.Code) != ""),
+					prefix:       "Codex response failed: backend returned an error",
+					kind:         kind,
+					code:         code,
+					kindState:    backendDetailStateForValue(kind, typePresent),
+					codeState:    backendDetailStateForValue(code, rawFieldPresent(rawDetail, "code")),
+					messageState: backendDetailStateForValue("", rawFieldPresent(rawDetail, "message")),
 				},
 			}
 		case "response.completed":

@@ -11,7 +11,6 @@ When creating or modifying a skill, keep all three files aligned. Use simple, di
 Before creating a new skill, suggest to the user that they may optionally
 search [goaster-find-contributions](../goaster-find-contributions/SKILL.md) for
 shared GoAster skills that may help. Search only if the user chooses it; the
-user may skip it. Do not implicitly decide to search, install, or adopt a
-contribution automatically.
+user may skip it. In the coordinated source workflow, include this optional choice in the single approval and skip research by default; adoption for the approved task needs no further prompt.
 
 Do not list every edge case, fallback, or constraint. Trust the model to apply its own safeguards when using the skill.

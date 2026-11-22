@@ -96,6 +96,8 @@ nothing to stop. Topics within the same chat share conversation history and mode
 settings; `/clear` cancels active turns and clears the whole chat. Ordinary
 requests in that chat run in order; `/m` remains available during a turn.
 
+The paired account can send bare `/restart` to restart the idle `goaster-agent.service` on systemd installations. The adapter refuses while Telegram requests or agent work are active; use `/stop` for an active turn and try again when idle. It acknowledges before restarting and reports readiness only after the service restart completes and the health check succeeds. If the restart outcome is uncertain, further work remains blocked and the service status must be verified manually. Scheduled work refused by the restart guard is retained for a later attempt. Conversation histories and credentials are retained.
+
 The adapter handles ordinary text, one image or document attachment, and
 `/clear`. Media is validated and bounded before the current turn; temporary
 files are private and removed after the request. Telegram bot tokens and

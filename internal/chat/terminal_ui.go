@@ -29,7 +29,7 @@ const (
 
 	terminalEnvHelp   = "- /env: securely import environment variables."
 	terminalFileHelp  = "- /file: inspect non-secret files."
-	terminalClearHelp = "- /clear: clear this conversation's history."
+	terminalClearHelp = "- /clear [n]: clear history or remove n recent user turns."
 )
 
 // terminalUI keeps the interactive presentation separate from the line-based

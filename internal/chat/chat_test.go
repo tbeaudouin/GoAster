@@ -220,7 +220,7 @@ func TestLoop(t *testing.T) {
 		"chat provider", "Type a message, then press Enter.",
 		"- /env: securely import environment variables.",
 		"- /file: inspect non-secret files.",
-		"- /clear: clear this conversation's history.",
+		"- /clear [n]: clear history or remove n recent user turns.",
 		"Active model: gpt-6.1-terra", "you> ", "assistant [gpt-6.1-terra]> received hello",
 		"assistant [gpt-6.1-terra]> received /history", "Conversation history cleared.",
 		"assistant [gpt-6.1-terra]> received /quit", "assistant [gpt-6.1-terra]> received /exit",

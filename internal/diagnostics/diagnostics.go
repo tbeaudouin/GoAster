@@ -161,12 +161,24 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 	}
 	walk(err, 0)
 	for i, field := range fields {
-		if i >= 32 {
+		if i >= 64 {
 			break
 		}
 		value := ""
 		switch field.Key {
+		case "restart_reason":
+			switch field.Value {
+			case "unavailable", "http_status", "missing_token", "missing_response", "transport_failure", "commit_uncertain", "predispatch_failure", "completion_uncertain":
+				record += " restart_reason=" + field.Value
+			default:
+				record += " restart_reason=unrecognized"
+			}
+		case "exit_code":
+			record += " exit_code=" + restartExitCode(field.Value)
 		case "status":
+			if field.Value == "absent" || field.Value == "unrecognized" {
+				value = field.Value
+			}
 			if len(field.Value) >= 3 {
 				if n, e := strconv.Atoi(field.Value[:3]); e == nil && n >= 100 && n <= 599 {
 					value = field.Value[:3]
@@ -180,13 +192,13 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			if len(field.Value) <= 96 && token(field.Value) == field.Value {
 				value = field.Value
 			}
-		case "model_detail", "status_detail", "backend_type_detail", "backend_code_detail", "request_id_detail":
+		case "model_detail", "status_detail", "backend_type_detail", "backend_code_detail", "backend_message_detail", "request_id_detail", "summary_detail":
 			value = safeDetailState(field.Value)
 		case "attempt", "attempts":
 			value = safeAttempt(field.Value)
 		case "elapsed_ms", "retry_wait_ms":
 			value = safeMilliseconds(field.Value)
-		case "tool_started_count", "tool_completed_count":
+		case "tool_started_count", "tool_completed_count", "request_bytes", "input_items", "message_count", "user_messages", "assistant_messages", "system_messages", "tool_calls", "tool_outputs", "other_items", "summary_bytes":
 			value = safeCount(field.Value)
 		case "tool_started", "tool_completed":
 			value = safeBoolean(field.Value)
@@ -685,4 +697,15 @@ func RemoteMessage(value string) string {
 		return value
 	}
 	return ""
+}
+
+func restartExitCode(value string) string {
+	if value == "absent" {
+		return value
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < -1 || n > 255 {
+		return "unrecognized"
+	}
+	return strconv.Itoa(n)
 }

@@ -241,8 +241,8 @@ func TestStopCancelsOnlyTheAuthorizedCurrentThread(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				return nil, err
 			}
-			if request.Message == "/clear" {
-				return response(http.StatusOK, `{"type":"final","reply":"Conversation history cleared."}`+"\n"), nil
+			if request.Message == "/clear" || request.Message == "/clear 1" || request.Message == "/clear 0" {
+				return response(http.StatusOK, `{"type":"final","reply":"clear response"}`+"\n"), nil
 			}
 			started <- request.Message
 			select {
@@ -293,6 +293,20 @@ func TestStopCancelsOnlyTheAuthorizedCurrentThread(t *testing.T) {
 	default:
 	}
 
+	// Invalid or unauthorized counted clears must not cancel either topic.
+	a.handle(context.Background(), textMessage(99, -100123, "supergroup", "/clear 1"))
+	a.handle(context.Background(), textMessage(42, -100123, "supergroup", "/clear 0"))
+	select {
+	case message := <-canceled:
+		t.Fatalf("invalid or unauthorized clear canceled %q", message)
+	default:
+	}
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("invalid clear did not receive a response")
+	}
+
 	stop := textMessage(42, -100123, "supergroup", telegramStopCommand)
 	stop.MessageThreadID = 11
 	a.handle(context.Background(), stop)
@@ -318,7 +332,7 @@ func TestStopCancelsOnlyTheAuthorizedCurrentThread(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	a.handle(context.Background(), textMessage(42, -100123, "supergroup", "/clear"))
+	a.handle(context.Background(), textMessage(42, -100123, "supergroup", "/clear 1"))
 	select {
 	case message := <-canceled:
 		if message != second.Text {
@@ -578,8 +592,10 @@ func TestClearCommandUsesOnlyItsTelegramChatWithoutProviderReadiness(t *testing.
 			}
 			forwarded = append(forwarded, request)
 			reply := "Conversation history cleared."
-			if request.Message != "/clear" {
-				reply = "Usage: /clear"
+			if request.Message == "/clear 3" {
+				reply = "Removed 3 recent user turn(s)."
+			} else if request.Message != "/clear" {
+				reply = "Usage: /clear [n]"
 			}
 			return response(http.StatusOK, `{"type":"final","reply":"`+reply+`"}`+"\n"), nil
 		}),
@@ -587,15 +603,16 @@ func TestClearCommandUsesOnlyItsTelegramChatWithoutProviderReadiness(t *testing.
 
 	a.handle(context.Background(), privateMessage(42, "/clear"))
 	a.handle(context.Background(), textMessage(42, -100123, "group", "/clear extra"))
+	a.handle(context.Background(), textMessage(42, -100123, "group", "/clear 3"))
 	withAttachment := privateMessage(42, "")
 	withAttachment.Caption = "/clear"
 	withAttachment.Document = &document{FileID: "file"}
 	a.handle(context.Background(), withAttachment)
 
-	if len(forwarded) != 2 || forwarded[0].ChatID != 42 || forwarded[0].Message != "/clear" || forwarded[1].ChatID != -100123 || forwarded[1].Message != "/clear extra" {
+	if len(forwarded) != 3 || forwarded[2].ChatID != -100123 || forwarded[2].Message != "/clear 3" || forwarded[0].ChatID != 42 || forwarded[0].Message != "/clear" || forwarded[1].ChatID != -100123 || forwarded[1].Message != "/clear extra" {
 		t.Fatalf("clear requests = %#v", forwarded)
 	}
-	if len(sent) != 3 || sent[0].ChatID != 42 || sent[0].Text != "Conversation history cleared." || sent[1].ChatID != -100123 || sent[1].Text != "Usage: /clear" || sent[2].ChatID != 42 || sent[2].Text != "Usage: /clear" {
+	if len(sent) != 4 || sent[2].Text != "Removed 3 recent user turn(s)." || sent[0].ChatID != 42 || sent[0].Text != "Conversation history cleared." || sent[1].ChatID != -100123 || sent[1].Text != "Usage: /clear [n]" || sent[3].ChatID != 42 || sent[3].Text != "Usage: /clear [n]" {
 		t.Fatalf("clear replies = %#v", sent)
 	}
 }
@@ -770,7 +787,7 @@ func TestPollingReadinessOffsetAndRedactedErrors(t *testing.T) {
 }
 
 func TestTelegramCommandMenuUsesSupportedHelpCommands(t *testing.T) {
-	want := []string{"help", "stop", "start", "pair", "clear", "m", "env", "getenv"}
+	want := []string{"help", "stop", "restart", "start", "pair", "clear", "m", "env", "getenv"}
 	if len(telegramBotCommands) != len(want) {
 		t.Fatalf("Telegram command count = %d, want %d", len(telegramBotCommands), len(want))
 	}
@@ -1651,6 +1668,12 @@ func TestPollingStopInSameBatchCancelsTurn(t *testing.T) {
 }
 
 func TestPollingClearOrdersAndDiscardsEarlierQueuedRequests(t *testing.T) {
+	for _, command := range []string{"/clear", "/clear 1"} {
+		t.Run(command, func(t *testing.T) { testPollingClearOrdering(t, command) })
+	}
+}
+
+func testPollingClearOrdering(t *testing.T, command string) {
 	paths := testPaths(t)
 	setupTest(t, paths)
 	paired, err := loadPairing(paths)
@@ -1690,7 +1713,7 @@ func TestPollingClearOrdersAndDiscardsEarlierQueuedRequests(t *testing.T) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&p)
 			if p.Offset == 0 {
-				return response(200, `{"ok":true,"result":[{"update_id":1,"message":{"text":"first","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":2,"message":{"text":"stale","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":3,"message":{"text":"/clear","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":4,"message":{"text":"new","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
+				return response(200, `{"ok":true,"result":[{"update_id":1,"message":{"text":"first","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":2,"message":{"text":"stale","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":3,"message":{"text":"`+command+`","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":4,"message":{"text":"new","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
 			}
 			<-r.Context().Done()
 			return nil, r.Context().Err()
@@ -1713,7 +1736,7 @@ func TestPollingClearOrdersAndDiscardsEarlierQueuedRequests(t *testing.T) {
 		t.Fatal("clear did not cancel first")
 	}
 	close(release)
-	for _, want := range []string{"/clear", "new"} {
+	for _, want := range []string{command, "new"} {
 		select {
 		case got := <-entered:
 			if got != want {

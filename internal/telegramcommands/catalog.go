@@ -10,6 +10,7 @@ import (
 const (
 	HelpCommand              = "/help"
 	StopCommand              = "/stop"
+	RestartCommand           = "/restart"
 	StartCommand             = "/start"
 	PairCommand              = "/pair"
 	ClearCommand             = "/clear"
@@ -54,6 +55,9 @@ var catalog = []Command{
 		Access:          "Paired account only, in the same chat and Telegram topic as the active turn. Use the bare command in a private chat, group, or supergroup; addressed command mentions are ignored.",
 	},
 	{
+		Name: "restart", Usage: "/restart", HelpDescription: "Restart the idle agent.", MenuDescription: "Restart the idle agent", Access: "Paired account only. Use bare /restart without attachments; active work must finish first.",
+	},
+	{
 		Name:            "start",
 		Usage:           "/start",
 		HelpDescription: "Show pairing or readiness guidance.",
@@ -69,10 +73,10 @@ var catalog = []Command{
 	},
 	{
 		Name:            "clear",
-		Usage:           "/clear",
+		Usage:           "/clear [n]",
 		HelpDescription: "Clear this chat's history.",
 		MenuDescription: "Clear this chat's history",
-		Access:          "Paired account only, in a private chat, group, or supergroup. It takes no attachment or argument and clears the chat's shared history across Telegram topics.",
+		Access:          "Paired account only, in a private chat, group, or supergroup. Without an argument it clears the chat's shared history; a positive count removes recent user turns. History is shared across Telegram topics. Attachments are not accepted.",
 	},
 	{
 		Name:            "m",
