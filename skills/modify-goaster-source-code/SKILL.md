@@ -1,6 +1,8 @@
 # GoAster source customization
 
-For a direct request, use [goaster-source-code-evolution](../goaster-source-code-evolution/SKILL.md) as the single full-process coordinator. Under its approval, implement the requested changes in the user's fork and standard `goaster-customization` branch, preserving unrelated user work. Optional research is chosen in that approval and skipped by default.
+For local skill instruction creation, installation, or updates, use `manage-skills` before any credentials or cloud steps. Separate Go code or binary changes do not block unrelated local skill installs. Skill and documentation edits accompanying an approved source task remain covered by its single approval.
+
+For a direct source request, use [goaster-source-code-evolution](../goaster-source-code-evolution/SKILL.md) as the single full-process coordinator. Under its approval, implement the requested changes in the user's fork and standard `goaster-customization` branch, preserving unrelated user work. Optional research is chosen in that approval and skipped by default.
 
 For external inspiration, follow goaster-feature-inspiration's source and
 license checks. Implement in Go; every new feature must be essential and

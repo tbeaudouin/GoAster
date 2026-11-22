@@ -1,2 +1,2 @@
 name: manage-skills
-description: Create and modify GoAster skills using the repository's three-file format.
+description: Create, install, or update local GoAster skill instructions and verify discovery and loading.

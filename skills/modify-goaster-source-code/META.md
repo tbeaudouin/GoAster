@@ -1,2 +1,2 @@
 name: modify-goaster-source-code
-description: Customize GoAster source, skills, packaging, documentation, or tests in the user's fork on the goaster-customization branch.
+description: Customize GoAster source and accompanying skills, packaging, documentation, or tests; route local skill instructions to manage-skills.

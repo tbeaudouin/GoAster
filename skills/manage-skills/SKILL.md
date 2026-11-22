@@ -1,16 +1,15 @@
 # Manage skills
 
-Each skill requires three files:
+Create, install, or update local GoAster skill instructions when requested; the request authorizes the scoped local installation. Do not stop at a draft or ask for another approval. Installation does not authorize executing the skill's sensitive or consequential actions. Preserve unrelated work and honor actual tool access and existing security requirements.
 
-- `SKILL.md` contains the main instructions.
-- `AUTH.md` contains authentication instructions. If no third-party service is needed, write `No authentication required.`
-- `META.md` contains a short summary loaded at the start of every conversation to help the agent decide whether to load the full skill for the user's task.
+Write the three aligned files under `~/.goaster/artefacts/skills/<name>/`, using a lowercase letters, digits, and hyphens name. Use private directories and files, and avoid symlinks:
 
-When creating or modifying a skill, keep all three files aligned. Use simple, direct, concise instructions like the default skills.
+- `SKILL.md`: concise, direct workflow and safety instructions.
+- `AUTH.md`: authentication guidance; use `No authentication required.` when appropriate.
+- `META.md`: only `name: <name>` and a single-line `description: <summary>`.
 
-Before creating a new skill, suggest to the user that they may optionally
-search [goaster-find-contributions](../goaster-find-contributions/SKILL.md) for
-shared GoAster skills that may help. Search only if the user chooses it; the
-user may skip it. In the coordinated source workflow, include this optional choice in the single approval and skip research by default; adoption for the approved task needs no further prompt.
+Validate the files and metadata with the file tools, then use `load_skill` to verify the installed instructions. Discovery reads metadata from disk at the next chat turn; loading reads the current workflow and authentication guidance. No rebuild or restart is required. Report any access or validation failure.
 
-Do not list every edge case, fallback, or constraint. Trust the model to apply its own safeguards when using the skill.
+Before creating a skill, suggest that the user may optionally search [goaster-find-contributions](../goaster-find-contributions/SKILL.md) for shared skills. Search only if chosen; otherwise proceed without a separate approval or research round. In a coordinated source task, skill and documentation edits that accompany the source change remain covered by its single approval; skip research by default.
+
+A local skill request does not require source evolution, a fork, GitHub operations, a server snapshot, binary build or deployment, or restart. A genuine Go code or binary change uses the separate source workflow and does not block an unrelated local skill installation.

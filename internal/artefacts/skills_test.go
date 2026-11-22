@@ -211,7 +211,7 @@ func TestFeatureInspirationPolicy(t *testing.T) {
 		{"modify-goaster-source-code", "Optional research is chosen in that approval and skipped by default."},
 		{"modify-goaster-source-code", "Feature configuration is separate from core configuration"},
 		{"goaster-source-code-evolution", "shared contributions, other agents' implementations, both, or neither"},
-		{"manage-skills", "suggest to the user that they may optionally search"},
+		{"manage-skills", "skip research by default"},
 	} {
 		if !strings.Contains(loaded[clause.skill], clause.text) {
 			t.Errorf("%s missing policy clause %q", clause.skill, clause.text)
@@ -849,5 +849,76 @@ func TestDiscoverMoreThanOneHundredSkills(t *testing.T) {
 	metadata, err := discoverAt(root)
 	if err != nil || !strings.Contains(metadata, "name: skill-100") {
 		t.Fatalf("discovery failed: %v", err)
+	}
+}
+
+// These contracts exercise the bundled routing through the public offline APIs.
+func TestLocalSkillRoutingInstalledDiscoveryAndLoad(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assets, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assets)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, description := range []string{
+		"description: Create, install, or update local GoAster skill instructions",
+		"name: goaster-source-code-evolution\ndescription: Coordinate GoAster source and binary changes under one approval; route local skill instructions to manage-skills.",
+		"name: modify-goaster-source-code\ndescription: Customize GoAster source and accompanying skills, packaging, documentation, or tests; route local skill instructions to manage-skills.",
+	} {
+		if !strings.Contains(metadata, description) {
+			t.Errorf("discovery missing %q", description)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		clauses []string
+	}{
+		{"manage-skills", []string{"request authorizes the scoped local installation", "Do not stop at a draft or ask for another approval", "Installation does not authorize executing the skill's sensitive or consequential actions", "suggest that the user may optionally search", "skip research by default", "use `load_skill`", "does not block an unrelated local skill installation"}},
+		{"goaster-source-code-evolution", []string{"to `manage-skills` before credentials or cloud steps", "edits that accompany a source task remain covered by its single approval", "one approval prompt"}},
+		{"modify-goaster-source-code", []string{"use `manage-skills` before any credentials or cloud steps", "remain covered by its single approval", "single full-process coordinator"}},
+	} {
+		content, err := Load(tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content = strings.Join(strings.Fields(content), " ")
+		for _, clause := range tc.clauses {
+			if !strings.Contains(content, clause) {
+				t.Errorf("%s missing %q", tc.name, clause)
+			}
+		}
+		for _, old := range []string{"Coordinate a requested source or skill change through installation and verification", "A skill instead of source"} {
+			if strings.Contains(content, old) {
+				t.Errorf("%s retains old routing %q", tc.name, old)
+			}
+		}
+	}
+	root, err := Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "skills", "manage-skills", "SKILL.md")
+	if err := os.WriteFile(path, []byte("Updated local instructions.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load("manage-skills")
+	if err != nil || !strings.Contains(loaded, "Updated local instructions.") {
+		t.Fatalf("load updated instructions: %q, %v", loaded, err)
+	}
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load("manage-skills")
+	if err != nil || !strings.Contains(loaded, "Updated local instructions.") {
+		t.Fatalf("starter installation overwrote existing instructions: %q, %v", loaded, err)
 	}
 }
