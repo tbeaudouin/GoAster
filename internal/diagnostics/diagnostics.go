@@ -36,6 +36,20 @@ func SetOutput(writer io.Writer) func() {
 	return func() { outputMu.Lock(); output = previous; outputMu.Unlock() }
 }
 
+// WrapOpenAIHTTPErrorBody attaches a model HTTP error body solely for server logging.
+// The returned error and its public interfaces do not expose the body.
+func WrapOpenAIHTTPErrorBody(cause error, body, state string) error {
+	return openAIHTTPErrorBody{cause: cause, body: body, state: state}
+}
+
+type openAIHTTPErrorBody struct {
+	cause       error
+	body, state string
+}
+
+func (err openAIHTTPErrorBody) Error() string { return err.cause.Error() }
+func (err openAIHTTPErrorBody) Unwrap() error { return err.cause }
+
 // Error records explicitly recognized causes and bounded protocol metadata.
 // Unknown error messages are never copied.
 func Error(operation string, err error, fields ...Field) {
@@ -84,6 +98,7 @@ func Error(operation string, err error, fields ...Field) {
 func errorRecord(operation string, err error, fields []Field, skipAttempts bool) {
 	record := "ERROR operation=" + token(operation)
 	var causes []string
+	var rawHTTPBody, rawHTTPBodyState string
 	var walk func(error, int)
 	walk = func(e error, depth int) {
 		if e == nil || depth > 32 || len(causes) >= 32 {
@@ -91,6 +106,9 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 		}
 		if _, ok := e.(interface{ DiagnosticSeparateRecord() }); ok && skipAttempts {
 			return
+		}
+		if raw, ok := e.(openAIHTTPErrorBody); ok {
+			rawHTTPBody, rawHTTPBodyState = raw.body, raw.state
 		}
 		name := reflect.TypeOf(e).String()
 		// These labels are fixed strings; never copy the error's message.
@@ -273,6 +291,12 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 		}
 	}
 
+	if rawHTTPBodyState != "" {
+		record += " openai_http_error_body_state=" + strconv.Quote(rawHTTPBodyState)
+		if rawHTTPBodyState == "complete" || rawHTTPBodyState == "empty" || rawHTTPBodyState == "read_failed" {
+			record += " openai_http_error_body=" + strconv.Quote(rawHTTPBody)
+		}
+	}
 	record += " causes=" + strconv.Quote(strings.Join(causes, " | ")) + "\n"
 	outputMu.Lock()
 	_, _ = io.WriteString(output, record)
