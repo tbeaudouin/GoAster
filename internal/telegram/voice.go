@@ -18,6 +18,8 @@ const voiceMaxBytes int64 = 20 * 1024 * 1024
 const voiceMaxDurationSeconds int64 = 10 * 60
 const groqTranscriptionURL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
+var errMissingGroqKey = errors.New("GROQ_API_KEY is missing")
+
 // transcribeVoice keeps voice bytes in memory and never logs provider responses or credentials.
 func (a *adapter) transcribeVoice(ctx context.Context, voice *voiceNote) (string, error) {
 	fail := errors.New("voice transcription failed")
@@ -29,8 +31,11 @@ func (a *adapter) transcribeVoice(ctx context.Context, voice *voiceNote) (string
 		keySource = groqKey
 	}
 	key, err := keySource()
-	if err != nil || strings.TrimSpace(key) == "" {
+	if err != nil {
 		return "", fail
+	}
+	if strings.TrimSpace(key) == "" {
+		return "", errMissingGroqKey
 	}
 	var file telegramFile
 	if err = a.call(ctx, "getFile", struct {

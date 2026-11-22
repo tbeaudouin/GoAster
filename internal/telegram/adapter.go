@@ -932,7 +932,11 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		text, err = a.transcribeVoice(ctx, m.Voice)
 		if err != nil {
 			if ctx.Err() == nil {
-				sendFinal("The voice note could not be transcribed. Check the Groq integration and try again.")
+				if errors.Is(err, errMissingGroqKey) {
+					sendFinal("The voice note could not be transcribed because GROQ_API_KEY is missing. Add it using /env and try again.")
+				} else {
+					sendFinal("The voice note could not be transcribed. Check the Groq integration and try again.")
+				}
 			}
 			return
 		}

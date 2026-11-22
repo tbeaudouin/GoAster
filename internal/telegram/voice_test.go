@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -185,7 +186,7 @@ func TestVoiceFailureDoesNotDispatchToAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.handle(context.Background(), &m)
-	if agentCalls != 0 || !strings.Contains(sent, "could not be transcribed") {
+	if agentCalls != 0 || !strings.Contains(sent, "GROQ_API_KEY is missing") {
 		t.Fatal("failure dispatched or not reported")
 	}
 }
@@ -219,5 +220,31 @@ func TestVoiceTranscriptDeliveryFailureStopsAgent(t *testing.T) {
 	a.handle(context.Background(), &m)
 	if calls != 0 {
 		t.Fatal("agent called despite failed transcript delivery")
+	}
+}
+
+func TestVoiceMissingKeyAndKeyStoreFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		key     string
+		keyErr  error
+		missing bool
+	}{
+		{"empty", "", nil, true},
+		{"whitespace", "  ", nil, true},
+		{"store failure", "", errors.New("private store error"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			a := &adapter{
+				voiceKey:    func() (string, error) { return tc.key, tc.keyErr },
+				client:      doerFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, nil }),
+				voiceClient: doerFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, nil }),
+			}
+			_, err := a.transcribeVoice(context.Background(), &voiceNote{FileID: "v"})
+			if err == nil || errors.Is(err, errMissingGroqKey) != tc.missing || strings.Contains(err.Error(), "private") || calls != 0 {
+				t.Fatal("key failure was incorrectly classified or reached the network")
+			}
+		})
 	}
 }
