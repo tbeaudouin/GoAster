@@ -1282,15 +1282,16 @@ func backgroundSessionError(err error) string {
 func backgroundInputWriter(writer io.Writer) (func(string) error, func() bool, func()) {
 	queue := make(chan string, backgroundInputQueueSize)
 	finished := make(chan struct{})
+	changed := make(chan struct{}, 1)
 	var mu sync.Mutex
-	failed, closed, pending := false, false, 0
+	failed, closed, stopped, pending := false, false, false, 0
 	if writer != nil {
 		go func() {
 			for {
 				select {
 				case data := <-queue:
 					mu.Lock()
-					if closed {
+					if stopped {
 						mu.Unlock()
 						return
 					}
@@ -1298,12 +1299,18 @@ func backgroundInputWriter(writer io.Writer) (func(string) error, func() bool, f
 					n, err := io.WriteString(writer, data)
 					mu.Lock()
 					pending--
-					if err != nil || n != len(data) {
+					writeFailed := err != nil || n != len(data)
+					if writeFailed {
 						failed = true
-						mu.Unlock()
-						return
 					}
 					mu.Unlock()
+					select {
+					case changed <- struct{}{}:
+					default:
+					}
+					if writeFailed {
+						return
+					}
 				case <-finished:
 					return
 				}
@@ -1336,10 +1343,35 @@ func backgroundInputWriter(writer io.Writer) (func(string) error, func() bool, f
 	failure := func() bool { mu.Lock(); defer mu.Unlock(); return failed }
 	finish := func() {
 		mu.Lock()
-		defer mu.Unlock()
 		closed = true
-		if pending > 0 {
-			failed = true
+		mu.Unlock()
+		// Allow an in-flight write to report its result, but never block
+		// session completion indefinitely on a stalled input writer.
+		timer := time.NewTimer(backgroundPTYOutputDrainTimeout)
+		defer timer.Stop()
+		for {
+			mu.Lock()
+			if pending == 0 || failed {
+				if pending > 0 {
+					failed = true
+				}
+				stopped = true
+				mu.Unlock()
+				break
+			}
+			mu.Unlock()
+			select {
+			case <-changed:
+			case <-timer.C:
+				mu.Lock()
+				if pending > 0 {
+					failed = true
+				}
+				stopped = true
+				mu.Unlock()
+				close(finished)
+				return
+			}
 		}
 		close(finished)
 	}

@@ -216,10 +216,10 @@ func TestFeatureInspirationPolicy(t *testing.T) {
 	for _, clause := range []struct{ skill, text string }{
 		{"goaster-feature-inspiration", "Authentication guidance (this does not grant authorization)."},
 		{"goaster-feature-inspiration", "[Shelldex](https://shelldex.com/)"},
-		{"goaster-feature-inspiration", "copy no code"},
+		{"goaster-feature-inspiration", "Use observed behavior or ideas to design an original Go implementation"},
 		{"goaster-feature-inspiration", "Feature configuration is separate from core configuration"},
 		{"goaster-feature-inspiration", "users should not configure feature options manually, though they may ask the agent"},
-		{"goaster-feature-inspiration", "existing private `/env` flow"},
+		{"goaster-feature-inspiration", "existing private /env flow"},
 		{"modify-goaster-source-code", "choose both, or skip research. Do not repeat this offer"},
 		{"modify-goaster-source-code", "Feature configuration is separate from core configuration"},
 		{"goaster-source-code-evolution", "Could a simple skill meet your need instead of changing GoAster's source code?"},
@@ -294,8 +294,12 @@ func TestInstallBundledStartersOnce(t *testing.T) {
 	}
 	memoryPath := filepath.Join(root, "memory", "MEMORY.md")
 	memory, err := os.ReadFile(memoryPath)
-	if err != nil || !strings.Contains(string(memory), "project-memory") {
-		t.Fatalf("default memory = %q, error = %v", memory, err)
+	if err != nil {
+		t.Fatalf("read installed memory: %v", err)
+	}
+	bundledMemory, err := os.ReadFile(filepath.Join(assetDir, "MEMORY.md"))
+	if err != nil || !bytes.Equal(memory, bundledMemory) {
+		t.Fatalf("installed memory differs from bundled default: %v", err)
 	}
 	info, err := os.Stat(memoryPath)
 	if err != nil || info.Mode().Perm() != 0600 {

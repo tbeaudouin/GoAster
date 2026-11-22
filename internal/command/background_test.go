@@ -2243,3 +2243,52 @@ func TestBackgroundPTYOSCBELUnicodeCPR(t *testing.T) {
 		t.Fatal("OSC BEL PTY did not finish")
 	}
 }
+
+func TestBackgroundInputFinishWaitsForConfirmation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	write, failed, finish := backgroundInputWriter(outputWriterFunc(func(p []byte) (int, error) {
+		close(started)
+		<-release
+		return len(p), nil
+	}))
+	if err := write("test"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	done := make(chan struct{})
+	go func() { finish(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("finish returned before confirmation")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("finish did not return")
+	}
+	if failed() {
+		t.Fatal("confirmed input reported as failed")
+	}
+}
+
+func TestBackgroundInputFinishReportsBlockedWrite(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	write, failed, finish := backgroundInputWriter(outputWriterFunc(func(p []byte) (int, error) {
+		close(started)
+		<-release
+		return len(p), nil
+	}))
+	if err := write("test"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	finish()
+	if !failed() {
+		t.Error("unconfirmed input was not reported")
+	}
+	close(release)
+}
