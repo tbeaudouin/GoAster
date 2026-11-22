@@ -194,3 +194,13 @@ func TestMigrationTargetCodesAreAllowlisted(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAIHTTPErrorBodyMissing(t *testing.T) {
+	var output strings.Builder
+	restore := SetOutput(&output)
+	defer restore()
+	Error("chat.provider", WrapOpenAIHTTPErrorBody(errors.New("safe failure"), "", "missing"))
+	if !strings.Contains(output.String(), `openai_http_error_body_state="missing"`) || strings.Contains(output.String(), `openai_http_error_body=`) {
+		t.Fatalf("missing body diagnostic = %q", output.String())
+	}
+}
