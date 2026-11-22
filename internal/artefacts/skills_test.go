@@ -80,25 +80,13 @@ func TestDefaultFilesystemSkillContracts(t *testing.T) {
 	}
 
 	repositories := loaded["git-repositories"]
-	for _, phrase := range []string{
-		"/srv/git/<owner>/<repo>", "explicit path", "Keep existing approved repositories where they are",
-		"single path components", "trusted real directory", "symlinks", "scoped provisioning",
-		"appropriate ownership and access controls", "paths writable by untrusted identities",
-		"existing service/session identity, including root if already running as root",
-		"requires no new user or identity switch", "only missing trusted parent directories needed for the approved checkout",
-		"non-world-writable", "inspect them before continuing", "missing directories alone are not a blocker",
-		"Do not change existing ownership or permissions or silently escalate identity",
-		"cannot safely create or access the required path", "component is unsafe",
-		"Do not fall back elsewhere", "git status --short --ignored", "exact Git root",
-		"origin", "nested clone", "`pull`, `reset`, or `checkout` automatically",
-		"`github-auth`", "tokens in URLs", "`goaster-fork` workflow",
-	} {
+	for _, phrase := range []string{"/srv/git/<owner>/<repo>", "repository origin", "preserve unrelated work", "Ignored files alone are not a blocker", "`github-auth`"} {
 		if !strings.Contains(repositories, phrase) {
 			t.Errorf("git-repositories workflow missing %q", phrase)
 		}
 	}
-	if !strings.Contains(loaded["goaster-fork"], "Before choosing a new local checkout path, load the [git-repositories skill]") {
-		t.Error("goaster-fork does not load git-repositories before choosing a checkout path")
+	if !strings.Contains(loaded["goaster-fork"], "[git-repositories]") {
+		t.Error("goaster-fork does not use git-repositories")
 	}
 	for _, phrase := range []string{"Before choosing a new path, load", "without pulling, resetting, or checking out a branch"} {
 		if !strings.Contains(loaded["goaster-find-contributions"], phrase) {
@@ -220,9 +208,7 @@ func TestFeatureInspirationPolicy(t *testing.T) {
 		{"goaster-feature-inspiration", "Feature configuration is separate from core configuration"},
 		{"goaster-feature-inspiration", "users should not configure feature options manually, though they may ask the agent"},
 		{"goaster-feature-inspiration", "existing private `/env` flow"},
-		{"modify-goaster-source-code", "choose both, or skip research. Do not repeat this offer"},
 		{"modify-goaster-source-code", "Feature configuration is separate from core configuration"},
-		{"goaster-source-code-evolution", "Could a simple skill meet your need instead of changing GoAster's source code?"},
 		{"goaster-source-code-evolution", "shared contributions, other agents' implementations, both, or neither"},
 		{"manage-skills", "suggest to the user that they may optionally search"},
 	} {
@@ -233,31 +219,59 @@ func TestFeatureInspirationPolicy(t *testing.T) {
 }
 
 func TestSourceWorkflowSingleApproval(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assetDir)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
-		file      string
-		required  []string
-		forbidden []string
+		name                string
+		required, forbidden []string
 	}{
-		{"goaster-source-code-evolution/SKILL.md", []string{"`goaster-env`", "`HCLOUD_TOKEN`", "process fallback", "private `/env`", "paginate `GET /v1/servers`", "returned names and labels", "multiple candidates", "one approval prompt", "without stage-by-stage approval"}, []string{"invalidates the affected approval"}},
-		{"goaster-fork/SKILL.md", []string{"reuse the source coordinator’s single approval", "coordinated work uses the existing approval"}, []string{"ask the user to explicitly choose whether to reuse"}},
-		{"goaster-build-test/SKILL.md", []string{"coordinated work continues under the existing approval"}, []string{"fresh approval", "separate review and approval"}},
-		{"goaster-backup/SKILL.md", []string{"coordinator's single approval", "snapshot is available"}, []string{"independent Hetzner access", "Confirm the server and Hetzner project"}},
+		{"goaster-source-code-evolution", []string{"`goaster-env`", "`HCLOUD_TOKEN`", "process fallback", "private `/env`", "Paginate accessible `GET /v1/servers`", "multiple candidates", "authenticated API", "Never ask the user for Hetzner project or server IDs", "`hetzner-auth`", "one approval prompt", "Skip research by default", "without stage-by-stage approval", "commit and push", "snapshot cost and retention", "verification"}, []string{"invalidates the affected approval"}},
+		{"modify-goaster-source-code", []string{"single full-process coordinator", "Feature configuration is separate from core configuration", "do not require another approval"}, []string{"separately approved", "Before implementation, offer"}},
+		{"goaster-fork", []string{"coordinator's single approval", "branch reuse"}, []string{"explicitly chose", "Recheck the account and target immediately before each"}},
+		{"git-repositories", []string{"Ignored files alone are not a blocker", "single approval"}, []string{"git status --short --ignored", "Never overwrite an existing tree or run"}},
+		{"github-auth", []string{"authenticated API login as the account", "Necessary tool setup uses the source workflow's single approval, without another prompt"}, []string{"Confirm the login matches the account the user named", "report the missing CLI as a blocker"}},
+		{"goaster-build-test", []string{"optional, not a universal deployment gate", "continues under the existing approval", "Ignored files alone", "target OS and architecture"}, []string{"clean committed checkout, including ignored files", "full-runtime prompt check pass"}},
+		{"goaster-backup", []string{"coordinator's single approval", "snapshot is available"}, []string{"independent Hetzner access", "essential data outside the server disk"}},
+		{"goaster-deploy", []string{"Automatically check service status", "automatic continuation cannot be guaranteed", "Before restarting, save concise pickup state"}, []string{"must send a new message", "When the user asks for verification"}},
+		{"goaster-find-contributions", []string{"without another prompt", "Standalone discovery does not authorize adoption"}, []string{"Using one requires a separate user request"}},
+		{"goaster-feature-inspiration", []string{"optional research workflow"}, nil},
+		{"task-planning", []string{"implement its plan without another approval", "plan-only request"}, nil},
+		{"manage-skills", []string{"single approval", "skip research by default"}, nil},
+		{"ripgrep-search", []string{"Coordinated source work uses the existing approval for necessary tools", "standalone host installation requires scoped approval", "verified package manager"}, []string{"obtain explicit approval before running an installation"}},
 	} {
-		data, err := os.ReadFile(filepath.Join("..", "..", "skills", tc.file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		content := strings.Join(strings.Fields(string(data)), " ")
-		for _, want := range tc.required {
-			if !strings.Contains(content, want) {
-				t.Errorf("%s missing %q", tc.file, want)
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(metadata, "name: "+tc.name+"\n") {
+				t.Error("metadata not discovered")
 			}
-		}
-		for _, unwanted := range tc.forbidden {
-			if strings.Contains(content, unwanted) {
-				t.Errorf("%s contains obsolete %q", tc.file, unwanted)
+			content, err := Load(tc.name)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
+			content = strings.Join(strings.Fields(content), " ")
+			for _, want := range tc.required {
+				if !strings.Contains(content, want) {
+					t.Errorf("missing %q", want)
+				}
+			}
+			for _, old := range tc.forbidden {
+				if strings.Contains(content, old) {
+					t.Errorf("contains obsolete %q", old)
+				}
+			}
+		})
 	}
 }
 

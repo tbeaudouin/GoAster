@@ -1,15 +1,6 @@
 # GoAster source customization
 
-You can customize GoAster in the fork created using [goaster-fork](../goaster-fork/SKILL.md). Make the changes you want on the `goaster-customization` branch and, after approval, commit and push them to your fork on GitHub.
-
-The next steps explain how to build and test those changes, then safely switch
-the running GoAster to the new version. Obtain approval before making any source, Markdown skill, packaging, documentation, or test change; reuse the coordinator’s single approval when applicable. Preserve existing user changes. Do not silently narrow the request to a fixed patch list.
-Before implementation, offer one optional choice: explore shared GoAster contributions with
-[goaster-find-contributions](../goaster-find-contributions/SKILL.md), inspect
-other agents' implementations with
-[goaster-feature-inspiration](../goaster-feature-inspiration/SKILL.md), choose
-both, or skip research. Do not repeat this offer if the coordinator already
-made it. Either research path is optional and never blocks approved work.
+For a direct request, use [goaster-source-code-evolution](../goaster-source-code-evolution/SKILL.md) as the single full-process coordinator. Under its approval, implement the requested changes in the user's fork and standard `goaster-customization` branch, preserving unrelated user work. Optional research is chosen in that approval and skipped by default.
 
 For external inspiration, follow goaster-feature-inspiration's source and
 license checks. Implement in Go; every new feature must be essential and
@@ -27,7 +18,4 @@ service environment-file instructions or ask for secrets in chat. Existing
 user-required secret import through `/env` remains allowed. Keep existing
 Bitwarden integrations and current environment guidance scoped as they are.
 
-Work only in the approved fork checkout on the `goaster-customization` branch.
-Keep upstream read-only. Do not merge, rebase, reset, overwrite, delete, or
-create a pull request unless that exact action is separately approved. Never
-write secrets, tokens, private keys, or credential files into the checkout. Do not invalidate approval for a changed SHA or checkout path.
+Keep upstream read-only and secrets out of the checkout and chat. Ordinary checkout, fetch, merge and rebase needed for the approved task do not require another approval; do not overwrite unrelated work or create a pull request.

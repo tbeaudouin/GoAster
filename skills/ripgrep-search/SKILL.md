@@ -35,8 +35,9 @@ redact sensitive matches.
 ## If ripgrep is missing
 
 Installing software changes the host. First identify the operating system and
-verified package manager, and obtain explicit approval before running an
-installation. Do not assume `sudo` or network access, run downloaded scripts,
+verified package manager. Coordinated source work uses the existing approval
+for necessary tools; standalone host installation requires scoped approval.
+Do not assume `sudo` or network access, run downloaded scripts,
 add unverified repositories, or change unrelated packages.
 
 If installation is approved, install ripgrep using the verified package

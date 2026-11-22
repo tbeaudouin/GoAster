@@ -7,8 +7,7 @@ gh auth status --hostname github.com
 gh api --hostname github.com user --jq '.login'
 ```
 
-Confirm the login matches the account the user named. Do not infer the account
-from a Git remote, environment variable, or repository name.
+Use the authenticated API login as the account; if the user named an account, verify it matches. Do not infer identity from a Git remote, environment variable, or repository name. Missing configured credentials are a blocker; do not ask for secrets in chat.
 
 ## Log in
 

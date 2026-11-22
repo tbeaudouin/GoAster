@@ -1,19 +1,9 @@
 # GoAster source code evolution
 
-Use this skill to evolve GoAster's own source code and safely update its active
-runtime. Group the question “Could a simple skill meet your need instead of changing GoAster's source code?” and the optional research choice (shared contributions, other agents' implementations, both, or neither) into the single approval prompt below. Research is optional and never blocks approved implementation.
+Coordinate a requested source or skill change through installation and verification. Direct `modify-goaster-source-code` requests use this same coordinator.
 
-## Workflow
+First load `goaster-env` and check `HCLOUD_TOKEN` in protected settings and the process fallback. If missing, request setup only through private `/env`. Use `hetzner-auth` for provider discovery. Paginate accessible `GET /v1/servers` and identify GoAster candidates and target OS and architecture from available server evidence, returned names and labels, and local runtime identity. Never ask the user for Hetzner project or server IDs; derive context from available server evidence. Infer the GitHub account using the authenticated API, and inspect the existing public fork, standard branch and default checkout using `github-auth`, `goaster-fork` and `git-repositories`. Missing credentials or failed discovery are blockers; missing forks, branches and directories are routine setup.
 
-```text
-goaster-fork -> github-auth -> modify-goaster-source-code -> goaster-build-test -> goaster-backup -> goaster-deploy
-```
+Present one approval prompt covering the requested change, the discovered target server (select among discovered candidates if multiple candidates exist), public fork and checkout/branch setup, source/skill/docs/tests edits and fixes, necessary dependencies and tools, ordinary git operations, commit and push, build and test, snapshot cost and retention, installation, service restart and verification. A skill instead of source and research into shared contributions, other agents' implementations, both, or neither are optional choices in that prompt, never separate mandatory questions. Skip research by default unless chosen there.
 
-## Coordinator boundaries
-
-First load `goaster-env` and check `HCLOUD_TOKEN` in protected settings and then the process fallback as it directs. If missing, request setup through the private `/env` flow; never ask for the token in chat. If present, paginate `GET /v1/servers` and identify GoAster candidates from returned names and labels and available local runtime identity. If authentication fails or no candidates are found, report the actual problem and stop; do not ask for project or server IDs.
-
-Present the discovered target and the whole process in one approval prompt: optional skill-versus-source and research choices, edits, fork and branch setup if needed, commit and push, builds and tests, snapshot with brief cost and retention information, deployment and restart. If there are multiple candidates, have the user choose among those discovered in this same prompt; do not guess. After approval, complete the process without stage-by-stage approval or reconfirming normal commits, SHA changes, backup, restart, or downstream stages. The delegated skills reuse this approval. Keep upstream read-only, work in the user's fork, and never create a pull request.
-
-Secrets remain in their approved local or server stores. Do not expose them in
-handoffs, logs, structured results, or backup manifests.
+After approval continue the whole process automatically through `goaster-fork`, `modify-goaster-source-code`, `goaster-build-test`, `goaster-backup` and `goaster-deploy`, without stage-by-stage approval or review handoff. The approval covers reuse of an existing branch, ordinary checkout, fetch, merge or rebase for this task, plan implementation, adopting researched ideas, test fixes and setup. Normal SHA, path or artifact changes do not expire it. Preserve unrelated user work and keep upstream read-only; do not publish a contribution or pull request. Report actual failures and missing credentials as blockers, not approval requests. Keep secrets out of chat, logs and artifacts.
