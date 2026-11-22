@@ -215,7 +215,7 @@ func TestToolBudgetFinishFailureDoesNotReplay(t *testing.T) {
 				requests++
 				if requests > 1 {
 					w.WriteHeader(tc.status)
-					fmt.Fprint(w, `{"error":{"message":"fixture-error-body"}}`)
+					fmt.Fprint(w, `{"error":{"message":"fixture-secret-token"}}`)
 					return
 				}
 				calls := make([]codexOutputItem, maxCodexToolCalls)

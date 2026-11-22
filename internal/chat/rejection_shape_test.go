@@ -64,15 +64,12 @@ func TestHTTPRejectionDiagnosticsRedactBackendAndRequest(t *testing.T) {
 	provider := runtimeTestProvider(t, server.Client(), server.URL)
 	var requestErr error
 	log := captureChatDiagnostics(t, func() {
-		_, requestErr = provider.Reply(context.Background(), DefaultModel, "outgoing-prompt-only"+strings.Repeat("x", 100000))
+		_, requestErr = provider.Reply(context.Background(), DefaultModel, secret+strings.Repeat("x", 100000))
 	})
 	if requestErr == nil {
 		t.Fatal("expected rejection")
 	}
-	if !strings.Contains(log, "openai_http_error_body=") {
-		t.Fatal("missing raw body diagnostic")
-	}
-	for _, output := range []string{requestErr.Error()} {
+	for _, output := range []string{log, requestErr.Error()} {
 		for _, forbidden := range []string{"private-prompt", "sk-secret", "example.invalid", "credential", "\x1b", "param="} {
 			if strings.Contains(output, forbidden) {
 				t.Fatalf("leaked %q", forbidden)
@@ -83,9 +80,6 @@ func TestHTTPRejectionDiagnosticsRedactBackendAndRequest(t *testing.T) {
 				t.Errorf("missing %q in %s", expected, output)
 			}
 		}
-	}
-	if strings.Contains(log, "outgoing-prompt-only") || strings.Contains(log, "\x1b") {
-		t.Fatal("request or unescaped control leaked into log")
 	}
 	if !strings.Contains(log, `request_bytes="`) || !strings.Contains(log, `message_count="`) {
 		t.Fatalf("missing request shape: %s", log)

@@ -740,15 +740,13 @@ func backendErrorWithRequestID(prefix, requestID string) backendError {
 	}
 }
 
-var errResponseBodyOversize = errors.New("response body exceeds limit")
-
 func readLimited(reader io.Reader) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(reader, maxResponseBody+1))
-	if len(data) > maxResponseBody {
-		return nil, errors.Join(fmt.Errorf("%w: %d bytes", errResponseBodyOversize, maxResponseBody), err)
-	}
 	if err != nil {
 		return data, err
+	}
+	if len(data) > maxResponseBody {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxResponseBody)
 	}
 	return data, nil
 }
@@ -2332,30 +2330,16 @@ func (p *CodexProvider) requestCodex(ctx context.Context, credential Credential,
 		requestID := response.Header.Get("x-request-id")
 		if response.Body == nil {
 			backend := newBackendError("Codex backend request failed", response.StatusCode, nil, requestID)
-			cause := errors.Join(errCodexResponseBodyMissing, backend)
-			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				return finishAttempt(codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, cause), retryAfter)
-			}
-			return finishAttempt(codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, diagnostics.WrapOpenAIHTTPErrorBody(cause, "", "missing")), retryAfter)
+			return finishAttempt(codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, errors.Join(errCodexResponseBodyMissing, backend)), retryAfter)
 		}
 		body, readErr := readLimited(response.Body)
 		_ = response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			backend := newBackendError("Codex backend request failed", response.StatusCode, body, requestID)
-			var cause error = backend
-			state := "complete"
-			if len(body) == 0 {
-				state = "empty"
-			}
 			if readErr != nil {
-				state = "read_failed"
-				if errors.Is(readErr, errResponseBodyOversize) {
-					state = "oversize"
-				}
-				cause = errors.Join(backend, fmt.Errorf("read Codex response: %w", readErr))
+				return finishAttempt(codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, errors.Join(backend, fmt.Errorf("read Codex response: %w", readErr))), retryAfter)
 			}
-			cause = diagnostics.WrapOpenAIHTTPErrorBody(cause, string(body), state)
-			return finishAttempt(codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, cause), retryAfter)
+			return finishAttempt(codexParsedResponse{}, response.StatusCode, wrapProviderFailure("pre-stream", response.StatusCode, backend), retryAfter)
 		}
 		if readErr != nil {
 			// A complete response before a trailing read failure is usable. Do not

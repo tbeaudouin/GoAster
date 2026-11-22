@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -85,10 +84,7 @@ func TestCodexTransientRetrySuccessDiagnosticsAreSafe(t *testing.T) {
 			t.Fatalf("retry diagnostic = %q, missing %q", log, want)
 		}
 	}
-	if strings.Count(log, `openai_http_error_body=`) != 1 || !strings.Contains(log, `openai_http_error_body=`+strconv.Quote(`{"error":{"type":"server_error","code":"overloaded","message":"private provider body and prompt"}}`)) || strings.Contains(log, "retried answer") {
-		t.Fatalf("retry body diagnostic = %q", log)
-	}
-	for _, secret := range []string{"private prompt content", "private-access-token", server.URL} {
+	for _, secret := range []string{"private prompt content", "private provider body and prompt", "private-access-token", server.URL} {
 		if strings.Contains(log, secret) {
 			t.Fatalf("retry diagnostic exposed %q: %q", secret, log)
 		}
@@ -101,7 +97,7 @@ func TestCodexTransientRetryExhaustionDiagnosticsIncludeBothAttempts(t *testing.
 		call := calls.Add(1)
 		writer.Header().Set("X-Request-ID", fmt.Sprintf("req-retry-%d", call))
 		writer.WriteHeader(http.StatusBadGateway)
-		_, _ = io.WriteString(writer, fmt.Sprintf(`{"error":{"type":"gateway_rejected","code":"private_code","message":"private provider body %d"}}`, call))
+		_, _ = io.WriteString(writer, `{"error":{"type":"gateway_rejected","code":"private_code","message":"private provider body"}}`)
 	}))
 	defer server.Close()
 
@@ -124,13 +120,7 @@ func TestCodexTransientRetryExhaustionDiagnosticsIncludeBothAttempts(t *testing.
 			t.Fatalf("exhaustion diagnostic = %q, missing %q", log, want)
 		}
 	}
-	for i := 1; i <= 3; i++ {
-		body := fmt.Sprintf(`{"error":{"type":"gateway_rejected","code":"private_code","message":"private provider body %d"}}`, i)
-		if strings.Count(log, `openai_http_error_body=`+strconv.Quote(body)) != 1 {
-			t.Fatalf("attempt %d body missing or duplicated: %q", i, log)
-		}
-	}
-	for _, secret := range []string{"private prompt", "private-access-token", server.URL} {
+	for _, secret := range []string{"private provider body", "private_code", "private prompt", "private-access-token", server.URL} {
 		if strings.Contains(log, secret) {
 			t.Fatalf("exhaustion diagnostic exposed %q: %q", secret, log)
 		}
@@ -419,7 +409,7 @@ func TestCodexRefreshThenTransientExhaustionLogsEachAttempt(t *testing.T) {
 					}
 				}
 			}
-			if strings.Contains(log, "private prompt") || strings.Contains(log, server.URL) {
+			if strings.Contains(log, "private response") || strings.Contains(log, "private prompt") || strings.Contains(log, server.URL) {
 				t.Fatalf("private data in diagnostic: %q", log)
 			}
 		})
