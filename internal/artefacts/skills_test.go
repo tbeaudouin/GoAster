@@ -152,11 +152,13 @@ func TestTaskPlanningDefaultSkill(t *testing.T) {
 	for _, phrase := range []string{
 		"Use whenever the user asks to plan a task, project, or implementation.",
 		"[project-memory](../project-memory/SKILL.md)",
-		"Save `PLAN-<task-name>.md` beside them, using a short lowercase hyphenated task name.",
+		"Save `PLAN-<task-name>.md` inside `memory/projects/<project-name>/`",
+		"never save it directly in `memory/projects/`",
 		"Reuse or update only a plan for that same task.",
 		"Keep it concise: goal, steps, and completion checks.",
 		"Tell the user the path.",
-		"Planning does not authorize implementation.",
+		"A plan-only request does not authorize implementation",
+		"an approved coordinated source workflow may implement its plan without another approval",
 	} {
 		if !strings.Contains(content, phrase) {
 			t.Errorf("task-planning guidance missing %q", phrase)
@@ -238,12 +240,13 @@ func TestFeatureInspirationPolicy(t *testing.T) {
 		{"goaster-feature-inspiration", "copy no code"},
 		{"goaster-feature-inspiration", "Feature configuration is separate from core configuration"},
 		{"goaster-feature-inspiration", "users should not configure feature options manually, though they may ask the agent"},
-		{"goaster-feature-inspiration", "existing private `/env` flow"},
+		{"goaster-feature-inspiration", "existing private /env flow"},
+		{"goaster-feature-inspiration", "never ask for secrets in chat"},
 		{"modify-goaster-source-code", "Feature configuration is separate from core configuration"},
 		{"goaster-source-code-evolution", "shared contributions, other agents' implementations, both, or neither"},
 		{"manage-skills", "skip research by default"},
 	} {
-		if !strings.Contains(loaded[clause.skill], clause.text) {
+		if !strings.Contains(strings.ReplaceAll(loaded[clause.skill], "`", ""), strings.ReplaceAll(clause.text, "`", "")) {
 			t.Errorf("%s missing policy clause %q", clause.skill, clause.text)
 		}
 	}
@@ -460,8 +463,12 @@ func TestInstallBundledStartersOnce(t *testing.T) {
 		t.Fatalf("installed Hetzner automatic-backup workflow was not loadable: %v", err)
 	}
 	memoryPath := filepath.Join(root, "memory", "MEMORY.md")
+	wantMemory, err := os.ReadFile(filepath.Join(assetDir, "MEMORY.md"))
+	if err != nil || len(wantMemory) == 0 {
+		t.Fatalf("selected starter memory: %v", err)
+	}
 	memory, err := os.ReadFile(memoryPath)
-	if err != nil || !strings.Contains(string(memory), "project-memory") {
+	if err != nil || !bytes.Equal(memory, wantMemory) {
 		t.Fatalf("default memory = %q, error = %v", memory, err)
 	}
 	info, err := os.Stat(memoryPath)

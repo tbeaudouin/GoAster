@@ -634,7 +634,11 @@ func TestAgentPromptUsesRuntimeSkillsAndMemorySetup(t *testing.T) {
 		t.Fatalf("prompt output = %q, want exact reply", output.String())
 	}
 	memory, history := provider.snapshot()
-	if !strings.Contains(memory.LongTerm, "# Memory guidance") {
+	starterMemory, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(working)), "skills", "MEMORY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starterMemory) == 0 || !strings.Contains(memory.LongTerm, string(starterMemory)) {
 		t.Fatalf("runtime memory was not passed to the provider: %+v", memory)
 	}
 	if !reflect.DeepEqual(history, []chat.ChatMessage{{Role: "user", Content: "Reply with exactly PROMPT_OK."}}) {
