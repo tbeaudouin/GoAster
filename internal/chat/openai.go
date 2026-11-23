@@ -2191,6 +2191,14 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 						return "", status, localFailure{reason: "evidence_save", cause: err}
 					}
 				}
+				if call.Name == migrationToolName && err == nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return "", status, ctxErr
+					}
+					if completed, ok := ctx.Value(scheduledMigrationCompletedKey{}).(func() bool); ok && completed() {
+						return "", status, nil
+					}
+				}
 				if call.Name == loadSkillCodexTool.Name && err == nil {
 					if !skillFitsContext(instructions, input, callItems, outputItems, result) {
 						return "", status, localFailure{reason: "skill_budget", cause: skillRecovery(errors.New("skill content exceeds conversation budget"), skillBudgetMessage)}

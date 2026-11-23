@@ -88,7 +88,7 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	if coordinator == nil {
 		cause := errors.New("generic cron execution coordinator is unavailable")
 		diagnostics.Error("agent.cron.execute", cause, diagnostics.Field{Key: "reason", Value: "execution coordinator is unavailable"})
-		return scheduler.ReviewRequiredError{Message: "scheduled job execution is unavailable", Cause: cause}
+		return earlyCronFailure(job, enqueue, "scheduled job execution is unavailable", cause)
 	}
 	if job.OriginChatID == 0 {
 		cause := errors.New("generic cron job has no originating conversation")
@@ -98,13 +98,13 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	if sessionFor == nil {
 		cause := errors.New("generic cron session factory is unavailable")
 		diagnostics.Error("agent.cron.execute", cause, diagnostics.Field{Key: "reason", Value: "session factory is unavailable"})
-		return scheduler.ReviewRequiredError{Message: "scheduled chat turn is unavailable", Cause: cause}
+		return earlyCronFailure(job, enqueue, "scheduled chat turn is unavailable", cause)
 	}
 	session := sessionFor(job.OriginChatID, job.OriginThreadID)
 	if session == nil {
 		cause := errors.New("generic cron session is unavailable")
 		diagnostics.Error("agent.cron.execute", cause, diagnostics.Field{Key: "reason", Value: "session is unavailable"})
-		return scheduler.ReviewRequiredError{Message: "scheduled chat turn is unavailable", Cause: cause}
+		return earlyCronFailure(job, enqueue, "scheduled chat turn is unavailable", cause)
 	}
 	requestContext := chat.WithConversationType(ctx, job.OriginChatType)
 	requestContext = chat.WithConversationID(requestContext, job.OriginChatID)
@@ -112,7 +112,9 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	requestContext = chat.WithScheduledCronJobID(requestContext, job.ID)
 	requestContext = chat.WithRuntimeFailureOperation(requestContext, "agent.cron")
 	var resultMu sync.Mutex
-	called, retry, review, quiet := false, false, false, false
+	called, retry, review := false, false, false
+	var migrationResult migration.OneShotResult
+	var reviewCause error
 	unrelatedTool := false
 	requestContext = chat.AddToolCallObserver(requestContext, func(name, _ string) {
 		if name != "goaster_migration" && name != "load_skill" {
@@ -120,6 +122,11 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 			unrelatedTool = true
 			resultMu.Unlock()
 		}
+	})
+	requestContext = chat.WithScheduledMigrationCompleted(requestContext, func() bool {
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		return called
 	})
 	requestContext = chat.WithScheduledMigrationDisableGuard(requestContext, func() bool {
 		resultMu.Lock()
@@ -154,16 +161,17 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 		if _, _, err := coordinator.ClaimExecutionMatching(callContext, job); err != nil {
 			cause := fmt.Errorf("claim generic cron execution: %w", err)
 			diagnostics.Error("agent.cron.claim", cause, diagnostics.Field{Key: "reason", Value: "execution claim failed"})
+			reviewCause = cause
 			review = true
 			return migration.OneShotResult{CreationState: "not_created", Code: "claim_failed"}
 		}
 		result := migration.OneShotResult{CreationState: "not_created", Code: "capability_unavailable", ServerName: request.ServerName}
 		if create != nil {
-			result = create(callContext, request, job.OriginChatID)
+			result = migration.SanitizeOneShotResult(create(callContext, request, job.OriginChatID))
 		} else {
 			diagnostics.Error("agent.cron.migration", errors.New("scheduled migration capability unavailable"), diagnostics.Field{Key: "migration_reason", Value: "create_unavailable"})
 		}
-		quiet = result.CreationState == "not_created" && result.Code == "no_capacity"
+		migrationResult = result
 		retry = !scheduledMigrationTerminal(result, request.ServerName)
 		return result
 	})
@@ -180,6 +188,19 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 		attempted := called
 		canRetry := retry && !review && !unrelatedTool
 		resultMu.Unlock()
+		if errors.Is(err, chat.ErrSessionBusy) && !attempted && chat.ScheduledActionReviewMessage(err) == "" {
+			return scheduler.ErrRetry
+		}
+		status := "Scheduled run failed before completion. Check the job status before retrying."
+		if attempted {
+			status = "Migration attempt requires review. Check the job status before retrying."
+			if canRetry && chat.IsCompletedToolModelFailure(err) {
+				status = scheduledMigrationStatusForJob(migrationResult, false, job)
+			}
+		}
+		if deliveryErr := enqueueCronStatus(enqueue, job, status); deliveryErr != nil {
+			return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(err, reviewCause, deliveryErr)}
+		}
 		if attempted && canRetry && chat.IsCompletedToolModelFailure(err) {
 			return scheduler.ErrRetry
 		}
@@ -187,10 +208,7 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 			if review := chat.ScheduledActionReviewMessage(err); review != "" {
 				return scheduler.ReviewRequiredError{Message: review, Cause: err}
 			}
-			return scheduler.ReviewRequiredError{Message: "scheduled migration attempt requires review", Cause: err}
-		}
-		if errors.Is(err, chat.ErrSessionBusy) && chat.ScheduledActionReviewMessage(err) == "" {
-			return scheduler.ErrRetry
+			return scheduler.ReviewRequiredError{Message: "scheduled migration attempt requires review", Cause: errors.Join(err, reviewCause)}
 		}
 		if review := chat.ScheduledActionReviewMessage(err); review != "" {
 			return scheduler.ReviewRequiredError{Message: review, Cause: err}
@@ -199,24 +217,45 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	}
 	resultMu.Lock()
 	shouldRetry := retry
-	isQuiet := quiet
 	terminal := called && !retry && !review
 	resultMu.Unlock()
-	if shouldRetry && isQuiet {
-		return scheduler.ErrRetry
-	}
 	if terminal {
 		disabler, ok := coordinator.(chat.CronSelfDisabler)
 		if !ok {
 			cause := errors.New("scheduled migration self-disable unavailable")
 			diagnostics.Error("agent.cron.migration", cause)
+			if deliveryErr := enqueueCronStatus(enqueue, job, "Migration attempt requires review; automatic stopping could not be confirmed."); deliveryErr != nil {
+				return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(cause, deliveryErr)}
+			}
 			return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: cause}
 		}
 		if _, err := disabler.DisableOwnExecution(ctx, job); err != nil {
 			cause := fmt.Errorf("disable completed scheduled migration: %w", err)
 			diagnostics.Error("agent.cron.migration", cause)
+			if deliveryErr := enqueueCronStatus(enqueue, job, "Migration attempt requires review; automatic stopping could not be confirmed."); deliveryErr != nil {
+				return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(cause, deliveryErr)}
+			}
 			return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: cause}
 		}
+	}
+	if called {
+		status := scheduledMigrationStatusForJob(migrationResult, terminal, job)
+		if review {
+			status = "Migration attempt requires review. Check the job status before retrying."
+		}
+		if deliveryErr := enqueueCronStatus(enqueue, job, status); deliveryErr != nil {
+			return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(reviewCause, deliveryErr)}
+		}
+		if review {
+			return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: reviewCause}
+		}
+		if shouldRetry {
+			return scheduler.ErrRetry
+		}
+		return nil
+	}
+	if strings.TrimSpace(reply) == "" {
+		reply = "Scheduled run completed without a result."
 	}
 	if enqueue == nil {
 		cause := errors.New("generic cron delivery queue is unavailable")
@@ -237,6 +276,66 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 		return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: cause}
 	}
 	return nil
+}
+
+func earlyCronFailure(job scheduler.Job, enqueue func(scheduler.Job, string) error, message string, cause error) error {
+	if job.OriginChatID != 0 && enqueue != nil {
+		if deliveryErr := enqueueCronStatus(enqueue, job, "Scheduled run failed before completion. Check the job status before retrying."); deliveryErr != nil {
+			return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(cause, deliveryErr)}
+		}
+	}
+	return scheduler.ReviewRequiredError{Message: message, Cause: cause}
+}
+
+func enqueueCronStatus(enqueue func(scheduler.Job, string) error, job scheduler.Job, status string) error {
+	if enqueue == nil {
+		cause := errors.New("generic cron delivery queue is unavailable")
+		diagnostics.Error("agent.cron.delivery", cause, diagnostics.Field{Key: "reason", Value: "delivery queue is unavailable"})
+		return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: cause}
+	}
+	if err := enqueue(job, status); err != nil {
+		diagnostics.Error("agent.cron.delivery", err, diagnostics.Field{Key: "reason", Value: "persist scheduled reply"})
+		return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: err}
+	}
+	return nil
+}
+
+func scheduledMigrationStatusForJob(result migration.OneShotResult, stopped bool, job scheduler.Job) string {
+	status := scheduledMigrationStatus(result, stopped)
+	if job.Kind != scheduler.ScheduleEvery || job.EverySeconds != 1800 {
+		status = strings.ReplaceAll(status, "in 30 minutes", "at its next scheduled run")
+	}
+	return status
+}
+
+func scheduledMigrationStatus(result migration.OneShotResult, stopped bool) string {
+	if stopped {
+		if result.Code == "target_exists" {
+			return "The exact target server already exists. Migration cron stopped."
+		}
+		return "Server created; private key and setup link sent. Migration cron stopped."
+	}
+	if result.CreationState == "not_created" && result.Code == "no_capacity" {
+		return "No capacity: no server was created. The job will retry in 30 minutes."
+	}
+	if result.CreationState == "created" {
+		return "Server created, but private delivery was incomplete. The handoff will not be resent; the next run checks the existing name in 30 minutes."
+	}
+	reason := ""
+	switch result.Code {
+	case "timeout", "provider_timeout":
+		reason = "Provider request timed out. "
+	case "provider_http_error", "web_http_error":
+		reason = "Provider request failed. "
+	case "provider_auth_rejected":
+		reason = "Provider authentication failed. "
+	case "provider_lookup_failure":
+		reason = "Provider lookup failed. "
+	}
+	if result.CreationState == "not_created" {
+		return reason + "No server was created. The job will retry in 30 minutes and check the existing name."
+	}
+	return reason + "Creation outcome is unknown. The job will retry in 30 minutes and check the existing name."
 }
 
 func scheduledMigrationTerminal(result migration.OneShotResult, name string) bool {

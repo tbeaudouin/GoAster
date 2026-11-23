@@ -403,20 +403,6 @@ func probeAgent(ctx context.Context, probe string, output io.Writer) error {
 	return err
 }
 
-func reportScheduledMigrationOutcome(ctx context.Context, owner int64, result migration.OneShotResult, report func(context.Context, int64, migration.OneShotResult) error) migration.OneShotResult {
-	if result.CreationState == "not_created" && result.Code == "no_capacity" {
-		return result
-	}
-	if report != nil {
-		if err := report(ctx, owner, result); err != nil {
-			if _, logged := err.(interface{ DiagnosticLogged() }); !logged {
-				diagnostics.Error("agent.cron.migration_outcome", err)
-			}
-		}
-	}
-	return result
-}
-
 func pairedMigrationOptions() migration.Options {
 	options := migration.DefaultOptions()
 	options.MigrationRecipient = telegram.MigrationRecipient
@@ -452,8 +438,7 @@ func serve(store chat.CredentialStore) (serveErr error) {
 		}
 		return deliveryQueue.Enqueue(job, reply)
 	}, func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
-		result := migration.CreateOnce(ctx, request, migrationOptions, owner)
-		return reportScheduledMigrationOutcome(ctx, owner, result, migrationOptions.ReportOutcome)
+		return migration.CreateOnce(ctx, request, migrationOptions, owner)
 	})
 	if err != nil {
 		return err

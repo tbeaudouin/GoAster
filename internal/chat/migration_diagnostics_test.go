@@ -820,3 +820,48 @@ func TestMigrationDiagnosticsPreserveRepeatedOutcomesAcrossFailedRestarts(t *tes
 		})
 	}
 }
+
+func TestCodexScheduledMigrationDirectCompletionSaveFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		failSave      int
+		wantCompleted int
+	}{
+		{"diagnostic_checkpoint", 1, 0},
+		{"final_session_storage", 2, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests, creates, completed := 0, 0, 0
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				writeCodexFunctionCall(t, w, "migration-call", migrationToolName, `{"action":"create","server_type":"cx22","server_name":"goaster-migration-0123456789abcdef"}`)
+			}))
+			defer backend.Close()
+			provider := runtimeTestProvider(t, backend.Client(), backend.URL)
+			if err := provider.RegisterTool(Tool{Name: migrationToolName, Description: "test", Parameters: map[string]any{"type": "object"}, Handler: func(context.Context, string) (string, error) {
+				creates++
+				return `{"creation_state":"created","handoff":"delivered"}`, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			session, err := NewPersistentSessionAt(Config{Model: "test"}, provider, filepath.Join(t.TempDir(), "session.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cause := errors.New("injected session directory sync failure")
+			saves := 0
+			session.store.syncDirectory = func(string) error {
+				saves++
+				if saves == tc.failSave {
+					return cause
+				}
+				return nil
+			}
+			ctx := WithScheduledMigrationCompleted(context.Background(), func() bool { completed++; return true })
+			_, err = session.ReplyScheduled(ctx, "migration")
+			if !errors.Is(err, cause) || requests != 1 || creates != 1 || completed != tc.wantCompleted {
+				t.Fatalf("error=%v requests=%d creates=%d completed=%d saves=%d", err, requests, creates, completed, saves)
+			}
+		})
+	}
+}

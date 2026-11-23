@@ -29,3 +29,7 @@ or partial, report the state and keep the same job enabled. The next normal crea
 uses the existing exact-name guard; never resend or replay the handoff, recover keys,
 or adopt an existing target. The two
 handoff parts are separate private messages.
+
+For scheduled attempts the runtime queues one fixed, safe status to the
+originating conversation after the result is handled. No status contains private
+handoff material; a local failure requires review.

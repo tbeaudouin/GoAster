@@ -1842,7 +1842,7 @@ func TestScheduledDeliveryUsesPersistedChatAndThreadOrigin(t *testing.T) {
 			}
 			switch {
 			case r.Method == http.MethodGet && r.URL.Path == controltransport.ScheduledDeliveriesPath:
-				return response(http.StatusOK, `{"deliveries":[{"id":"delivery-1-2","chat_id":42,"thread_id":9,"text":"scheduled reply"}]}`), nil
+				return response(http.StatusOK, `{"deliveries":[{"id":"delivery-1-2","chat_id":42,"thread_id":9,"text":"No capacity: no server was created. The job will retry in 30 minutes."}]}`), nil
 			case r.Method == http.MethodPost && r.URL.Path == controltransport.ScheduledDeliveriesAckPath:
 				var request struct {
 					IDs []string `json:"ids"`
@@ -1876,7 +1876,7 @@ func TestScheduledDeliveryUsesPersistedChatAndThreadOrigin(t *testing.T) {
 	deliverScheduled(context.Background(), func(ctx context.Context, chatID int64, text string) error {
 		return a.send(ctx, chatID, text)
 	}, a.agent, a.controlSecret)
-	if len(sent) != 1 || sent[0].ChatID != 42 || sent[0].ThreadID != 9 || sent[0].Text != "scheduled reply" {
+	if len(sent) != 1 || sent[0].ChatID != 42 || sent[0].ThreadID != 9 || sent[0].Text != "No capacity: no server was created. The job will retry in 30 minutes." {
 		t.Fatalf("scheduled Telegram message = %+v", sent)
 	}
 	if len(acknowledged) != 1 || acknowledged[0] != "delivery-1-2" {

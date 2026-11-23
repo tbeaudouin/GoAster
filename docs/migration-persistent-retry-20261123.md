@@ -1,5 +1,7 @@
 # Migration persistent retry — 2026-11-23
 
+Update 2026-11-23: the later scheduled outcome change supersedes the no-capacity silence described below; each completed attempt queues a fixed safe status to its originating conversation.
+
 One private approval now covers the immediate create and the same unlimited 30-minute job after any migration error. The instructions direct the job to retain the approved name, type and locations; no-capacity remains silent. Confirmed delivered creation and validated exact-name target-exists are terminal. Unknown outcomes retain their classification, and partial handoff is never replayed. Local claim, ownership and durable-storage failures still require review; generic interrupted execution remains unchanged. The existing GoAsterWeb exact-name check is relied on, with the accepted residual check-then-create duplicate risk after an uncertain timeout.
 
 Offline validation used `/usr/local/go/bin/go`, `PATH=/usr/local/go/bin:$PATH`, `GOPROXY=off`, and `GOSUMDB=off`:

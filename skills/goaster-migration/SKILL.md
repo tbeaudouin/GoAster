@@ -206,28 +206,26 @@ This job's ID is: <own job ID>.
 Never create or schedule another cron job.
 Never change the approved server name, type or locations.
 
-Handle the result as follows:
+The runtime handles the completed scheduled tool result directly; no follow-up model response is needed. The result policy is:
 
 1. If creation_state is "created" and handoff is "delivered":
    Disable this job using its own job ID.
-   Tell the owner that the server was created and that the create
-   action sent the SSH key attachment and separate private setup link.
-   Tell them to use those private messages to finish setup on GoAsterWeb.
+   The runtime sends a fixed safe status after stopping the job.
 
 2. If code is "target_exists" for the exact approved server name:
    Disable this job.
-   Report that the named server already exists.
+   The runtime sends a fixed safe status after stopping the job.
    Do not adopt it or try to retrieve a key or setup link.
 
 3. If creation_state is "not_created" and code is "no_capacity":
    Capacity unavailable means retry, not disable.
-   Send no notification and make no cron changes.
+   The runtime sends a fixed safe status; make no cron changes.
    Wait for this same job's next scheduled run.
 
 4. For every other error, uncertain creation outcome, or failed, partial or
    unknown delivery:
-   Keep this job enabled and report useful safe error details and whether creation
-   is confirmed, ruled out or unknown. Wait for the next scheduled run.
+   Keep this job enabled. The runtime sends a fixed safe status.
+   Wait for the next scheduled run.
 
 Do not run overlapping attempts or immediately retry a tool call. Each scheduled
 run makes at most one normal create call with the same approved parameters. The
