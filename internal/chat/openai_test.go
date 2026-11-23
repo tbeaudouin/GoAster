@@ -972,7 +972,7 @@ func TestCodexProviderSendsConversationHistory(t *testing.T) {
 			found := false
 			for _, item := range request.Input {
 				for _, content := range item.Content {
-					if item.Role == "system" && strings.Contains(content.Text, "parse model configuration") {
+					if item.Role == "developer" && strings.Contains(content.Text, "parse model configuration") {
 						found = true
 					}
 				}
@@ -1999,4 +1999,27 @@ func TestCodexChatSendsExitTextToProviderAndRequiresAuth(t *testing.T) {
 func testJWT(claims map[string]any) string {
 	payload, _ := json.Marshal(claims)
 	return base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+}
+
+func TestCodexInputFromHistoryMapsSystemToDeveloper(t *testing.T) {
+	history := []ChatMessage{
+		{Role: "system", Content: "Summary of earlier conversation:\nprevious context"},
+		{Role: "user", Content: "question"},
+		{Role: "assistant", Content: "answer"},
+		{Role: "system", Content: contextTrimNotice},
+		{Role: "guidance", Content: "guidance"},
+	}
+	items, err := codexInputFromHistory(context.Background(), history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := []string{"developer", "user", "assistant", "developer", "user"}
+	for i, item := range items {
+		if item.Role != roles[i] || item.Content[0].Text != history[i].Content {
+			t.Errorf("item %d: role %q content %q", i, item.Role, item.Content[0].Text)
+		}
+	}
+	if items[2].Content[0].Type != "output_text" || items[0].Content[0].Type != "input_text" {
+		t.Fatal("unexpected content types")
+	}
 }

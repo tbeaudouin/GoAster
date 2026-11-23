@@ -2232,8 +2232,13 @@ func codexInputFromHistory(ctx context.Context, history []ChatMessage) ([]codexI
 			}
 		}
 		role := message.Role
-		if role == "guidance" {
+		switch role {
+		case "guidance":
 			role = "user"
+		case "system":
+			// The Codex backend rejects system messages in input. Preserve
+			// internal context and its ordering using the developer role.
+			role = "developer"
 		}
 		input = append(input, codexInputItem{
 			Type:    "message",
