@@ -208,6 +208,9 @@ func executeCronSelfDisableTool(ctx context.Context, arguments string, jobs Cron
 	if !scoped || origin.OriginChatType == "" || origin.OriginChatType == "unknown" {
 		return "", fmt.Errorf("cron self-disable requires an authenticated conversation identity")
 	}
+	if guard, ok := ctx.Value(scheduledMigrationDisableGuardKey{}).(func() bool); ok && guard() {
+		return `{"disabled":false,"reason":"migration_retry_protected"}`, nil
+	}
 	disabler, ok := jobs.(CronSelfDisabler)
 	if !ok {
 		return "", fmt.Errorf("cron scheduler does not support self-disable")

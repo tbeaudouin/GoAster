@@ -239,6 +239,11 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			if n, e := strconv.Atoi(field.Value); e == nil && n >= 100 && n <= 599 {
 				value = strconv.Itoa(n)
 			}
+		case "migration_reason":
+			switch field.Value {
+			case "cadence", "create_unavailable", "origin":
+				value = field.Value
+			}
 		case "cron_action":
 			switch field.Value {
 			case "unknown", "add", "list", "get", "update", "remove", "enable", "disable", "disable_self":

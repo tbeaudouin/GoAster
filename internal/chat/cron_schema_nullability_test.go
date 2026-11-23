@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"goaster/internal/command"
 	"goaster/internal/scheduler"
 )
 
@@ -278,6 +279,138 @@ func TestCronInvalidInputsDoNotMutate(t *testing.T) {
 		}
 		if !reflect.DeepEqual(before, jobs.List()) {
 			t.Fatalf("mutated on %s", input)
+		}
+	}
+}
+
+// Exercise the production registry and wire encoding with a live scheduler owner.
+func TestScheduledToolRegistryParity(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	var scheduledReply func(context.Context, scheduler.Job) error
+	jobs, err := scheduler.New(scheduler.Options{Path: filepath.Join(t.TempDir(), "jobs.json"), Now: func() time.Time { return clock }, JobExecutor: func(ctx context.Context, job scheduler.Job) error { return scheduledReply(ctx, job) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captures []map[string]map[string]any
+	dispatchCall := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		snapshot := map[string]map[string]any{}
+		for _, raw := range request["tools"].([]any) {
+			tool := raw.(map[string]any)
+			snapshot[tool["name"].(string)] = tool
+		}
+		captures = append(captures, snapshot)
+		if dispatchCall {
+			dispatchCall = false
+			fmt.Fprint(w, `{"output":[{"type":"function_call","call_id":"parity","name":"parity_new_tool","arguments":"{}"}]}`)
+		} else {
+			fmt.Fprint(w, `{"output_text":"ok"}`)
+		}
+	}))
+	defer server.Close()
+	creds := CredentialStore{Path: filepath.Join(t.TempDir(), "credentials")}
+	if err := creds.Save(Credential{AccessToken: "test", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	provider := NewCodexProvider(creds)
+	provider.backendURL = server.URL
+	provider.httpClient = server.Client()
+	for _, err := range []error{
+		RegisterCronTool(provider, jobs), RegisterCronSelfDisableTool(provider, jobs),
+		RegisterBackgroundCommandTool(provider, command.BackgroundCommandManager{}),
+		RegisterSendFileTool(provider, func(context.Context, int64, int64, string, []byte) error { return nil }),
+		RegisterMigrationTool(provider, MigrationToolOperations{}),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	invoke := func(ctx context.Context) {
+		t.Helper()
+		if _, err := provider.Reply(ctx, DefaultModel, "hello"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invoke(context.Background())
+	dispatched := 0
+	if err := provider.RegisterTool(Tool{Name: "parity_new_tool", Description: "test", Parameters: map[string]any{"type": "object", "properties": map[string]any{}}, Handler: func(context.Context, string) (string, error) { dispatched++; return "ok", nil }}); err != nil {
+		t.Fatal(err)
+	}
+	invoke(context.Background())
+	scheduledReply = func(ctx context.Context, job scheduler.Job) error {
+		ctx = WithScheduledCronJobID(ctx, job.ID)
+		session := NewSession(Config{Model: DefaultModel}, provider)
+		if _, err := session.ReplyScheduled(ctx, "hello"); err != nil {
+			t.Fatal(err)
+		}
+		ctx = context.WithValue(ctx, scheduledTurnKey{}, true)
+		normal := provider.tools.definitionsFor(context.Background())
+		scheduled := provider.tools.definitionsFor(ctx)
+		for _, def := range normal {
+			n, ok := provider.tools.handlerFor(def.Name, context.Background())
+			if !ok {
+				t.Fatalf("normal handler missing %s", def.Name)
+			}
+			s, ok := provider.tools.handlerFor(def.Name, ctx)
+			if !ok || reflect.ValueOf(n).Pointer() != reflect.ValueOf(s).Pointer() {
+				t.Fatalf("handler differs %s", def.Name)
+			}
+		}
+		if len(scheduled) != len(normal)+1 {
+			t.Fatalf("registry sizes normal=%d scheduled=%d", len(normal), len(scheduled))
+		}
+		for _, c := range []context.Context{context.Background(), ctx} {
+			dispatchCall = true
+			invoke(c)
+		}
+		return nil
+	}
+	if _, err := jobs.Add(scheduler.Job{Kind: scheduler.ScheduleEvery, EverySeconds: 60, Message: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	if jobs.RunDue(context.Background()) != 1 {
+		t.Fatal("scheduled job did not run")
+	}
+	if dispatched != 2 {
+		t.Fatalf("dispatches=%d", dispatched)
+	}
+	if _, ok := captures[0]["parity_new_tool"]; ok {
+		t.Fatal("new tool in initial snapshot")
+	}
+	normal, scheduled := captures[1], captures[2]
+	if _, ok := normal[cronSelfDisableToolName]; ok {
+		t.Fatal("self-disable exposed normally")
+	}
+	if _, ok := scheduled[cronSelfDisableToolName]; !ok {
+		t.Fatal("self-disable missing")
+	}
+	delete(scheduled, cronSelfDisableToolName)
+	if len(normal) != len(scheduled) {
+		t.Fatalf("wire tool counts: %d %d", len(normal), len(scheduled))
+	}
+	for name, n := range normal {
+		s, ok := scheduled[name]
+		if !ok {
+			t.Fatalf("scheduled missing %s", name)
+		}
+		if name == cronToolName {
+			action := n["parameters"].(map[string]any)["properties"].(map[string]any)["action"].(map[string]any)
+			var filtered []any
+			for _, v := range action["enum"].([]any) {
+				if v != "add" {
+					filtered = append(filtered, v)
+				}
+			}
+			action["enum"] = filtered
+		}
+		if !reflect.DeepEqual(n, s) {
+			t.Fatalf("wire definition differs for %s: normal=%v scheduled=%v", name, n, s)
 		}
 	}
 }

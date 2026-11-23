@@ -17,3 +17,7 @@ This rule applies to every GoAster package and every unexpected runtime failure,
 ## Temporary OpenAI model HTTP error diagnostic exception
 
 - Thomas explicitly authorizes logging the whole raw OpenAI model HTTP error response body temporarily for HTTP 400 debugging, only in the owner-boundary server stderr/journal diagnostic as one safely quoted field. Retain the 8 MiB response read limit and report empty, missing, failed, or oversized reads explicitly. This exception does not cover outgoing requests, authorization headers, configuration tokens, successful/model output bodies, SSE success streams, or unrelated private content; never expose the body in Telegram, API, or agent-facing errors. All other diagnostic restrictions remain in force.
+
+# Scheduled tool parity
+
+- Every new normal agent tool must also be available to genuine scheduled turns through the shared registry. Scheduled turns cannot use cron action `add`; `cron_disable_self` is a scheduled-only convenience. Add or update tests for this invariant. Existing authorization, ownership, and safety guards remain in force.
