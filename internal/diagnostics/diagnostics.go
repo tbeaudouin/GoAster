@@ -298,6 +298,11 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			case "invalid_or_unavailable", "budget_exceeded", "save_failed", "unknown_selection", "invalid_request", "request_limit":
 				value = field.Value
 			}
+		case "model_test_stage":
+			switch field.Value {
+			case "configuration", "provider", "response_mismatch", "output":
+				value = field.Value
+			}
 		case "stage":
 			value = MigrationStage(field.Value)
 		case "code":

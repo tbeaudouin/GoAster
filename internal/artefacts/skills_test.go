@@ -917,3 +917,31 @@ func TestLocalSkillRoutingInstalledDiscoveryAndLoad(t *testing.T) {
 		t.Fatalf("starter installation overwrote existing instructions: %q, %v", loaded, err)
 	}
 }
+
+func TestModelAdministrationDiagnosticGuidance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assetDir)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Discover()
+	if err != nil || !strings.Contains(metadata, "name: model-administration\n") {
+		t.Fatalf("discovery: %v %s", err, metadata)
+	}
+	data, err := Load("model-administration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join(strings.Fields(data), " ")
+	for _, phrase := range []string{"goaster-agent test-model EXACT_MODEL_ID", "complete previous runtime JSON", "Keep all chat selections unchanged", "separate local process", "does not prove a live Telegram turn", "No restart is needed"} {
+		if !strings.Contains(content, phrase) {
+			t.Errorf("model administration guidance missing %q", phrase)
+		}
+	}
+}

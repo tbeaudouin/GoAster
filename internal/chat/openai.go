@@ -1496,6 +1496,24 @@ func (p *CodexProvider) replyWithHistory(ctx context.Context, model string, hist
 	return p.modelReply(ctx, model, history, true)
 }
 
+// WithProviderFailureBoundary assigns the final provider failure diagnostic to the caller.
+func WithProviderFailureBoundary(ctx context.Context) context.Context {
+	return context.WithValue(ctx, providerFailureBoundaryKey{}, true)
+}
+
+// ProviderFailureDiagnosticFields returns typed provider context for an owning boundary.
+func ProviderFailureDiagnosticFields(err error) []diagnostics.Field {
+	phase, status, ok := providerFailureInfo(err)
+	if !ok {
+		return nil
+	}
+	fields := []diagnostics.Field{{Key: "phase", Value: phase}}
+	if status != 0 {
+		fields = append(fields, diagnostics.Field{Key: "status", Value: fmt.Sprintf("%d", status)})
+	}
+	return fields
+}
+
 // ReplyWithoutTools sends a single message without tools, skills, or memory.
 func ReplyWithoutTools(ctx context.Context, provider interface {
 	modelReply(context.Context, string, []ChatMessage, bool) (string, error)

@@ -17,6 +17,7 @@ import (
 	appconfig "goaster/config"
 	"goaster/internal/artefacts"
 	"goaster/internal/diagnostics"
+	"goaster/internal/protectedfile"
 )
 
 const (
@@ -115,6 +116,30 @@ func (r ModelRegistry) Current(chatID int64) (ModelState, error) {
 		RecoveryNotice: notice,
 		Recovered:      recovered,
 	}, nil
+}
+
+// ExactConfiguredID reads the runtime file without installing or recovering it.
+// It accepts exact configured IDs only and does not consult chat selections.
+func (r ModelRegistry) ExactConfiguredID(id string) (string, error) {
+	if r.Path == "" || !validModelName(id) {
+		return "", errors.New("invalid model configuration path or exact ID")
+	}
+	modelRegistryMu.Lock()
+	defer modelRegistryMu.Unlock()
+	content, err := protectedfile.Read(r.Path, maxModelConfigBytes)
+	if err != nil {
+		return "", fmt.Errorf("read runtime model configuration: %w", err)
+	}
+	config, err := decodeModelConfig(content.Data)
+	if err != nil {
+		return "", fmt.Errorf("validate runtime model configuration: %w", err)
+	}
+	for _, model := range config.Models {
+		if model.ID == id {
+			return model.ID, nil
+		}
+	}
+	return "", ErrModelNotConfigured
 }
 
 // Select resolves reference as an exact ID or alias, then atomically persists
