@@ -2252,7 +2252,7 @@ func toolInstructionsForLimit(ctx context.Context, limit int) (string, error) {
 	if kind == "" {
 		kind = "unknown"
 	}
-	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation. Scheduled migration turns follow their exact literal create instructions, cannot add another job, and quietly keep the same job only for the exact no_capacity result. The scheduled-only self-disable capability has no supplied target ID."
+	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation. Scheduled migration turns follow their exact literal create instructions, cannot add another job, and keep the same job for all nonterminal results, quietly for no_capacity. The scheduled-only self-disable capability has no supplied target ID."
 	if metadata == "" {
 		instructions += "\n\nNo runtime skills are available. Do not perform a skill-dependent workflow; tell the user starter skills are missing."
 	} else {

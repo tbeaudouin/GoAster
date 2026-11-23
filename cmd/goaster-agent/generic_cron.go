@@ -112,61 +112,61 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	requestContext = chat.WithScheduledCronJobID(requestContext, job.ID)
 	requestContext = chat.WithRuntimeFailureOperation(requestContext, "agent.cron")
 	var resultMu sync.Mutex
-	called, retry, review := false, false, false
-	scheduledMigration := create != nil
-	if !scheduledMigration {
-		var unavailableOnce sync.Once
-		requestContext = chat.WithScheduledMigrationUnavailable(requestContext, func() {
-			unavailableOnce.Do(func() {
-				diagnostics.Error("agent.cron.migration", errors.New("scheduled migration capability unavailable"), diagnostics.Field{Key: "migration_reason", Value: "create_unavailable"})
-			})
-		})
-	}
-	if scheduledMigration {
-		requestContext = chat.WithScheduledMigrationDisableGuard(requestContext, func() bool {
+	called, retry, review, quiet := false, false, false, false
+	unrelatedTool := false
+	requestContext = chat.AddToolCallObserver(requestContext, func(name, _ string) {
+		if name != "goaster_migration" && name != "load_skill" {
 			resultMu.Lock()
-			defer resultMu.Unlock()
-			return called && retry && !review
-		})
-		requestContext = chat.WithScheduledMigrationStarted(requestContext, func() bool {
-			resultMu.Lock()
-			defer resultMu.Unlock()
-			return called
-		})
-		requestContext = chat.WithScheduledMigration(requestContext, func(callContext context.Context, request migration.Request, rejection string) migration.OneShotResult {
-			resultMu.Lock()
-			defer resultMu.Unlock()
-			if called {
-				diagnostics.Error("agent.cron.migration", errors.New("repeated scheduled migration invocation"))
-				retry = false
-				review = true
-				return migration.OneShotResult{CreationState: "not_created", Code: "already_attempted"}
+			unrelatedTool = true
+			resultMu.Unlock()
+		}
+	})
+	requestContext = chat.WithScheduledMigrationDisableGuard(requestContext, func() bool {
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		return called && retry && !review
+	})
+	requestContext = chat.WithScheduledMigrationStarted(requestContext, func() bool {
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		return called
+	})
+	requestContext = chat.WithScheduledMigration(requestContext, func(callContext context.Context, request migration.Request, rejection string) migration.OneShotResult {
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		if called {
+			diagnostics.Error("agent.cron.migration", errors.New("repeated scheduled migration invocation"))
+			return migration.OneShotResult{CreationState: "not_created", Code: "already_attempted"}
+		}
+		called = true
+		if rejection != "" {
+			review = true
+			if rejection != "request_cancelled" {
+				diagnostics.Error("agent.cron.migration", errors.New("scheduled migration invocation rejected"), diagnostics.Field{Key: "reason", Value: rejection})
 			}
-			called = true
-			if rejection != "" {
-				review = true
-				if rejection != "request_cancelled" {
-					diagnostics.Error("agent.cron.migration", errors.New("scheduled migration invocation rejected"), diagnostics.Field{Key: "reason", Value: rejection})
-				}
-				return migration.OneShotResult{CreationState: "not_created", Code: rejection}
-			}
-			if !migration.ValidMigrationServerName(request.ServerName) {
-				diagnostics.Error("agent.cron.migration", errors.New("scheduled migration target name is missing or invalid"))
-				review = true
-				return migration.OneShotResult{CreationState: "not_created", Code: "invalid_arguments"}
-			}
-			if _, _, err := coordinator.ClaimExecutionMatching(callContext, job); err != nil {
-				cause := fmt.Errorf("claim generic cron execution: %w", err)
-				diagnostics.Error("agent.cron.claim", cause, diagnostics.Field{Key: "reason", Value: "execution claim failed"})
-				review = true
-				return migration.OneShotResult{CreationState: "not_created", Code: "claim_failed"}
-			}
-			result := create(callContext, request, job.OriginChatID)
-			retry = result.CreationState == "not_created" && result.Code == "no_capacity"
-			review = !retry && scheduledMigrationResultNeedsReview(result)
-			return result
-		})
-	}
+			return migration.OneShotResult{CreationState: "not_created", Code: rejection}
+		}
+		if !migration.ValidMigrationServerName(request.ServerName) {
+			diagnostics.Error("agent.cron.migration", errors.New("scheduled migration target name is missing or invalid"))
+			review = true
+			return migration.OneShotResult{CreationState: "not_created", Code: "invalid_arguments"}
+		}
+		if _, _, err := coordinator.ClaimExecutionMatching(callContext, job); err != nil {
+			cause := fmt.Errorf("claim generic cron execution: %w", err)
+			diagnostics.Error("agent.cron.claim", cause, diagnostics.Field{Key: "reason", Value: "execution claim failed"})
+			review = true
+			return migration.OneShotResult{CreationState: "not_created", Code: "claim_failed"}
+		}
+		result := migration.OneShotResult{CreationState: "not_created", Code: "capability_unavailable", ServerName: request.ServerName}
+		if create != nil {
+			result = create(callContext, request, job.OriginChatID)
+		} else {
+			diagnostics.Error("agent.cron.migration", errors.New("scheduled migration capability unavailable"), diagnostics.Field{Key: "migration_reason", Value: "create_unavailable"})
+		}
+		quiet = result.CreationState == "not_created" && result.Code == "no_capacity"
+		retry = !scheduledMigrationTerminal(result, request.ServerName)
+		return result
+	})
 	values, environmentErr := runtimeEnvironment()
 	if environmentErr != nil {
 		diagnostics.Error("agent.cron.runtime_environment", environmentErr)
@@ -178,7 +178,11 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	if err != nil {
 		resultMu.Lock()
 		attempted := called
+		canRetry := retry && !review && !unrelatedTool
 		resultMu.Unlock()
+		if attempted && canRetry && chat.IsCompletedToolModelFailure(err) {
+			return scheduler.ErrRetry
+		}
 		if attempted {
 			if review := chat.ScheduledActionReviewMessage(err); review != "" {
 				return scheduler.ReviewRequiredError{Message: review, Cause: err}
@@ -195,11 +199,10 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	}
 	resultMu.Lock()
 	shouldRetry := retry
+	isQuiet := quiet
 	terminal := called && !retry && !review
 	resultMu.Unlock()
-	if shouldRetry {
-		// No-capacity is the only deliberately quiet outcome. The same durable
-		// recurring job remains enabled and the scheduler computes its next run.
+	if shouldRetry && isQuiet {
 		return scheduler.ErrRetry
 	}
 	if terminal {
@@ -226,6 +229,9 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	}
 	resultMu.Lock()
 	defer resultMu.Unlock()
+	if retry && !review {
+		return scheduler.ErrRetry
+	}
 	if review {
 		cause := errors.New("scheduled migration result requires review")
 		return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: cause}
@@ -233,14 +239,9 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	return nil
 }
 
-func scheduledMigrationResultNeedsReview(result migration.OneShotResult) bool {
-	if result.Code == "outcome_failed" {
-		return true
-	}
-	if result.CreationState == "not_created" && result.Code == "target_exists" {
-		return false
-	}
-	return result.CreationState != "created" || result.Handoff != "delivered"
+func scheduledMigrationTerminal(result migration.OneShotResult, name string) bool {
+	return result.CreationState == "created" && result.Handoff == "delivered" ||
+		result.CreationState == "not_created" && result.Code == "target_exists" && result.ServerName == name
 }
 
 const (

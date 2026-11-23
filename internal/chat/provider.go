@@ -21,11 +21,11 @@ import (
 var ErrModelUnavailable = errors.New("model unavailable")
 
 const (
-	requestMigrationRetryException = "For migration, one approval covers the immediate first create and 30-minute capacity-only retries; retry only the exact top-level not_created/no_capacity result and stop for every other outcome."
-	requestUncertaintyWarning      = "If an earlier attempt may have failed or been interrupted, it may have performed actions and its tool results may be unavailable. Before continuing or retrying, check whether any actions completed and verify external state. For migration, do not replay an uncertain create or handoff. " + requestMigrationRetryException
+	requestMigrationRetryException = "For migration, one approval covers the immediate first create and unlimited 30-minute retries after any migration error, with the same approved parameters. Stop only for the exact named target_exists or confirmed creation and delivered handoff."
+	requestUncertaintyWarning      = "If an earlier attempt may have failed or been interrupted, it may have performed actions and its tool results may be unavailable. Before continuing or retrying, check whether any actions completed and verify external state. For migration, do not replay a handoff; the next scheduled create uses the existing exact-name guard. " + requestMigrationRetryException
 	requestHistoryWarning          = "Conversation history may omit failed or interrupted attempts, even after a restart. Do not assume that an omitted attempt performed no actions."
-	requestScheduledRepeatWarning  = "Carry out explicitly scheduled normal repeats as requested; do not suppress them because previous scheduled runs occurred. A scheduled migration uses one create call per claimed turn and cannot add another job; only the exact no_capacity result quietly keeps the same job waiting."
-	postToolAuthenticationWarning  = "OpenAI authentication failed after a tool started. Actions may already have completed and tool results may be unavailable. Check and reconcile external state, then resolve OpenAI authentication before retrying. For migration, stop and report rather than replaying an uncertain create or handoff."
+	requestScheduledRepeatWarning  = "Carry out explicitly scheduled normal repeats as requested; do not suppress them because previous scheduled runs occurred. A scheduled migration uses one create call per claimed turn and cannot add another job; all nonterminal results keep the same job waiting; no_capacity is quiet."
+	postToolAuthenticationWarning  = "OpenAI authentication failed after a tool started. Actions may already have completed and tool results may be unavailable. Check and reconcile external state, then resolve OpenAI authentication before retrying. For migration, preserve the scheduled retry and never replay a handoff."
 	postToolAuthenticationLegacy   = "OpenAI authentication failed after a tool started. Actions may already have completed and tool results may be unavailable. Check and reconcile external state, then resolve OpenAI authentication before retrying."
 	interruptedActionWarning       = "Scheduled run was interrupted after a tool started. Actions may already have completed and tool results may be unavailable. Check and reconcile external state before retrying."
 	unknownActionWarning           = "Scheduled run was interrupted and its action status is unknown. Actions may already have completed and tool results may be unavailable. Check and reconcile external state before retrying."
@@ -328,6 +328,36 @@ type unknownActionError struct{ cause error }
 func (unknownActionError) Error() string        { return unknownActionWarning }
 func (err unknownActionError) Unwrap() error    { return err.cause }
 func (unknownActionError) Is(target error) bool { return target == (unknownActionMarker{}) }
+
+// IsCompletedToolModelFailure identifies a provider request failure after all
+// started tools completed. Local failures and interrupted actions require review.
+func IsCompletedToolModelFailure(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errConversationSaveFailed) || ScheduledActionReviewMessage(err) != "" {
+		return false
+	}
+	provider, completed := false, false
+	for _, current := range requestFailureErrors(err) {
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			children := joined.Unwrap()
+			if len(children) != 1 {
+				for _, child := range children {
+					if _, attempt := child.(codexAttemptFailure); !attempt {
+						return false
+					}
+				}
+			}
+		}
+		switch failure := current.(type) {
+		case localFailure, toolHandlerError, conversationSaveError:
+			return false
+		case providerFailure:
+			provider = provider || (failure.phase == "pre-stream" && failure.status >= 400) || failure.phase == "stream"
+		case toolProgressError:
+			completed = failure.progress.Started > 0 && failure.progress.Started == failure.progress.Completed
+		}
+	}
+	return provider && completed
+}
 
 // ScheduledActionReviewMessage identifies interrupted scheduled runs and
 // post-tool authentication failures that must not be replayed automatically.
@@ -763,6 +793,19 @@ type providerFailureBoundaryKey struct{}
 
 func WithToolCallObserver(ctx context.Context, observer ToolCallObserver) context.Context {
 	return context.WithValue(ctx, toolCallObserverKey{}, observer)
+}
+
+// AddToolCallObserver preserves an existing observer when adding another.
+func AddToolCallObserver(ctx context.Context, observer ToolCallObserver) context.Context {
+	previous := toolCallObserver(ctx)
+	return WithToolCallObserver(ctx, func(name, arguments string) {
+		if previous != nil {
+			previous(name, arguments)
+		}
+		if observer != nil {
+			observer(name, arguments)
+		}
+	})
 }
 
 // WithRuntimeFailureOperation identifies the outer runtime boundary that owns

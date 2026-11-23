@@ -143,10 +143,10 @@ func migrationOutcomeText(result migration.OneShotResult) string {
 		return "Migration " + result.ServerName + " was created. The setup link and SSH private-key attachment were sent separately."
 	}
 	if result.CreationState == "created" {
-		return "Migration created, but private handoff delivery was incomplete. It will not be retried automatically."
+		return "Migration created, but private handoff delivery was incomplete. The same scheduled job will try again; the handoff will not be resent."
 	}
 	if result.CreationState == "unknown" {
-		return "Migration result is uncertain. It will not be retried automatically; reconcile the provider state before any new attempt."
+		return "Migration result is uncertain. The same scheduled job will try again using the exact name."
 	}
 	return "Migration was not created."
 }

@@ -412,7 +412,6 @@ func reportScheduledMigrationOutcome(ctx context.Context, owner int64, result mi
 			if _, logged := err.(interface{ DiagnosticLogged() }); !logged {
 				diagnostics.Error("agent.cron.migration_outcome", err)
 			}
-			result.Code = "outcome_failed"
 		}
 	}
 	return result
