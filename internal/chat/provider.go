@@ -135,6 +135,13 @@ func ModelStreamFailureInfo(err error) (classification, reference string, ok boo
 			continue
 		}
 		classification = diagnostics.StreamClassification(streamErr.Classification)
+		var handlerErr toolHandlerError
+		var localErr localFailure
+		if errors.As(streamErr.Cause, &handlerErr) {
+			classification = "tool_handler_failed"
+		} else if errors.As(streamErr.Cause, &localErr) {
+			classification = localFailureClassification(localErr)
+		}
 		if classification == "" {
 			classification = modelStreamClassification
 		}
@@ -150,6 +157,14 @@ func SafeModelStreamMessage(classification, reference string) string {
 	safeClassification := diagnostics.StreamClassification(classification)
 	message := requestFailureModelStream
 	switch safeClassification {
+	case "tool_handler_failed":
+		message = "A tool failed; its outcome may be uncertain. Check its effects before repeating the action."
+	case "tool_config_invalid":
+		message = "GOASTER_TOOL_CALL_LIMIT must be a positive integer."
+	case "tool_config_unavailable":
+		message = "Tool call limit configuration is unavailable."
+	case "local_failure":
+		message = "The request could not be completed due to a local failure."
 	case modelStreamInterruptedRead:
 		message = "The model stream was interrupted before completion."
 	case modelStreamPrematureEOF:
@@ -170,6 +185,7 @@ func SafeModelStreamMessage(classification, reference string) string {
 	if safeReference := diagnostics.RequestReference(reference); safeReference != "" {
 		message += " Reference: " + safeReference + "."
 	}
+	message += " Take a screenshot, start a new chat with your agent, and ask it to self-debug."
 	return message
 }
 

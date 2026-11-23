@@ -845,12 +845,59 @@ func tokenExpiry(token string) time.Time {
 	return time.Unix(seconds, 0)
 }
 
-type toolHandlerError struct{ cause error }
+type toolHandlerError struct {
+	cause error
+	tool  string
+}
 
 func (err toolHandlerError) Error() string { return "tool handler failed; outcome uncertain" }
 func (err toolHandlerError) Unwrap() error { return err.cause }
 func (err toolHandlerError) DiagnosticFields() []diagnostics.Field {
-	return []diagnostics.Field{{Key: "local_stage", Value: "tool_handler"}, {Key: "local_reason", Value: "handler_failed"}}
+	return []diagnostics.Field{{Key: "local_stage", Value: "tool_handler"}, {Key: "local_reason", Value: "handler_failed"}, {Key: "tool_name", Value: err.tool}, {Key: "tool_cause_detail", Value: toolCauseReason(err.cause)}}
+}
+
+// toolCauseReason exposes only fixed categories, never error text or paths.
+func toolCauseReason(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, os.ErrNotExist):
+		return "file_not_found"
+	case errors.Is(err, os.ErrPermission):
+		return "permission_denied"
+	}
+	for _, cause := range requestFailureErrors(err) {
+		switch cause.(type) {
+		case *json.SyntaxError, *json.UnmarshalTypeError:
+			return "invalid_arguments"
+		case localFailure:
+			return "local_failure"
+		case *os.PathError, *os.LinkError, syscall.Errno, conversationSaveError:
+			return "storage_failure"
+		}
+	}
+	return "unrecognized"
+}
+
+func toolRecoveryNotice(ctx context.Context) string {
+	message := "A tool failed; remaining work may be incomplete."
+	if ref := diagnostics.RequestReference(requestReference(ctx)); ref != "" {
+		message += " Reference: " + ref + "."
+	}
+	return message + " Take a screenshot, start a new chat with your agent, and ask it to self-debug."
+}
+
+// Handler failures involving storage or local checkpoints must stop the turn.
+func handlerFailureMustStop(err error) bool {
+	for _, cause := range requestFailureErrors(err) {
+		switch cause.(type) {
+		case *os.PathError, *os.LinkError, syscall.Errno, localFailure, conversationSaveError:
+			return true
+		}
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 type providerFailure struct {
@@ -1938,7 +1985,15 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 			return
 		}
 		if phase == "post-stream" && !IsModelStreamError(replyErr) && !errors.Is(replyErr, context.Canceled) && !errors.Is(replyErr, context.DeadlineExceeded) {
-			replyErr = ModelStreamError{Classification: modelRequestFailureClassification, Reference: requestReference(ctx), Cause: replyErr}
+			classification := modelRequestFailureClassification
+			var handlerErr toolHandlerError
+			var localErr localFailure
+			if errors.As(replyErr, &handlerErr) {
+				classification = "tool_handler_failed"
+			} else if errors.As(replyErr, &localErr) {
+				classification = localFailureClassification(localErr)
+			}
+			replyErr = ModelStreamError{Classification: classification, Reference: requestReference(ctx), Cause: replyErr}
 		}
 		if _, _, ok := providerFailureInfo(replyErr); !ok {
 			replyErr = providerFailure{phase: phase, status: status, cause: replyErr}
@@ -1957,6 +2012,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 	}
 	requestedCalls := 0
 	finishing := false
+	handlerFinishing := false
 	toolStarted := false
 	skillSession, _ := ctx.Value(skillSessionKey{}).(skillSessionContext)
 	instructions := ""
@@ -1977,7 +2033,11 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		if allowTools {
 			requestInstructions := instructions
 			if finishing {
-				requestInstructions += fmt.Sprintf("\n\nThe %d-call tool budget has been reached. No more tools are available. Give a partial report using only the results already collected and state that remaining work may be incomplete.", toolLimit)
+				if handlerFinishing {
+					requestInstructions += "\n\nA tool failed. No more tools are available. Briefly report any useful results; the failure notice and debugging advice are already supplied separately."
+				} else {
+					requestInstructions += fmt.Sprintf("\n\nThe %d-call tool budget has been reached. No more tools are available. Give a partial report using only the results already collected and state that remaining work may be incomplete.", toolLimit)
+				}
 			}
 			requestContext = context.WithValue(ctx, toolInstructionsKey{}, requestInstructions)
 		}
@@ -1998,7 +2058,10 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		}
 		phase = "post-stream"
 		if finishing {
-			const notice = "Tool budget reached; remaining work may be incomplete."
+			notice := "Tool budget reached; remaining work may be incomplete."
+			if handlerFinishing {
+				notice = toolRecoveryNotice(ctx)
+			}
 			if len(response.ToolCalls) != 0 || strings.TrimSpace(response.Text) == "" {
 				reason := "finish_empty"
 				if len(response.ToolCalls) != 0 {
@@ -2036,13 +2099,16 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		}
 		callItems := make([]codexInputItem, 0, len(response.ToolCalls))
 		outputItems := make([]codexInputItem, 0, len(response.ToolCalls))
+		failedHandler := false
 		for _, call := range response.ToolCalls {
-			withinBudget := requestedCalls < toolLimit
+			withinBudget := requestedCalls < toolLimit && !failedHandler
 			if withinBudget {
 				requestedCalls++
 			}
 			result := `{"error":"tool_limit_reached","message":"NOT EXECUTED: tool budget reached; remaining work may be incomplete."}`
-			if withinBudget {
+			if failedHandler {
+				result = "NOT EXECUTED: an earlier tool failed; do not replay it automatically."
+			} else if withinBudget {
 				result = "Tool not executed: load the required skill and follow its authentication guidance, any legacy authorization requirements, and workflow before requesting other tools."
 			}
 			if withinBudget && (setupCalls == 0 || call.Name == loadSkillCodexTool.Name) {
@@ -2070,7 +2136,21 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 				toolStartedCount++
 				result, err = handler(ctx, call.Arguments)
 				if err != nil {
-					return "", status, toolHandlerError{cause: err}
+					failure := toolHandlerError{cause: err, tool: call.Name}
+					if ctx.Err() != nil || handlerFailureMustStop(err) || (call.Name != "read_file" && call.Name != "list_dir") {
+						return "", status, failure
+					}
+					fields := configuredModelDiagnostic(ModelRegistry{}, model)
+					if len(fields) == 0 {
+						fields = append(fields, diagnostics.Field{Key: "model_detail", Value: codexModelDetailState(model)})
+					}
+					fields = append(fields, diagnostics.Field{Key: "request_reference", Value: requestReference(ctx)},
+						diagnostics.Field{Key: "backend_type_detail", Value: "absent"},
+						diagnostics.Field{Key: "backend_code_detail", Value: "absent"},
+						diagnostics.Field{Key: "request_id_detail", Value: "absent"})
+					diagnostics.Error("chat.tool_handler", providerFailure{phase: phase, status: status, cause: failure}, fields...)
+					failedHandler = true
+					result = fmt.Sprintf(`{"error":"tool_handler_failed","reason":%q,"message":"A tool failed. Do not repeat the call automatically."}`, toolCauseReason(err))
 				}
 				toolCompletedCount++
 				if call.Name == migrationToolName {
@@ -2112,7 +2192,8 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 
 		input = append(input, callItems...)
 		input = append(input, outputItems...)
-		finishing = requestedCalls == toolLimit
+		finishing = requestedCalls == toolLimit || failedHandler
+		handlerFinishing = failedHandler
 	}
 }
 

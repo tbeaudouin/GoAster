@@ -1489,14 +1489,14 @@ func TestTelegramPreservesSafeModelStreamClassificationAndReference(t *testing.T
 	if !errors.As(err, &modelErr) || modelErr.classification != "premature_eof" || modelErr.reference != reference {
 		t.Fatalf("model stream error = %#v", err)
 	}
-	if modelErr.message != "The model stream ended before completion. Reference: "+reference+"." || strings.Contains(modelErr.message, "private stream detail") {
+	if modelErr.message != "The model stream ended before completion. Reference: "+reference+". Take a screenshot, start a new chat with your agent, and ask it to self-debug." || strings.Contains(modelErr.message, "private stream detail") {
 		t.Fatalf("unsafe model stream message = %q", modelErr.message)
 	}
 	wireReference = "chat-privatecredential"
 	log := captureTelegramDiagnostics(t, func() {
 		_, err = askAgentWithUser(context.Background(), "hello", 42, 7, nil, nil, agent, "control-secret")
 	})
-	if failure, ok := err.(agentModelError); !ok || failure.reference != "" || failure.message != "The model stream ended before completion." {
+	if failure, ok := err.(agentModelError); !ok || failure.reference != "" || failure.message != "The model stream ended before completion. Take a screenshot, start a new chat with your agent, and ask it to self-debug." {
 		t.Fatalf("untrusted reference was not discarded: %v", err)
 	}
 	for _, secret := range []string{"privatecredential", "private stream detail", "control-secret"} {

@@ -239,6 +239,20 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			if n, e := strconv.Atoi(field.Value); e == nil && n >= 100 && n <= 599 {
 				value = strconv.Itoa(n)
 			}
+		case "tool_name":
+			switch field.Value {
+			case "read_file", "list_dir", "write_file", "edit_file", "append_file", "shell_execute", "background_command", "load_skill", "goaster_migration", "send_file", "cron", "cron_disable_self", "web_search", "web_fetch", "telegram_command_reference":
+				value = field.Value
+			default:
+				value = "unrecognized"
+			}
+		case "tool_cause_detail":
+			switch field.Value {
+			case "invalid_arguments", "file_not_found", "permission_denied", "storage_failure", "deadline_exceeded", "canceled", "local_failure":
+				value = field.Value
+			default:
+				value = "unrecognized"
+			}
 		case "local_stage":
 			switch field.Value {
 			case "post_stream", "tool_handler", "conversation_save", "configuration":
@@ -681,7 +695,7 @@ func RequestReference(value string) string {
 // model response boundary. Provider text is never copied into this field.
 func StreamClassification(value string) string {
 	switch value {
-	case "model_stream", "model_request_failed", "interrupted_read", "premature_eof", "malformed_event", "unrecognized_event", "response_incomplete", "provider_error", "missing_final":
+	case "tool_handler_failed", "local_failure", "tool_config_invalid", "tool_config_unavailable", "model_stream", "model_request_failed", "interrupted_read", "premature_eof", "malformed_event", "unrecognized_event", "response_incomplete", "provider_error", "missing_final":
 		return value
 	default:
 		return ""
