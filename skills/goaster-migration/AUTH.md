@@ -13,7 +13,7 @@ Obtain one private spending approval for the cryptorandom exact
 optional `locations`, and rough public price. Before requesting approval, you
 MUST check the latest official public rough pricing; make a best-effort check
 and explicitly report unknown if unavailable. That approval covers the
-immediate first create and capacity-only retries every 30 minutes; do not ask
+immediate first create and unlimited retries every 30 minutes after any migration error, including uncertainty and incomplete handoff; do not ask
 the owner to choose now versus waiting. Follow the four-step `SKILL.md` journey
 for creation and retry. The rough public price is informational only, not a
 target, ceiling, ranking, or billing discussion.
@@ -24,7 +24,12 @@ as a separate clickable private message and the SSH private key as a key-only
 `id_ed25519` attachment to the revalidated paired owner. Keep the token, URL,
 key, request body, and provider response out of model input/output, tool output,
 cron messages, and logs. Do not persist them or make extra copies; the
-protected environment is the intended token storage. If delivery is uncertain
-or partial, disable the retry job and report the state; do not automatically
-resend, replay, adopt an existing target, or create another server. The two
+protected environment is the intended token storage. A validated initial `target_exists` for the exact approved name finishes without creating a retry job. If delivery is uncertain
+or partial, report the state and keep the same job enabled. The next normal create
+uses the existing exact-name guard; never resend or replay the handoff, recover keys,
+or adopt an existing target. The two
 handoff parts are separate private messages.
+
+For scheduled attempts the runtime queues one fixed, safe status to the
+originating conversation after the result is handled. No status contains private
+handoff material; a local failure requires review.

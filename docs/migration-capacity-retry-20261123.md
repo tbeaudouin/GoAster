@@ -1,5 +1,7 @@
 # Migration capacity retry evidence
 
+Update 2026-11-23: the later scheduled outcome change supersedes the no-capacity silence described below; each completed attempt queues a fixed safe status to its originating conversation.
+
 Every scheduled turn binds the migration capability when runtime creation is configured, regardless of schedule or run limit. The migration handler still requires a private, topic-free owner and the scheduler must claim the live execution before creation. Only the confirmed normal result `creation_state: not_created` and `code: no_capacity` retains the same enabled job without consuming a run or notifying the owner. `capability_unavailable` is a tool capability failure, not a provider capacity result. A completed creation or confirmed target-exists result uses the owner-bound self-disable; uncertain results and errors after an attempt require review.
 
 Self-disable remains immediate before a migration invocation. After confirmed no-capacity, self-disable returns `disabled:false` and leaves the retry enabled. The migration claim prevents a later create after an immediate self-disable. Ordinary reminders retain their existing behavior. No job intent marker or scheduler state was added.

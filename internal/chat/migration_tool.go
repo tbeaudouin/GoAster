@@ -56,6 +56,13 @@ func ConversationType(ctx context.Context) string {
 	return kind
 }
 
+type scheduledMigrationCompletedKey struct{}
+
+// WithScheduledMigrationCompleted ends a scheduled turn after its result is checkpointed.
+func WithScheduledMigrationCompleted(ctx context.Context, completed func() bool) context.Context {
+	return context.WithValue(ctx, scheduledMigrationCompletedKey{}, completed)
+}
+
 type scheduledMigrationKey struct{}
 type scheduledMigrationStartedKey struct{}
 type scheduledMigrationDisableGuardKey struct{}

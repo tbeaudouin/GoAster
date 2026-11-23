@@ -1496,6 +1496,24 @@ func (p *CodexProvider) replyWithHistory(ctx context.Context, model string, hist
 	return p.modelReply(ctx, model, history, true)
 }
 
+// WithProviderFailureBoundary assigns the final provider failure diagnostic to the caller.
+func WithProviderFailureBoundary(ctx context.Context) context.Context {
+	return context.WithValue(ctx, providerFailureBoundaryKey{}, true)
+}
+
+// ProviderFailureDiagnosticFields returns typed provider context for an owning boundary.
+func ProviderFailureDiagnosticFields(err error) []diagnostics.Field {
+	phase, status, ok := providerFailureInfo(err)
+	if !ok {
+		return nil
+	}
+	fields := []diagnostics.Field{{Key: "phase", Value: phase}}
+	if status != 0 {
+		fields = append(fields, diagnostics.Field{Key: "status", Value: fmt.Sprintf("%d", status)})
+	}
+	return fields
+}
+
 // ReplyWithoutTools sends a single message without tools, skills, or memory.
 func ReplyWithoutTools(ctx context.Context, provider interface {
 	modelReply(context.Context, string, []ChatMessage, bool) (string, error)
@@ -2173,6 +2191,14 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 						return "", status, localFailure{reason: "evidence_save", cause: err}
 					}
 				}
+				if call.Name == migrationToolName && err == nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return "", status, ctxErr
+					}
+					if completed, ok := ctx.Value(scheduledMigrationCompletedKey{}).(func() bool); ok && completed() {
+						return "", status, nil
+					}
+				}
 				if call.Name == loadSkillCodexTool.Name && err == nil {
 					if !skillFitsContext(instructions, input, callItems, outputItems, result) {
 						return "", status, localFailure{reason: "skill_budget", cause: skillRecovery(errors.New("skill content exceeds conversation budget"), skillBudgetMessage)}
@@ -2234,7 +2260,7 @@ func toolInstructionsForLimit(ctx context.Context, limit int) (string, error) {
 	if kind == "" {
 		kind = "unknown"
 	}
-	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation. Scheduled migration turns follow their exact literal create instructions, cannot add another job, and quietly keep the same job only for the exact no_capacity result. The scheduled-only self-disable capability has no supplied target ID."
+	instructions += "\n\nCurrent conversation type: " + kind + ". Obtain migration approval only in a private conversation. Scheduled migration turns follow their exact literal create instructions, cannot add another job, and keep the same job for all nonterminal results, quietly for no_capacity. The scheduled-only self-disable capability has no supplied target ID."
 	if metadata == "" {
 		instructions += "\n\nNo runtime skills are available. Do not perform a skill-dependent workflow; tell the user starter skills are missing."
 	} else {

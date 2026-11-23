@@ -112,14 +112,45 @@ func (r *countingReader) Read(p []byte) (int, error) {
 func main() {
 	store, err := agentCredentialStore(os.UserHomeDir)
 	if err != nil {
-		diagnostics.Error("agent.startup", err)
+		if len(os.Args) > 1 && os.Args[1] == "test-model" {
+			err = modelTestStartupFailure(os.Stdout, err)
+			logAgentError(err)
+		} else {
+			diagnostics.Error("agent.startup", err)
+		}
 		fmt.Fprintln(os.Stderr, "agent: cannot initialize credential store")
 		os.Exit(1)
 	}
-	if err := run(context.Background(), os.Args[1:], os.Stdout, chat.NewOpenAIAuthenticator(store), serve); err != nil {
-		diagnostics.Error("agent.main", err)
+	ctx := context.Background()
+	if len(os.Args) > 1 && os.Args[1] == "test-model" {
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+	}
+	if err := run(ctx, os.Args[1:], os.Stdout, chat.NewOpenAIAuthenticator(store), serve); err != nil {
+		logAgentError(err)
 		fmt.Fprintln(os.Stderr, "agent: operation failed")
 		os.Exit(1)
+	}
+}
+
+func modelTestStartupFailure(output io.Writer, cause error) error {
+	return writeModelTestResult(output, "", modelTestError{"configuration", "", cause})
+}
+
+func logAgentError(err error) {
+	var testErr modelTestError
+	if errors.As(err, &testErr) {
+		fields := []diagnostics.Field{{Key: "model_test_stage", Value: testErr.stage}, {Key: "configured_model", Value: testErr.model}}
+		fields = append(fields, chat.ProviderFailureDiagnosticFields(err)...)
+		if testErr.stage == "provider" {
+			// Preserve individual attempt records and add one owner summary.
+			diagnostics.Error("agent.model_test", errors.Join(err, errors.New("model test provider failed")), fields...)
+		} else {
+			diagnostics.Error("agent.model_test", err, fields...)
+		}
+	} else {
+		diagnostics.Error("agent.main", err)
 	}
 }
 
@@ -134,6 +165,15 @@ func agentCredentialStore(homeDir func() (string, error)) (chat.CredentialStore,
 }
 
 func run(ctx context.Context, args []string, output io.Writer, auth *chat.OpenAIAuthenticator, start func(chat.CredentialStore) error) error {
+	if len(args) > 0 && args[0] == "test-model" {
+		if len(args) != 2 {
+			return writeModelTestResult(output, "", modelTestError{"configuration", "", errors.New("usage: goaster-agent test-model EXACT_MODEL_ID")})
+		}
+		if auth == nil {
+			return writeModelTestResult(output, "", modelTestError{"configuration", "", errors.New("agent authentication is unavailable")})
+		}
+		return runModelTest(ctx, args[1], output, auth.Store)
+	}
 	if len(args) == 1 && args[0] == "login" {
 		return auth.Login(ctx, output)
 	}
@@ -153,7 +193,7 @@ func run(ctx context.Context, args []string, output io.Writer, auth *chat.OpenAI
 		return probeAgent(ctx, args[0], output)
 	}
 	if len(args) != 0 {
-		return fmt.Errorf("invalid invocation; use goaster-agent, login, prompt, test-prompt, live, or health")
+		return fmt.Errorf("invalid invocation; use goaster-agent, login, prompt, test-prompt, test-model, live, or health")
 	}
 	return start(auth.Store)
 }
@@ -175,6 +215,77 @@ func runTestPrompt(ctx context.Context, message string, output io.Writer, store 
 		return fmt.Errorf("write prompt reply: %w", err)
 	}
 	return nil
+}
+
+const modelTestPrompt = "Reply with exactly GOASTER_MODEL_TEST_OK and nothing else."
+const modelTestSentinel = "GOASTER_MODEL_TEST_OK"
+
+// Keep the cause available to diagnostics without exposing provider content to callers.
+type modelTestError struct {
+	stage string
+	model string
+	cause error
+}
+
+func (e modelTestError) Error() string { return "model test " + e.stage + " failed" }
+func (e modelTestError) Unwrap() error { return e.cause }
+
+func runModelTest(ctx context.Context, id string, output io.Writer, store chat.CredentialStore) error {
+	registry, err := chat.NewModelRegistry("")
+	if err != nil {
+		return writeModelTestResult(output, "", modelTestError{"configuration", "", err})
+	}
+	return testConfiguredModel(ctx, id, output, registry, func(ctx context.Context, model string) (string, error) {
+		return chat.ReplyWithoutTools(chat.WithProviderFailureBoundary(ctx), chat.NewCodexProvider(store), model, modelTestPrompt)
+	})
+}
+
+func writeModelTestResult(output io.Writer, model string, failure error) error {
+	status, stage := "ok", ""
+	if failure != nil {
+		status = "error"
+		var testErr modelTestError
+		if errors.As(failure, &testErr) {
+			stage = testErr.stage
+		}
+	}
+	record, err := json.Marshal(struct {
+		Model  string `json:"model,omitempty"`
+		Status string `json:"status"`
+		Stage  string `json:"stage,omitempty"`
+	}{model, status, stage})
+	if err == nil {
+		record = append(record, '\n')
+		var n int
+		n, err = output.Write(record)
+		if err == nil && n != len(record) {
+			err = io.ErrShortWrite
+		}
+	}
+	if err != nil {
+		return modelTestError{"output", model, errors.Join(failure, err)}
+	}
+	return failure
+}
+
+func testConfiguredModel(ctx context.Context, id string, output io.Writer, registry chat.ModelRegistry, reply func(context.Context, string) (string, error)) error {
+	model, err := registry.ExactConfiguredID(id)
+	if err != nil {
+		return writeModelTestResult(output, "", modelTestError{"configuration", "", err})
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	result, err := reply(ctx, model)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return writeModelTestResult(output, model, modelTestError{"provider", model, err})
+	}
+	if result != modelTestSentinel {
+		return writeModelTestResult(output, model, modelTestError{"response_mismatch", model, errors.New("response did not match sentinel")})
+	}
+	return writeModelTestResult(output, model, nil)
 }
 
 type agentPromptSetup struct {
@@ -292,21 +403,6 @@ func probeAgent(ctx context.Context, probe string, output io.Writer) error {
 	return err
 }
 
-func reportScheduledMigrationOutcome(ctx context.Context, owner int64, result migration.OneShotResult, report func(context.Context, int64, migration.OneShotResult) error) migration.OneShotResult {
-	if result.CreationState == "not_created" && result.Code == "no_capacity" {
-		return result
-	}
-	if report != nil {
-		if err := report(ctx, owner, result); err != nil {
-			if _, logged := err.(interface{ DiagnosticLogged() }); !logged {
-				diagnostics.Error("agent.cron.migration_outcome", err)
-			}
-			result.Code = "outcome_failed"
-		}
-	}
-	return result
-}
-
 func pairedMigrationOptions() migration.Options {
 	options := migration.DefaultOptions()
 	options.MigrationRecipient = telegram.MigrationRecipient
@@ -342,8 +438,7 @@ func serve(store chat.CredentialStore) (serveErr error) {
 		}
 		return deliveryQueue.Enqueue(job, reply)
 	}, func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
-		result := migration.CreateOnce(ctx, request, migrationOptions, owner)
-		return reportScheduledMigrationOutcome(ctx, owner, result, migrationOptions.ReportOutcome)
+		return migration.CreateOnce(ctx, request, migrationOptions, owner)
 	})
 	if err != nil {
 		return err

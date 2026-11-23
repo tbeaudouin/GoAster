@@ -1,0 +1,15 @@
+# Exact model diagnostic
+
+`goaster-agent test-model EXACT_MODEL_ID` reads the current protected runtime model configuration and sends the fixed sentinel prompt through the agent's Codex provider and agent credentials. It accepts only an exact configured ID and requires the exact response bytes. It does not select a chat model or perform configuration recovery.
+
+Offline tests cover command arguments, read-only configuration and exact selection, failure and cancellation handling, and the provider request and JSON/SSE response text. The model administration skill is checked after starter installation and discovery. Existing provider authentication and retry behavior is unchanged.
+
+This is a separate local process, not a live Telegram turn. It does not establish that Telegram routing or a particular chat selection works. No live provider call was made for this change.
+
+The command writes `status: "error"` and a fixed failure stage on diagnostic failure, with a model only after exact configuration validation. Output write failures return an error without attempting a second write. Provider failures retain their wrapped causes for the command's diagnostic boundary; expected cancellation may be unlogged. The existing provider retry-attempt records and HTTP error body handling remain in place.
+
+The offline command wiring test uses an isolated HOME, the actual agent credential store and normal provider with a mocked HTTP transport. It checks the candidate model, fixed single prompt, absence of tools, agent credential, success, mismatch, transport failure, cancellation and output failure. It also exercises a model-not-found HTTP 400, HTTP 401 followed by rejected agent-token refresh, and HTTP 503 retry exhaustion over three attempts; it checks the bounded result, retained provider context and owner diagnostics. Wrong argument counts and credential-store startup failures produce bounded configuration failure JSON without a model. Resolver tests reject unsafe permissions and file or parent symlinks without changing the target. The tests do not contact a provider or verify live service behavior.
+
+Validation: the full suite passed with the five previously documented baseline failures excluded (`TestAgentPromptUsesRuntimeSkillsAndMemorySetup`, `TestTaskPlanningDefaultSkill`, `TestFeatureInspirationPolicy`, `TestInstallBundledStartersOnce`, and `TestBundledGitHubAuthDocumentsExact`; see `tool-error-diagnostics-validation-20261123.md`). Focused model-diagnostic race tests, `go vet ./...`, `go build ./cmd/...`, and `git diff --check` passed. No runtime configuration or model selection was changed.
+
+Final acceptance: independent Terra review returned `SATISFIED`. Parent independently reran the full suite with only the five documented baseline failures excluded, focused race tests for `ModelDiagnostic|ModelAdministrationDiagnosticGuidance`, `go vet ./...`, `go build ./...`, and `git diff --check`; all passed. Runtime installation, a live provider probe, and any actual alias change remain outside this source delivery.

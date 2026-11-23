@@ -28,6 +28,37 @@ func TestGoasterMigrationSkillMatchesApprovedWording(t *testing.T) {
 	}
 }
 
+func TestMigrationRetryPolicyInstalledAndLoaded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assets, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assets)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	content, err := Load("goaster-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"unlimited automatic attempts every 30 minutes after any migration error", "residual duplicate risk", "Keep this job enabled", "Never adopt an existing", "max_runs null or 0", "finish without creating a retry job"} {
+		if !strings.Contains(content, phrase) {
+			t.Errorf("loaded migration policy missing %q", phrase)
+		}
+	}
+	metadata, err := Discover()
+	if err != nil || !strings.Contains(metadata, "retry migration errors") {
+		t.Fatalf("metadata missing retry policy: %v", err)
+	}
+	auth, err := os.ReadFile(filepath.Join(home, ".goaster", "artefacts", "skills", "goaster-migration", "AUTH.md"))
+	if err != nil || (!strings.Contains(string(auth), "unlimited retries every 30 minutes") || !strings.Contains(string(auth), "finishes without creating a retry job")) {
+		t.Fatalf("installed auth missing retry policy: %v", err)
+	}
+}
+
 func TestDefaultFilesystemSkillContracts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -920,5 +951,33 @@ func TestLocalSkillRoutingInstalledDiscoveryAndLoad(t *testing.T) {
 	loaded, err = Load("manage-skills")
 	if err != nil || !strings.Contains(loaded, "Updated local instructions.") {
 		t.Fatalf("starter installation overwrote existing instructions: %q, %v", loaded, err)
+	}
+}
+
+func TestModelAdministrationDiagnosticGuidance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	assetDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOASTER_STARTER_DIR", assetDir)
+	if err := InstallStarters(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Discover()
+	if err != nil || !strings.Contains(metadata, "name: model-administration\n") {
+		t.Fatalf("discovery: %v %s", err, metadata)
+	}
+	data, err := Load("model-administration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join(strings.Fields(data), " ")
+	for _, phrase := range []string{"goaster-agent test-model EXACT_MODEL_ID", "complete previous runtime JSON", "Keep all chat selections unchanged", "separate local process", "does not prove a live Telegram turn", "No restart is needed"} {
+		if !strings.Contains(content, phrase) {
+			t.Errorf("model administration guidance missing %q", phrase)
+		}
 	}
 }

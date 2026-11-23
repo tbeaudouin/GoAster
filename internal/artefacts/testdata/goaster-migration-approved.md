@@ -141,7 +141,7 @@ Present:
 - The exact server type.
 - The location choice, including “any compatible available location” when there is no preference.
 - The rough price estimate.
-- An immediate creation attempt, followed by automatic attempts every 30 minutes only if capacity is unavailable and non-creation is confirmed.
+- An immediate creation attempt, followed by unlimited automatic attempts every 30 minutes after any migration error, including uncertain creation or incomplete handoff, using the same exact name, type and locations. GoAsterWeb checks the exact name before each create; an uncertain timeout still carries a residual duplicate risk.
 
 Explain briefly that capacity can take days to become available. Do not promise a completion time.
 
@@ -180,13 +180,13 @@ The same automatic private delivery applies to immediate and cron-triggered crea
 
 Do not claim that setup or migration is complete merely because the server was created.
 
-c. No capacity
+c. Handle an existing target or arrange retries
 
-Only when the immediate response explicitly contains both:
+If the immediate result is validated `target_exists` for the exact approved server name, report that the named server already exists and finish without creating a retry job. Do not adopt it or retrieve a key or setup link.
 
-creation_state: "not_created"
-code: "no_capacity"
-create one ordinary recurring cron job, once, with a 30-minute interval, max_runs null or 0 (unlimited), and delete_after_run false. Do not set a final run cap.
+After any immediate migration error, including no capacity, timeout, provider lookup,
+authentication or network failure, unavailable capability, unknown creation, or
+incomplete handoff, create one ordinary recurring cron job, once, with a 30-minute interval, max_runs null or 0 (unlimited), and delete_after_run false. Do not set a final run cap.
 
 Record its job ID. Keep the exact approved server name, type and locations. Do not create another job for the same request.
 
@@ -206,38 +206,33 @@ This job's ID is: <own job ID>.
 Never create or schedule another cron job.
 Never change the approved server name, type or locations.
 
-Handle the result as follows:
+The runtime handles the completed scheduled tool result directly; no follow-up model response is needed. The result policy is:
 
 1. If creation_state is "created" and handoff is "delivered":
    Disable this job using its own job ID.
-   Tell the owner that the server was created and that the create
-   action sent the SSH key attachment and separate private setup link.
-   Tell them to use those private messages to finish setup on GoAsterWeb.
+   The runtime sends a fixed safe status after stopping the job.
 
 2. If code is "target_exists" for the exact approved server name:
    Disable this job.
-   Report that the named server already exists.
+   The runtime sends a fixed safe status after stopping the job.
    Do not adopt it or try to retrieve a key or setup link.
 
 3. If creation_state is "not_created" and code is "no_capacity":
-   Capacity unavailable means retry, not disable. This applies only to the confirmed
-   creation_state: "not_created" and code: "no_capacity" result. Never disable this job.
-   Send no notification and make no cron changes.
+   Capacity unavailable means retry, not disable.
+   The runtime sends a fixed safe status; make no cron changes.
    Wait for this same job's next scheduled run.
 
-4. For every other error (including tool capability_unavailable, which is not a provider capacity shortage), uncertain creation outcome, or failed,
-   partial or unknown delivery:
-   Disable this job.
-   Report the exact safe error details and whether creation is
-   confirmed, ruled out or unknown.
-Do not run overlapping attempts.
+4. For every other error, uncertain creation outcome, or failed, partial or
+   unknown delivery:
+   Keep this job enabled. The runtime sends a fixed safe status.
+   Wait for the next scheduled run.
 
-d. Other errors or uncertain outcomes
+Do not run overlapping attempts or immediately retry a tool call. Each scheduled
+run makes at most one normal create call with the same approved parameters. The
+existing GoAsterWeb exact-name check precedes each create. Never adopt an existing
+server, recover keys, or resend or replay a handoff. After partial delivery the
+next normal run should find the existing name and stop; it must not resend.
 
-Report useful error details in plain language, without exposing secrets.
-
-Do not automatically retry creation after an uncertain outcome.
-
-If the user asks for another creation after an uncertain or confirmed-created result, explain that a server may already exist and another attempt could create an additional billable server. Suggest checking their Hetzner account, but do not make that a mandatory step.
-
-Ask for one explicit confirmation before a fresh attempt. Do not repeat this warning for a result that definitively confirms no server was created.
+Report useful safe details after initial errors and arrange the same single job.
+Manual cancellation remains available. Local scheduler ownership, claim or storage
+corruption requires review and must fail closed.
