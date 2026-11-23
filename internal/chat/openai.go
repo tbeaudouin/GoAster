@@ -2100,13 +2100,14 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		callItems := make([]codexInputItem, 0, len(response.ToolCalls))
 		outputItems := make([]codexInputItem, 0, len(response.ToolCalls))
 		failedHandler := false
+		rejectedCron := false
 		for _, call := range response.ToolCalls {
-			withinBudget := requestedCalls < toolLimit && !failedHandler
+			withinBudget := requestedCalls < toolLimit && !failedHandler && !rejectedCron
 			if withinBudget {
 				requestedCalls++
 			}
 			result := `{"error":"tool_limit_reached","message":"NOT EXECUTED: tool budget reached; remaining work may be incomplete."}`
-			if failedHandler {
+			if failedHandler || rejectedCron {
 				result = "NOT EXECUTED: an earlier tool failed; do not replay it automatically."
 			} else if withinBudget {
 				result = "Tool not executed: load the required skill and follow its authentication guidance, any legacy authorization requirements, and workflow before requesting other tools."
@@ -2137,7 +2138,9 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 				result, err = handler(ctx, call.Arguments)
 				if err != nil {
 					failure := toolHandlerError{cause: err, tool: call.Name}
-					if ctx.Err() != nil || handlerFailureMustStop(err) || (call.Name != "read_file" && call.Name != "list_dir") {
+					cronErr, isCronArgument := err.(cronArgumentError)
+					correctableCron := call.Name == cronToolName && isCronArgument
+					if ctx.Err() != nil || handlerFailureMustStop(err) || (!correctableCron && call.Name != "read_file" && call.Name != "list_dir") {
 						return "", status, failure
 					}
 					fields := configuredModelDiagnostic(ModelRegistry{}, model)
@@ -2149,8 +2152,13 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 						diagnostics.Field{Key: "backend_code_detail", Value: "absent"},
 						diagnostics.Field{Key: "request_id_detail", Value: "absent"})
 					diagnostics.Error("chat.tool_handler", providerFailure{phase: phase, status: status, cause: failure}, fields...)
-					failedHandler = true
-					result = fmt.Sprintf(`{"error":"tool_handler_failed","reason":%q,"message":"A tool failed. Do not repeat the call automatically."}`, toolCauseReason(err))
+					if correctableCron {
+						rejectedCron = true
+						result = fmt.Sprintf(`{"error":"invalid_cron_arguments","reason":%q,"message":%q}`, cronErr.reason, "NOT EXECUTED: "+cronErr.message)
+					} else {
+						failedHandler = true
+						result = fmt.Sprintf(`{"error":"tool_handler_failed","reason":%q,"message":"A tool failed. Do not repeat the call automatically."}`, toolCauseReason(err))
+					}
 				}
 				toolCompletedCount++
 				if call.Name == migrationToolName {

@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
+	"goaster/internal/diagnostics"
 	"goaster/internal/scheduler"
 )
 
@@ -127,16 +130,16 @@ func cronToolParameters(scheduled bool) map[string]any {
 			"at_seconds": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "Positive number of seconds from now for a one-time chat turn",
+				"description": "For add, choose exactly one schedule and omit unused fields. Example: 60 for a one-time turn",
 			},
 			"every_seconds": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "Positive interval in seconds for a recurring chat turn",
+				"description": "For add, choose exactly one schedule and omit unused fields. Example: 3600 for hourly recurrence",
 			},
 			"cron_expr": map[string]any{
 				"type":        "string",
-				"description": "Five-field cron expression, or six fields including seconds",
+				"description": "For add, choose exactly one schedule and omit unused fields. Example: 0 9 * * *",
 			},
 			"message": map[string]any{
 				"type":        "string",
@@ -181,7 +184,14 @@ func RegisterCronSelfDisableTool(registrar ToolRegistrar, jobs CronScheduler) er
 	})
 }
 
-func executeCronSelfDisableTool(ctx context.Context, arguments string, jobs CronScheduler) (string, error) {
+func executeCronSelfDisableTool(ctx context.Context, arguments string, jobs CronScheduler) (result string, err error) {
+	defer func() {
+		if err != nil {
+			if _, ok := err.(cronMutationError); !ok {
+				err = cronPrecheckError{action: "disable_self", cause: err}
+			}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -204,7 +214,7 @@ func executeCronSelfDisableTool(ctx context.Context, arguments string, jobs Cron
 	}
 	job, err := disabler.DisableOwnExecution(ctx, origin)
 	if err != nil {
-		return "", err
+		return "", cronMutationError{action: "disable_self", cause: err}
 	}
 	return encodeCronToolResult(struct {
 		Disabled bool   `json:"disabled"`
@@ -240,7 +250,7 @@ type cronToolArguments struct {
 	DeleteAfterRun *bool   `json:"delete_after_run,omitempty"`
 }
 
-func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) (string, error) {
+func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) (result string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -248,11 +258,28 @@ func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) 
 	if err != nil {
 		return "", err
 	}
+	action := strings.ToLower(strings.TrimSpace(parsed.Action))
+	defer func() {
+		if err != nil {
+			switch err.(type) {
+			case cronArgumentError, cronMutationError:
+			default:
+				err = cronPrecheckError{action: action, cause: err}
+			}
+		}
+	}()
 	origin, scoped, err := cronOrigin(ctx)
 	if err != nil {
 		return "", err
 	}
-	action := strings.ToLower(strings.TrimSpace(parsed.Action))
+	switch action {
+	case "add", "list", "get", "update", "remove", "enable", "disable":
+	default:
+		return "", cronInvalid("unknown", "invalid_action", "Cron requires a supported action.")
+	}
+	if action != "add" && action != "list" && strings.TrimSpace(parsed.ID) == "" {
+		return "", cronInvalid(action, "missing_id", "This cron action requires an id.")
+	}
 	if started, ok := ctx.Value(scheduledMigrationStartedKey{}).(func() bool); ok {
 		if action == "add" {
 			return "", fmt.Errorf("scheduled migration cannot add cron jobs")
@@ -282,11 +309,11 @@ func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) 
 		}
 		return encodeCronToolResult(publicCronJob(job))
 	case "update":
-		if strings.TrimSpace(parsed.ID) == "" {
-			return "", fmt.Errorf("cron update requires id")
-		}
 		if parsed.AtSeconds == nil && parsed.EverySeconds == nil && parsed.CronExpr == nil && parsed.Message == nil && parsed.MaxRuns == nil && parsed.DeleteAfterRun == nil {
-			return "", fmt.Errorf("cron update requires at least one field")
+			return "", cronInvalid(action, "missing_update", "Cron update requires at least one field.")
+		}
+		if err := validateCronUpdate(parsed); err != nil {
+			return "", err
 		}
 		patch := scheduler.Patch{
 			AtSeconds:      parsed.AtSeconds,
@@ -301,33 +328,27 @@ func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) 
 		}
 		job, err := jobs.Update(parsed.ID, patch)
 		if err != nil {
-			return "", err
+			return "", cronMutationError{action: action, cause: err}
 		}
 		return encodeCronToolResult(publicCronJob(job))
 	case "remove":
-		if strings.TrimSpace(parsed.ID) == "" {
-			return "", fmt.Errorf("cron remove requires id")
-		}
 		if _, err := requireCronJob(parsed.ID, jobs, origin, scoped); err != nil {
 			return "", err
 		}
 		if err := jobs.Remove(parsed.ID); err != nil {
-			return "", err
+			return "", cronMutationError{action: action, cause: err}
 		}
 		return encodeCronToolResult(struct {
 			Removed bool   `json:"removed"`
 			ID      string `json:"id"`
 		}{Removed: true, ID: strings.TrimSpace(parsed.ID)})
 	case "enable", "disable":
-		if strings.TrimSpace(parsed.ID) == "" {
-			return "", fmt.Errorf("cron %s requires id", strings.ToLower(strings.TrimSpace(parsed.Action)))
-		}
 		if _, err := requireCronJob(parsed.ID, jobs, origin, scoped); err != nil {
 			return "", err
 		}
 		job, err := jobs.SetEnabled(parsed.ID, strings.EqualFold(strings.TrimSpace(parsed.Action), "enable"))
 		if err != nil {
-			return "", err
+			return "", cronMutationError{action: action, cause: err}
 		}
 		return encodeCronToolResult(publicCronJob(job))
 	default:
@@ -335,21 +356,132 @@ func executeCronTool(ctx context.Context, arguments string, jobs CronScheduler) 
 	}
 }
 
+// cronArgumentError is safe to report to the model: no scheduler mutation began.
+type cronArgumentError struct {
+	reason  string
+	message string
+	action  string
+	cause   error
+}
+
+func (e cronArgumentError) Error() string { return e.message }
+func (e cronArgumentError) Unwrap() error { return e.cause }
+func (e cronArgumentError) DiagnosticFields() []diagnostics.Field {
+	return []diagnostics.Field{{Key: "cron_action", Value: e.action}, {Key: "cron_stage", Value: "validate"}, {Key: "cron_reason", Value: e.reason}}
+}
+func cronInvalid(action, reason, message string) error {
+	return cronArgumentError{action: action, reason: reason, message: message}
+}
+
+type cronPrecheckError struct {
+	action string
+	cause  error
+}
+
+func (e cronPrecheckError) Error() string { return "cron precheck failed" }
+func (e cronPrecheckError) Unwrap() error { return e.cause }
+func (e cronPrecheckError) DiagnosticFields() []diagnostics.Field {
+	reason := "precheck_failed"
+	if errors.Is(e.cause, scheduler.ErrJobNotFound) {
+		reason = "job_not_found"
+	}
+	return []diagnostics.Field{{Key: "cron_action", Value: e.action}, {Key: "cron_stage", Value: "precheck"}, {Key: "cron_reason", Value: reason}}
+}
+
+type cronMutationError struct {
+	action string
+	cause  error
+}
+
+func (e cronMutationError) Error() string { return "cron scheduler mutation failed; outcome uncertain" }
+func (e cronMutationError) Unwrap() error { return e.cause }
+func (e cronMutationError) DiagnosticFields() []diagnostics.Field {
+	reason := toolCauseReason(e.cause)
+	if reason == "unrecognized" {
+		reason = "unknown"
+	}
+	switch {
+	case errors.Is(e.cause, scheduler.ErrJobNotFound):
+		reason = "job_not_found"
+	case errors.Is(e.cause, scheduler.ErrExecutionInProgress):
+		reason = "execution_in_progress"
+	case errors.Is(e.cause, scheduler.ErrExecutionClaimUnavailable):
+		reason = "claim_unavailable"
+	case errors.Is(e.cause, scheduler.ErrReviewRequired):
+		reason = "review_required"
+	}
+	return []diagnostics.Field{{Key: "cron_action", Value: e.action}, {Key: "cron_stage", Value: "scheduler_mutation"}, {Key: "cron_reason", Value: reason}}
+}
 func parseCronToolArguments(arguments string) (cronToolArguments, error) {
+	invalid := func(reason, message string, cause ...error) (cronToolArguments, error) {
+		var underlying error
+		if len(cause) > 0 {
+			underlying = cause[0]
+		}
+		return cronToolArguments{}, cronArgumentError{action: "unknown", reason: reason, message: message, cause: underlying}
+	}
 	decoder := json.NewDecoder(strings.NewReader(arguments))
-	decoder.DisallowUnknownFields()
-	var parsed cronToolArguments
-	if err := decoder.Decode(&parsed); err != nil {
-		return cronToolArguments{}, fmt.Errorf("cron arguments are not valid JSON: %w", err)
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return invalid("invalid_object", "cron arguments must be a JSON object", err)
+	}
+	fields := map[string]json.RawMessage{}
+	allowed := map[string]bool{"action": true, "id": true, "at_seconds": true, "every_seconds": true, "cron_expr": true, "message": true, "max_runs": true, "delete_after_run": true}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return invalid("invalid_json", "cron arguments contain invalid JSON", err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return invalid("invalid_json", "cron arguments contain invalid JSON", err)
+		}
+		if !allowed[key] {
+			return invalid("unknown_field", "cron arguments contain an unknown field")
+		}
+		if _, exists := fields[key]; exists {
+			return invalid("duplicate_field", "cron arguments contain a duplicate field")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return invalid("invalid_json", "cron arguments contain invalid JSON", err)
+		}
+		fields[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return invalid("invalid_json", "cron arguments contain invalid JSON", err)
 	}
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return cronToolArguments{}, fmt.Errorf("cron arguments contain more than one JSON value")
+		return invalid("trailing_data", "cron arguments contain trailing data", err)
+	}
+	for key, value := range fields {
+		if string(value) == "null" && key != "at_seconds" && key != "every_seconds" && key != "cron_expr" {
+			return invalid("invalid_type", "cron arguments contain an invalid field type")
+		}
+	}
+	data, _ := json.Marshal(fields)
+	var parsed cronToolArguments
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return invalid("invalid_type", "cron arguments contain an invalid field type", err)
 	}
 	return parsed, nil
 }
 
 func cronToolAdd(arguments cronToolArguments, jobs CronScheduler, origin scheduler.Job, scoped bool) (string, error) {
+	action := "add"
+	if arguments.AtSeconds != nil && *arguments.AtSeconds < 0 || arguments.EverySeconds != nil && *arguments.EverySeconds < 0 {
+		return "", cronInvalid(action, "invalid_schedule", "Schedule durations must be positive.")
+	}
+	if arguments.AtSeconds != nil && *arguments.AtSeconds == 0 {
+		arguments.AtSeconds = nil
+	}
+	if arguments.EverySeconds != nil && *arguments.EverySeconds == 0 {
+		arguments.EverySeconds = nil
+	}
+	if arguments.CronExpr != nil && *arguments.CronExpr == "" {
+		arguments.CronExpr = nil
+	}
 	scheduleFields := 0
 	if arguments.AtSeconds != nil {
 		scheduleFields++
@@ -361,13 +493,13 @@ func cronToolAdd(arguments cronToolArguments, jobs CronScheduler, origin schedul
 		scheduleFields++
 	}
 	if scheduleFields != 1 {
-		return "", fmt.Errorf("cron add requires exactly one of at_seconds, every_seconds, or cron_expr")
+		return "", cronInvalid(action, "schedule_count", "Cron add requires exactly one positive schedule: at_seconds, every_seconds, or cron_expr; omit unused fields.")
 	}
 	if arguments.Message == nil || strings.TrimSpace(*arguments.Message) == "" {
-		return "", fmt.Errorf("cron add requires message")
+		return "", cronInvalid(action, "missing_message", "Cron add requires a nonempty message.")
 	}
 	if arguments.MaxRuns != nil && *arguments.MaxRuns < 0 {
-		return "", fmt.Errorf("max_runs must not be negative")
+		return "", cronInvalid(action, "invalid_max_runs", "max_runs must not be negative.")
 	}
 	job := scheduler.Job{Message: *arguments.Message}
 	switch {
@@ -382,6 +514,9 @@ func cronToolAdd(arguments cronToolArguments, jobs CronScheduler, origin schedul
 		job.Kind = scheduler.ScheduleCron
 		job.CronExpr = strings.TrimSpace(*arguments.CronExpr)
 	}
+	if err := validateCronSchedule(action, job.Schedule()); err != nil {
+		return "", err
+	}
 	if arguments.MaxRuns != nil {
 		job.MaxRuns = *arguments.MaxRuns
 	}
@@ -395,9 +530,53 @@ func cronToolAdd(arguments cronToolArguments, jobs CronScheduler, origin schedul
 	}
 	created, err := jobs.Add(job)
 	if err != nil {
-		return "", err
+		return "", cronMutationError{action: "add", cause: err}
 	}
 	return encodeCronToolResult(publicCronJob(created))
+}
+
+func validateCronSchedule(action string, schedule scheduler.Schedule) error {
+	if _, err := scheduler.NextRun(schedule, time.Now()); err != nil {
+		reason := "invalid_schedule"
+		if schedule.Kind == scheduler.ScheduleCron {
+			reason = "invalid_cron_expression"
+		}
+		return cronArgumentError{action: action, reason: reason, message: "Cron schedule is invalid.", cause: err}
+	}
+	return nil
+}
+
+func validateCronUpdate(a cronToolArguments) error {
+	if a.Message != nil && strings.TrimSpace(*a.Message) == "" {
+		return cronInvalid("update", "missing_message", "Cron update requires a nonempty message.")
+	}
+	if a.MaxRuns != nil && *a.MaxRuns < 0 {
+		return cronInvalid("update", "invalid_max_runs", "max_runs must not be negative.")
+	}
+	count := 0
+	schedule := scheduler.Schedule{}
+	if a.AtSeconds != nil {
+		count++
+		schedule.Kind = scheduler.ScheduleAt
+		schedule.AtSeconds = *a.AtSeconds
+	}
+	if a.EverySeconds != nil {
+		count++
+		schedule.Kind = scheduler.ScheduleEvery
+		schedule.EverySeconds = *a.EverySeconds
+	}
+	if a.CronExpr != nil {
+		count++
+		schedule.Kind = scheduler.ScheduleCron
+		schedule.CronExpr = *a.CronExpr
+	}
+	if count > 1 {
+		return cronInvalid("update", "schedule_count", "Cron update accepts at most one schedule.")
+	}
+	if count == 1 {
+		return validateCronSchedule("update", schedule)
+	}
+	return nil
 }
 
 func requireCronJob(id string, jobs CronScheduler, origin scheduler.Job, scoped bool) (scheduler.Job, error) {
