@@ -144,7 +144,7 @@ func TestCronToolSupportsAtAndCronSchedulesAndRejectsAmbiguousAdd(t *testing.T) 
 	}
 	if description, ok := registrar.tool.Parameters["properties"].(map[string]any)["at_seconds"].(map[string]any)["description"].(string); !ok || description == "" {
 		t.Fatal("at_seconds tool description is missing")
-	} else if !strings.Contains(description, "omit unused fields") {
+	} else if !strings.Contains(description, "null for unused fields") {
 		t.Fatalf("at_seconds tool description = %q", description)
 	}
 }
