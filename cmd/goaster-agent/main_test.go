@@ -1740,10 +1740,10 @@ func TestServeWiresOneShotCreateWithoutMigrationLifecycleRuntime(t *testing.T) {
 			t.Fatalf("serve starts retired migration runtime: %s", forbidden)
 		}
 	}
-	if !strings.Contains(text, "chat.RegisterMigrationTool(") || !strings.Contains(text, "migration.CreateOnce(") {
+	if !strings.Contains(text, "registerAgentScheduledTools(") || !strings.Contains(text, "migration.CreateOnce(") {
 		t.Fatal("one-shot migration is not wired in serve")
 	}
-	migrationRegistration := strings.Index(text, "chat.RegisterMigrationTool(")
+	migrationRegistration := strings.Index(text, "registerAgentScheduledTools(")
 	schedulerStart := strings.Index(text, "cronJobs.Start(ctx)")
 	if migrationRegistration < 0 || schedulerStart < 0 || migrationRegistration > schedulerStart {
 		t.Fatal("migration tool must be registered before the generic cron scheduler starts")

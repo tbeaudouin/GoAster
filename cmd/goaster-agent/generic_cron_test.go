@@ -226,6 +226,7 @@ type realCronMigrationHarness struct {
 	queuedReplies    func() []string
 	unexpectedCreate func() bool
 	selfDisable      func() chat.Tool
+	reload           func() cronSchedulerRuntime
 }
 
 const scheduledMigrationToolArguments = `{"action":"create","server_type":"cx22","server_name":"goaster-migration-0123456789abcdef","locations":["fsn1"]}`
@@ -308,6 +309,22 @@ func newRealCronMigrationHarness(t *testing.T, model func(context.Context, int, 
 			mu.Lock()
 			defer mu.Unlock()
 			return unexpected
+		},
+		reload: func() cronSchedulerRuntime {
+			var restarted cronSchedulerRuntime
+			var err error
+			restarted, err = scheduler.New(scheduler.Options{Path: jobs.Path(), Now: func() time.Time { return now }, JobExecutor: func(ctx context.Context, job scheduler.Job) error {
+				return executeAgentCronJob(ctx, job, restarted, sessionFor, func(_ scheduler.Job, reply string) error {
+					mu.Lock()
+					defer mu.Unlock()
+					queued = append(queued, reply)
+					return nil
+				}, create)
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return restarted
 		},
 		selfDisable: func() chat.Tool {
 			mu.Lock()
@@ -835,15 +852,15 @@ func TestScheduledMigrationDiagnosticOwnership(t *testing.T) {
 	}
 }
 
-func TestGenericCronNoCapacitySelfDisableWinsRetry(t *testing.T) {
+func TestGenericCronNoCapacitySelfDisableCannotStopRetry(t *testing.T) {
 	var harness realCronMigrationHarness
 	harness = newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, tool chat.Tool) (string, error) {
 		result, err := tool.Handler(ctx, scheduledMigrationToolArguments)
 		if err != nil {
 			return "", err
 		}
-		if _, err := harness.selfDisable().Handler(ctx, `{}`); err != nil {
-			return "", err
+		if result, err := harness.selfDisable().Handler(ctx, `{}`); err != nil || !strings.Contains(result, `"disabled":false`) {
+			t.Fatalf("self-disable result=%s err=%v", result, err)
 		}
 		return result, nil
 	}), func(context.Context, migration.Request, int64) migration.OneShotResult {
@@ -854,7 +871,7 @@ func TestGenericCronNoCapacitySelfDisableWinsRetry(t *testing.T) {
 		t.Fatalf("runs = %d", runs)
 	}
 	saved, ok := harness.jobs.Get(job.ID)
-	if !ok || saved.Enabled || saved.NextRun != nil || saved.Status != scheduler.StatusDisabled {
+	if !ok || !saved.Enabled || saved.NextRun == nil || saved.Status != scheduler.StatusScheduled {
 		t.Fatalf("state = %+v", saved)
 	}
 	harness.advance(24 * time.Hour)
@@ -862,8 +879,8 @@ func TestGenericCronNoCapacitySelfDisableWinsRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.RunDue(context.Background()) != 0 || harness.jobs.RunDue(context.Background()) != 0 || harness.modelCalls() != 1 {
-		t.Fatal("self-disabled job replayed")
+	if restarted.RunDue(context.Background()) != 0 || harness.jobs.RunDue(context.Background()) != 1 || harness.modelCalls() != 2 {
+		t.Fatal("protected retry did not run")
 	}
 }
 
@@ -918,6 +935,258 @@ func TestRestartGuardCronRetryPersistsBeforeExecution(t *testing.T) {
 			saved, ok = jobs.Get(added.ID)
 			if ok && (saved.Enabled || saved.RunCount != 1) {
 				t.Fatalf("completed state: %+v", saved)
+			}
+		})
+	}
+}
+
+func TestGenericCronToolAddedMigrationRetriesAndStops(t *testing.T) {
+	for _, limit := range []string{"omitted", "null", "0", "3"} {
+		for _, outcome := range []string{"no_capacity", "target_exists", "created", "unknown", "partial", "lookup_error"} {
+			t.Run(limit+"/"+outcome, func(t *testing.T) {
+				calls := 0
+				h := newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, tool chat.Tool) (string, error) {
+					return tool.Handler(ctx, scheduledMigrationToolArguments)
+				}), func(_ context.Context, req migration.Request, owner int64) migration.OneShotResult {
+					calls++
+					if owner != 42 || req.ServerName != "goaster-migration-0123456789abcdef" || req.ServerType != "cx22" || !reflect.DeepEqual(req.Locations, []string{"fsn1"}) {
+						t.Fatalf("unexpected request: %+v owner=%d", req, owner)
+					}
+					switch outcome {
+					case "created":
+						return migration.OneShotResult{CreationState: "created", Handoff: "delivered"}
+					case "unknown":
+						return migration.OneShotResult{CreationState: "unknown", Code: "response_unavailable"}
+					case "partial":
+						return migration.OneShotResult{CreationState: "created", Code: "handoff_failed", Handoff: "failed"}
+					case "lookup_error":
+						return migration.OneShotResult{CreationState: "not_created", Code: "provider_lookup_failure"}
+					}
+					return migration.OneShotResult{CreationState: "not_created", Code: outcome}
+				})
+				registrar := genericCronRegistrar{tools: make(chan chat.Tool, 1)}
+				if err := chat.RegisterCronTool(registrar, h.jobs); err != nil {
+					t.Fatal(err)
+				}
+				tool := <-registrar.tools
+				ctx := chat.WithConversationID(chat.WithConversationType(context.Background(), "private"), 42)
+				args := `{"action":"add","every_seconds":1800,"message":"migration retry","delete_after_run":false}`
+				if limit != "omitted" {
+					args = fmt.Sprintf(`{"action":"add","every_seconds":1800,"message":"migration retry","max_runs":%s,"delete_after_run":false}`, limit)
+				}
+				result, err := tool.Handler(ctx, args)
+				if err != nil {
+					t.Fatal(err)
+				}
+				jobs := h.jobs.List()
+				if len(jobs) != 1 {
+					t.Fatalf("add result %s: jobs=%d", result, len(jobs))
+				}
+				added := jobs[0]
+				h.advance(1800 * time.Second)
+				if h.jobs.RunDue(context.Background()) != 1 {
+					t.Fatal("missing first run")
+				}
+				h.advance(1800 * time.Second)
+				if outcome == "no_capacity" {
+					if h.jobs.RunDue(context.Background()) != 1 || calls != 2 || len(h.queuedReplies()) != 0 {
+						t.Fatalf("retry calls=%d replies=%v", calls, h.queuedReplies())
+					}
+				} else if h.jobs.RunDue(context.Background()) != 0 || calls != 1 {
+					t.Fatalf("terminal replay calls=%d", calls)
+				}
+				reloaded, err := scheduler.New(scheduler.Options{Path: h.jobs.Path()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				saved, ok := reloaded.Get(added.ID)
+				needsReview := outcome == "unknown" || outcome == "partial" || outcome == "lookup_error"
+				wantStatus := scheduler.StatusDisabled
+				if needsReview {
+					wantStatus = scheduler.StatusFailed
+				}
+				if outcome == "no_capacity" {
+					wantStatus = scheduler.StatusScheduled
+				}
+				if !ok || saved.Enabled != (outcome == "no_capacity") || saved.ReviewRequired != needsReview || saved.Status != wantStatus || (outcome == "no_capacity" && (saved.RunCount != 0 || saved.NextRun == nil)) || (outcome != "no_capacity" && (saved.RunCount != 1 || saved.NextRun != nil)) {
+					t.Fatalf("reloaded: %+v", saved)
+				}
+				if outcome == "no_capacity" {
+					restarted := h.reload()
+					h.advance(1800 * time.Second)
+					if restarted.RunDue(context.Background()) != 1 || calls != 3 {
+						t.Fatalf("reloaded retry calls=%d", calls)
+					}
+				} else {
+					restarted := h.reload()
+					h.advance(24 * time.Hour)
+					if restarted.RunDue(context.Background()) != 0 || calls != 1 {
+						t.Fatalf("terminal result replayed after reload: calls=%d", calls)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestGenericCronManualDisableDuringMigrationClaim(t *testing.T) {
+	var h realCronMigrationHarness
+	var jobID string
+	h = newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, tool chat.Tool) (string, error) {
+		return tool.Handler(ctx, scheduledMigrationToolArguments)
+	}), func(context.Context, migration.Request, int64) migration.OneShotResult {
+		if _, err := h.jobs.SetEnabled(jobID, false); !errors.Is(err, scheduler.ErrExecutionInProgress) {
+			t.Fatalf("disable during claim: %v", err)
+		}
+		return migration.OneShotResult{CreationState: "not_created", Code: "no_capacity"}
+	})
+	job := addScheduledMigrationJob(t, h)
+	jobID = job.ID
+	if h.jobs.RunDue(context.Background()) != 1 {
+		t.Fatal("missing execution")
+	}
+	if _, err := h.jobs.SetEnabled(jobID, false); err != nil {
+		t.Fatal(err)
+	}
+	h.advance(24 * time.Hour)
+	if h.reload().RunDue(context.Background()) != 0 {
+		t.Fatal("manually disabled job replayed")
+	}
+}
+
+func TestGenericCronReminderCanSelfDisable(t *testing.T) {
+	var h realCronMigrationHarness
+	h = newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, _ chat.Tool) (string, error) {
+		return h.selfDisable().Handler(ctx, `{}`)
+	}), func(context.Context, migration.Request, int64) migration.OneShotResult {
+		t.Fatal("unexpected migration")
+		return migration.OneShotResult{}
+	})
+	job := addScheduledMigrationJob(t, h)
+	if h.jobs.RunDue(context.Background()) != 1 {
+		t.Fatal("missing execution")
+	}
+	saved, ok := h.jobs.Get(job.ID)
+	if !ok || saved.Enabled || saved.ReviewRequired {
+		t.Fatalf("state: %+v", saved)
+	}
+}
+
+func TestGenericCronSelfDisableBeforeMigrationIsImmediate(t *testing.T) {
+	var h realCronMigrationHarness
+	creates := 0
+	h = newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, tool chat.Tool) (string, error) {
+		result, err := h.selfDisable().Handler(ctx, `{}`)
+		if err != nil || !strings.Contains(result, `"disabled":true`) {
+			t.Fatalf("self-disable result=%s err=%v", result, err)
+		}
+		return tool.Handler(ctx, scheduledMigrationToolArguments)
+	}), func(context.Context, migration.Request, int64) migration.OneShotResult {
+		creates++
+		return migration.OneShotResult{CreationState: "not_created", Code: "no_capacity"}
+	})
+	job := addScheduledMigrationJob(t, h)
+	h.jobs.RunDue(context.Background())
+	saved, _ := h.jobs.Get(job.ID)
+	if creates != 0 || saved.Enabled || !saved.ReviewRequired {
+		t.Fatalf("state=%+v creates=%d", saved, creates)
+	}
+}
+
+func TestGenericCronMissingCreateDiagnosticPrivacy(t *testing.T) {
+	for _, invoke := range []bool{false, true} {
+		t.Run(fmt.Sprintf("invoke_%t", invoke), func(t *testing.T) {
+			h := newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, tool chat.Tool) (string, error) {
+				if invoke {
+					return tool.Handler(ctx, scheduledMigrationToolArguments)
+				}
+				return "ordinary reminder", nil
+			}), nil)
+			job, err := h.jobs.Add(scheduler.Job{Kind: scheduler.ScheduleEvery, EverySeconds: 3600, Message: "private-message-marker", OriginChatID: 42, OriginChatType: "private"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.advance(time.Hour)
+			var logs strings.Builder
+			restore := diagnostics.SetOutput(&logs)
+			h.jobs.RunDue(context.Background())
+			restore()
+			log := logs.String()
+			if invoke && (!strings.Contains(log, "migration_reason=\"create_unavailable\"") || strings.Count(log, "ERROR") != 1) {
+				t.Fatalf("diagnostic=%q", log)
+			}
+			if !invoke && log != "" {
+				t.Fatalf("reminder diagnostic=%q", log)
+			}
+			for _, secret := range []string{"private-message-marker", "private-name-marker", job.ID, "goaster-migration-0123456789abcdef"} {
+				if strings.Contains(log, secret) {
+					t.Fatalf("private value leaked: %q", log)
+				}
+			}
+		})
+	}
+}
+
+func TestScheduledMigrationAvailableAcrossSchedulesAndLimits(t *testing.T) {
+	schedules := []scheduler.Job{
+		{Kind: scheduler.ScheduleAt, AtSeconds: 60},
+		{Kind: scheduler.ScheduleEvery, EverySeconds: 60},
+		{Kind: scheduler.ScheduleEvery, EverySeconds: 1800},
+		{Kind: scheduler.ScheduleCron, CronExpr: "* * * * *"},
+	}
+	for _, schedule := range schedules {
+		for _, limit := range []int{0, 1, 3} {
+			t.Run(fmt.Sprintf("%s_%d_%d_%d", schedule.Kind, schedule.AtSeconds, schedule.EverySeconds, limit), func(t *testing.T) {
+				creates := 0
+				h := newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, tool chat.Tool) (string, error) {
+					return tool.Handler(ctx, scheduledMigrationToolArguments)
+				}), func(context.Context, migration.Request, int64) migration.OneShotResult {
+					creates++
+					return migration.OneShotResult{CreationState: "not_created", Code: "no_capacity"}
+				})
+				schedule.MaxRuns = limit
+				schedule.Message = "ordinary message"
+				schedule.OriginChatID = 42
+				schedule.OriginChatType = "private"
+				job, err := h.jobs.Add(schedule)
+				if err != nil {
+					t.Fatal(err)
+				}
+				h.advance(30 * time.Minute)
+				if h.jobs.RunDue(context.Background()) != 1 {
+					t.Fatal("job did not run")
+				}
+				saved, ok := h.jobs.Get(job.ID)
+				if !ok || creates != 1 || !saved.Enabled || saved.RunCount != 0 || saved.ReviewRequired || len(h.queuedReplies()) != 0 {
+					t.Fatalf("job=%+v creates=%d replies=%v", saved, creates, h.queuedReplies())
+				}
+			})
+		}
+	}
+}
+
+func TestScheduledMigrationRejectsNonPrivateOrigin(t *testing.T) {
+	for _, origin := range []struct {
+		kind       string
+		id, thread int64
+	}{{"group", 42, 0}, {"private", 42, 7}, {"private", -42, 0}} {
+		t.Run(fmt.Sprintf("%s_%d_%d", origin.kind, origin.id, origin.thread), func(t *testing.T) {
+			creates := 0
+			h := newRealCronMigrationHarness(t, singleMigrationToolModel(func(ctx context.Context, tool chat.Tool) (string, error) {
+				return tool.Handler(ctx, scheduledMigrationToolArguments)
+			}), func(context.Context, migration.Request, int64) migration.OneShotResult {
+				creates++
+				return migration.OneShotResult{}
+			})
+			job, err := h.jobs.Add(scheduler.Job{Kind: scheduler.ScheduleEvery, EverySeconds: 60, Message: "test", OriginChatID: origin.id, OriginChatType: origin.kind, OriginThreadID: origin.thread})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.advance(time.Minute)
+			h.jobs.RunDue(context.Background())
+			saved, _ := h.jobs.Get(job.ID)
+			if creates != 0 || !saved.ReviewRequired {
+				t.Fatalf("creates=%d job=%+v", creates, saved)
 			}
 		})
 	}

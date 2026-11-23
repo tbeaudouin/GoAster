@@ -58,6 +58,18 @@ func ConversationType(ctx context.Context) string {
 
 type scheduledMigrationKey struct{}
 type scheduledMigrationStartedKey struct{}
+type scheduledMigrationDisableGuardKey struct{}
+type scheduledMigrationUnavailableKey struct{}
+
+// WithScheduledMigrationUnavailable records a rejected scheduled capability at its owner boundary.
+func WithScheduledMigrationUnavailable(ctx context.Context, report func()) context.Context {
+	return context.WithValue(ctx, scheduledMigrationUnavailableKey{}, report)
+}
+
+// WithScheduledMigrationDisableGuard protects a retry while its outcome is unresolved.
+func WithScheduledMigrationDisableGuard(ctx context.Context, guard func() bool) context.Context {
+	return context.WithValue(ctx, scheduledMigrationDisableGuardKey{}, guard)
+}
 
 // WithScheduledMigrationStarted guards cron mutations after a scheduled
 // create attempt begins.
@@ -132,8 +144,14 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 	}
 	request := migration.Request{ServerType: parsed.ServerType, ServerName: parsed.ServerName, Locations: parsed.Locations}
 	if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled {
+		if thread, _ := ConversationThreadID(ctx); thread != 0 {
+			return reject("private_conversation_required")
+		}
 		create, ok := ctx.Value(scheduledMigrationKey{}).(func(context.Context, migration.Request, string) migration.OneShotResult)
 		if !ok {
+			if report, ok := ctx.Value(scheduledMigrationUnavailableKey{}).(func()); ok {
+				report()
+			}
 			return reject("capability_unavailable")
 		}
 		return encodeMigrationToolResult(migration.SanitizeOneShotResult(create(ctx, request, "")))

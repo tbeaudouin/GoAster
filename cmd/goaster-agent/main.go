@@ -197,6 +197,20 @@ func newAgentPromptSetup(ctx context.Context) (agentPromptSetup, error) {
 	return agentPromptSetup{memory: memory, registry: registry}, nil
 }
 
+// registerAgentScheduledTools adds runtime capabilities to the same provider used by all turns.
+func registerAgentScheduledTools(provider chat.ToolRegistrar, jobs cronSchedulerRuntime, create scheduledMigrationCreate) error {
+	if err := chat.RegisterCronTool(provider, jobs); err != nil {
+		return fmt.Errorf("register cron tool: %w", err)
+	}
+	if err := chat.RegisterCronSelfDisableTool(provider, jobs); err != nil {
+		return fmt.Errorf("register cron self-disable tool: %w", err)
+	}
+	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{Create: create}); err != nil {
+		return fmt.Errorf("register migration tool: %w", err)
+	}
+	return nil
+}
+
 func newAgentSession(provider chat.Provider, memory *chat.MemoryStore, registry chat.ModelRegistry, chatID int64) *chat.Session {
 	return chat.NewSessionWithMemory(chat.Config{Registry: registry, ChatID: chatID}, provider, memory)
 }
@@ -338,18 +352,10 @@ func serve(store chat.CredentialStore) (serveErr error) {
 	if err != nil {
 		return fmt.Errorf("initialize generic cron delivery queue: %w", err)
 	}
-	if err := chat.RegisterCronTool(provider, cronJobs); err != nil {
-		return fmt.Errorf("register cron tool: %w", err)
-	}
-	if err := chat.RegisterCronSelfDisableTool(provider, cronJobs); err != nil {
-		return fmt.Errorf("register cron self-disable tool: %w", err)
-	}
-	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{
-		Create: func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
-			return migration.CreateOnce(ctx, request, migrationOptions, owner)
-		},
+	if err := registerAgentScheduledTools(provider, cronJobs, func(ctx context.Context, request migration.Request, owner int64) migration.OneShotResult {
+		return migration.CreateOnce(ctx, request, migrationOptions, owner)
 	}); err != nil {
-		return fmt.Errorf("register migration tool: %w", err)
+		return err
 	}
 	if err := cronJobs.Start(ctx); err != nil {
 		return fmt.Errorf("start generic cron scheduler: %w", err)

@@ -186,7 +186,7 @@ Only when the immediate response explicitly contains both:
 
 creation_state: "not_created"
 code: "no_capacity"
-create one ordinary recurring cron job, once, with a 30-minute interval.
+create one ordinary recurring cron job, once, with a 30-minute interval, max_runs null or 0 (unlimited), and delete_after_run false. Do not set a final run cap.
 
 Record its job ID. Keep the exact approved server name, type and locations. Do not create another job for the same request.
 
@@ -220,11 +220,12 @@ Handle the result as follows:
    Do not adopt it or try to retrieve a key or setup link.
 
 3. If creation_state is "not_created" and code is "no_capacity":
-   Do nothing.
+   Capacity unavailable means retry, not disable. This applies only to the confirmed
+   creation_state: "not_created" and code: "no_capacity" result. Never disable this job.
    Send no notification and make no cron changes.
    Wait for this same job's next scheduled run.
 
-4. For every other error, uncertain creation outcome, or failed,
+4. For every other error (including tool capability_unavailable, which is not a provider capacity shortage), uncertain creation outcome, or failed,
    partial or unknown delivery:
    Disable this job.
    Report the exact safe error details and whether creation is
