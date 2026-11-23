@@ -40,3 +40,13 @@ func (err localFailure) DiagnosticFields() []diagnostics.Field {
 	}
 	return []diagnostics.Field{{Key: "local_stage", Value: stage}, {Key: "local_reason", Value: err.reason}}
 }
+
+// localFailureClassification exposes only fixed local configuration outcomes.
+func localFailureClassification(err localFailure) string {
+	switch err.reason {
+	case "tool_config_invalid", "tool_config_unavailable":
+		return err.reason
+	default:
+		return "local_failure"
+	}
+}
