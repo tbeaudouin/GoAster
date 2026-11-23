@@ -261,7 +261,7 @@ func TestCronUpdateExplicitValues(t *testing.T) {
 }
 
 func TestCronSchemaRedaction(t *testing.T) {
-	for _, input := range []string{`{"action":"list","PRIVATE_KEY":"PRIVATE_VALUE"}`, `{"action":"list","action":"PRIVATE_VALUE"}`, `{"action":"list","id":null,"message":"PRIVATE_VALUE"}`, `{"action":"list","id":123,"message":"PRIVATE_VALUE"}`} {
+	for _, input := range []string{`{"action":"list","PRIVATE_KEY":"PRIVATE_VALUE"}`, `{"action":"list","action":"PRIVATE_VALUE"}`, `{"action":"list","id":123,"message":"PRIVATE_VALUE"}`} {
 		_, err := parseCronToolArguments(input)
 		log := captureChatDiagnostics(t, func() { diagnostics.Error("chat.tool_handler", err) })
 		if err == nil || strings.Contains(err.Error(), "PRIVATE_") || strings.Contains(log, "PRIVATE_") {

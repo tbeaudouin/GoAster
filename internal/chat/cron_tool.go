@@ -124,38 +124,38 @@ func cronToolParameters(scheduled bool) map[string]any {
 				"enum": actions,
 			},
 			"id": map[string]any{
-				"type":        "string",
-				"description": "Job ID returned by add or list",
+				"type":        []string{"string", "null"},
+				"description": "Job ID returned by add or list; null when unused",
 			},
 			"at_seconds": map[string]any{
-				"type":        "integer",
+				"type":        []string{"integer", "null"},
 				"minimum":     1,
-				"description": "For add, choose exactly one schedule and omit unused fields. Example: 60 for a one-time turn",
+				"description": "Choose one schedule; use null for unused fields. Example: 60 for a one-time turn",
 			},
 			"every_seconds": map[string]any{
-				"type":        "integer",
+				"type":        []string{"integer", "null"},
 				"minimum":     1,
-				"description": "For add, choose exactly one schedule and omit unused fields. Example: 3600 for hourly recurrence",
+				"description": "Recurring example: every_seconds: 1800, at_seconds: null, cron_expr: null; use null for other unused fields",
 			},
 			"cron_expr": map[string]any{
-				"type":        "string",
-				"description": "For add, choose exactly one schedule and omit unused fields. Example: 0 9 * * *",
+				"type":        []string{"string", "null"},
+				"description": "Choose one schedule; use null for unused fields. Example: 0 9 * * *",
 			},
 			"message": map[string]any{
-				"type":        "string",
-				"description": "Message GoAster should send through the existing chat session",
+				"type":        []string{"string", "null"},
+				"description": "Message GoAster should send through the existing chat session; null when unused or unchanged",
 			},
 			"max_runs": map[string]any{
-				"type":        "integer",
+				"type":        []string{"integer", "null"},
 				"minimum":     0,
-				"description": "Maximum executions; zero means unlimited. During a run, a positive limit must exceed the current run_count.",
+				"description": "Maximum executions; null leaves unchanged, zero means unlimited. During a run, a positive limit must exceed the current run_count.",
 			},
 			"delete_after_run": map[string]any{
-				"type":        "boolean",
-				"description": "Delete the job after its next execution; at jobs always have this behavior",
+				"type":        []string{"boolean", "null"},
+				"description": "Delete the job after its next execution; null leaves unchanged; at jobs always have this behavior",
 			},
 		},
-		"required":             []string{"action"},
+		"required":             []string{"action", "id", "at_seconds", "every_seconds", "cron_expr", "message", "max_runs", "delete_after_run"},
 		"additionalProperties": false,
 	}
 }
@@ -456,7 +456,7 @@ func parseCronToolArguments(arguments string) (cronToolArguments, error) {
 		return invalid("trailing_data", "cron arguments contain trailing data", err)
 	}
 	for key, value := range fields {
-		if string(value) == "null" && key != "at_seconds" && key != "every_seconds" && key != "cron_expr" {
+		if string(value) == "null" && key == "action" {
 			return invalid("invalid_type", "cron arguments contain an invalid field type")
 		}
 	}
