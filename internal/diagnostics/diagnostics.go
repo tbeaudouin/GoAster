@@ -239,6 +239,21 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			if n, e := strconv.Atoi(field.Value); e == nil && n >= 100 && n <= 599 {
 				value = strconv.Itoa(n)
 			}
+		case "cron_action":
+			switch field.Value {
+			case "unknown", "add", "list", "get", "update", "remove", "enable", "disable", "disable_self":
+				value = field.Value
+			}
+		case "cron_stage":
+			switch field.Value {
+			case "validate", "precheck", "scheduler_mutation":
+				value = field.Value
+			}
+		case "cron_reason":
+			switch field.Value {
+			case "precheck_failed", "invalid_object", "invalid_json", "unknown_field", "duplicate_field", "trailing_data", "invalid_type", "invalid_schedule", "invalid_cron_expression", "schedule_count", "missing_message", "invalid_max_runs", "invalid_action", "missing_id", "missing_update", "unknown", "storage_failure", "file_not_found", "permission_denied", "canceled", "deadline_exceeded", "invalid_arguments", "local_failure", "job_not_found", "execution_in_progress", "claim_unavailable", "review_required":
+				value = field.Value
+			}
 		case "tool_name":
 			switch field.Value {
 			case "read_file", "list_dir", "write_file", "edit_file", "append_file", "shell_execute", "background_command", "load_skill", "goaster_migration", "send_file", "cron", "cron_disable_self", "web_search", "web_fetch", "telegram_command_reference":

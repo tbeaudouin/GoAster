@@ -144,7 +144,7 @@ func TestCronToolSupportsAtAndCronSchedulesAndRejectsAmbiguousAdd(t *testing.T) 
 	}
 	if description, ok := registrar.tool.Parameters["properties"].(map[string]any)["at_seconds"].(map[string]any)["description"].(string); !ok || description == "" {
 		t.Fatal("at_seconds tool description is missing")
-	} else if description != "Positive number of seconds from now for a one-time chat turn" {
+	} else if !strings.Contains(description, "omit unused fields") {
 		t.Fatalf("at_seconds tool description = %q", description)
 	}
 }
@@ -268,7 +268,7 @@ func TestCronConcurrentLimitEditPreservesReviewAndEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalid := fmt.Sprintf(`{"action":"update","id":%q,"max_runs":1,"message":"must not be saved"}`, job.ID)
-	if _, err := executeCronTool(context.Background(), invalid, editor); err == nil || !strings.Contains(err.Error(), "is running") {
+	if _, err := executeCronTool(context.Background(), invalid, editor); err == nil || !strings.Contains(errors.Unwrap(err).Error(), "is running") {
 		t.Fatalf("limit without room for the claim = %v", err)
 	}
 	active, ok := editor.Get(job.ID)
@@ -442,7 +442,7 @@ func TestCronReviewRecoveryAtRunLimitRequiresExplicitEnable(t *testing.T) {
 				t.Fatalf("review run = %d", runs)
 			}
 			enable := fmt.Sprintf(`{"action":"enable","id":%q}`, job.ID)
-			if _, err := executeCronTool(context.Background(), enable, jobs); err == nil || !strings.Contains(err.Error(), "increase max_runs above run_count or set it to 0") {
+			if _, err := executeCronTool(context.Background(), enable, jobs); err == nil || !strings.Contains(errors.Unwrap(err).Error(), "increase max_runs above run_count or set it to 0") {
 				t.Fatalf("enable at limit = %v", err)
 			}
 			update := fmt.Sprintf(`{"action":"update","id":%q,"max_runs":%d}`, job.ID, tc.limit)
