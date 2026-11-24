@@ -321,7 +321,7 @@ func errorRecord(operation string, err error, fields []Field, skipAttempts bool)
 			value = safeInfoField(field.Key, field.Value)
 		case "method":
 			switch field.Value {
-			case "agent probe", "getUpdates", "setMyCommands", "sendMessage", "editMessageText", "sendDocument", "getFile", "downloadAttachment", "downloadFile", "deleteMessage", "sendChatAction":
+			case "agent probe", "getMe", "getUpdates", "setMyCommands", "sendMessage", "editMessageText", "sendDocument", "getFile", "downloadAttachment", "downloadFile", "deleteMessage", "sendChatAction":
 				value = field.Value
 			}
 		}
@@ -404,7 +404,7 @@ func safeEvent(value string) string {
 
 func safePhase(value string) string {
 	switch value {
-	case "pre-stream", "stream", "post-stream", "create", "dispatch", "result", "handoff", "initial_notice", "model_command", "tool_observer", "session_error", "final_reply":
+	case "pre-stream", "stream", "post-stream", "create", "dispatch", "result", "handoff", "initial_notice", "identity_validation", "model_command", "tool_observer", "session_error", "final_reply":
 		return value
 	default:
 		return ""

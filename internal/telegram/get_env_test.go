@@ -175,9 +175,10 @@ func TestTelegramGetEnvironmentCommandNamesAndBotMentions(t *testing.T) {
 	}
 	documentCount := 0
 	a := adapter{
-		token:   testToken,
-		pairing: &pairing{userID: 42},
-		apiBase: "https://example.invalid",
+		botUsername: "goaster_bot",
+		token:       testToken,
+		pairing:     &pairing{userID: 42},
+		apiBase:     "https://example.invalid",
 		client: doerFunc(func(r *http.Request) (*http.Response, error) {
 			if !strings.HasSuffix(r.URL.Path, "/sendDocument") {
 				t.Fatalf("unexpected Telegram request %s", r.URL.Path)

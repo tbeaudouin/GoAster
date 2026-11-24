@@ -45,17 +45,17 @@ var catalog = []Command{
 		Usage:           "/help",
 		HelpDescription: "Show available commands.",
 		MenuDescription: "Show available commands",
-		Access:          "Before pairing, private chats. After pairing, the paired account in private chats, groups, and supergroups. Use bare /help; addressed command mentions are ignored.",
+		Access:          "Before pairing, private chats. After pairing, the paired account in private chats, groups, and supergroups. Commands may address this bot by username.",
 	},
 	{
 		Name:            "stop",
 		Usage:           "/stop",
 		HelpDescription: "Cancel this chat's active turn.",
 		MenuDescription: "Cancel the current agent turn",
-		Access:          "Paired account only, in the same chat and Telegram topic as the active turn. Use the bare command in a private chat, group, or supergroup; addressed command mentions are ignored.",
+		Access:          "Paired account only, in the same chat and Telegram topic as the active turn. Use in a private chat, group, or supergroup.",
 	},
 	{
-		Name: "restart", Usage: "/restart", HelpDescription: "Restart the idle agent.", MenuDescription: "Restart the idle agent", Access: "Paired account only. Use bare /restart without attachments; active work must finish first.",
+		Name: "restart", Usage: "/restart", HelpDescription: "Restart the idle agent.", MenuDescription: "Restart the idle agent", Access: "Paired account only. Use /restart without attachments; active work must finish first.",
 	},
 	{
 		Name:            "start",
@@ -90,19 +90,19 @@ var catalog = []Command{
 		Usage:           "/env (attach goaster.env)",
 		HelpDescription: "Preview settings changes; reply ACCEPT to apply.",
 		MenuDescription: "Preview an environment update",
-		Access:          "Paired account only, private chat only. Attach a document named goaster.env to /env in the same message, review the preview, then reply exactly ACCEPT. /env accepts a valid @bot_username suffix.",
+		Access:          "Paired account only, private chat only. Attach a document named goaster.env to /env in the same message, review the preview, then reply exactly ACCEPT.",
 	},
 	{
 		Name:            "getenv",
 		Usage:           "/getenv",
 		HelpDescription: "Send the saved goaster.env file.",
 		MenuDescription: "Download saved environment settings",
-		Access:          "Paired account only, private chat only. Accepts a valid @bot_username suffix.",
+		Access:          "Paired account only, private chat only.",
 	},
 }
 
 const referenceSharedBehavior = "Before pairing, /help and bare /start provide guidance in private chats; pairing requires a private chat. After pairing, only the paired account can use the bot, and bare /start or /pair provide readiness guidance in private chats, groups, and supergroups. " +
-	"Telegram topics in the same chat share conversation history and model settings. /env, ACCEPT, and /getenv require a private chat. /env and /getenv accept @bot_username suffixes; use bare /help and /stop."
+	"Telegram topics in the same chat share conversation history and model settings. /env, ACCEPT, and /getenv require a private chat. All commands accept an @username suffix matching this bot; commands addressed to another bot are ignored."
 
 // Catalog returns the supported commands in their stable display order.
 func Catalog() []Command {

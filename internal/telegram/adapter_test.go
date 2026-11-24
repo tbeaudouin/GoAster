@@ -1620,7 +1620,7 @@ func TestPollingStopInSameBatchCancelsTurn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	replies := make(chan string, 2)
-	a := adapter{token: testToken, pairing: paired, apiBase: "https://example.invalid"}
+	a := adapter{botUsername: "ExampleBot", token: testToken, pairing: paired, apiBase: "https://example.invalid"}
 	a.agent = doerFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/livez" {
 			return response(200, "ok\n"), nil
@@ -1635,7 +1635,7 @@ func TestPollingStopInSameBatchCancelsTurn(t *testing.T) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&p)
 			if p.Offset == 0 {
-				return response(200, `{"ok":true,"result":[{"update_id":1,"message":{"text":"work","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":2,"message":{"text":"/stop","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
+				return response(200, `{"ok":true,"result":[{"update_id":1,"message":{"text":"work","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":2,"message":{"text":"/stop@ExampleBot","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
 			}
 			<-r.Context().Done()
 			return nil, r.Context().Err()
@@ -1668,7 +1668,7 @@ func TestPollingStopInSameBatchCancelsTurn(t *testing.T) {
 }
 
 func TestPollingClearOrdersAndDiscardsEarlierQueuedRequests(t *testing.T) {
-	for _, command := range []string{"/clear", "/clear 1"} {
+	for _, command := range []string{"/clear", "/clear 1", "/clear@ExampleBot"} {
 		t.Run(command, func(t *testing.T) { testPollingClearOrdering(t, command) })
 	}
 }
@@ -1686,7 +1686,7 @@ func testPollingClearOrdering(t *testing.T, command string) {
 	entered := make(chan string, 8)
 	canceled := make(chan struct{})
 	release := make(chan struct{})
-	a := adapter{token: testToken, pairing: paired, apiBase: "https://example.invalid"}
+	a := adapter{botUsername: "ExampleBot", token: testToken, pairing: paired, apiBase: "https://example.invalid"}
 	a.agent = doerFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/livez" {
 			return response(200, "ok\n"), nil
@@ -1736,7 +1736,7 @@ func testPollingClearOrdering(t *testing.T, command string) {
 		t.Fatal("clear did not cancel first")
 	}
 	close(release)
-	for _, want := range []string{command, "new"} {
+	for _, want := range []string{strings.Replace(command, "@ExampleBot", "", 1), "new"} {
 		select {
 		case got := <-entered:
 			if got != want {
@@ -1767,7 +1767,7 @@ func TestPollingUnknownUsernameDoesNotStopAddressedToOtherBot(t *testing.T) {
 	polling := make(chan struct{})
 	proceed := make(chan struct{})
 	canceled := make(chan struct{}, 1)
-	a := adapter{token: testToken, pairing: paired, apiBase: "https://example.invalid"}
+	a := adapter{botUsername: "ExampleBot", token: testToken, pairing: paired, apiBase: "https://example.invalid"}
 	a.agent = doerFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/livez" {
 			return response(200, "ok\n"), nil
@@ -1783,13 +1783,13 @@ func TestPollingUnknownUsernameDoesNotStopAddressedToOtherBot(t *testing.T) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&p)
 			if p.Offset == 0 {
-				return response(200, `{"ok":true,"result":[{"update_id":1,"message":{"text":"work","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":2,"message":{"text":"/stop@other_bot","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
+				return response(200, `{"ok":true,"result":[{"update_id":1,"message":{"text":"work","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":2,"message":{"text":"/stop@other_bot","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":3,"message":{"text":"/unknown@other_bot","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
 			}
-			if p.Offset == 3 {
+			if p.Offset == 4 {
 				close(polling)
 				select {
 				case <-proceed:
-					return response(200, `{"ok":true,"result":[{"update_id":3,"message":{"text":"/stop","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
+					return response(200, `{"ok":true,"result":[{"update_id":4,"message":{"text":"/stop@ExampleBot","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`), nil
 				case <-r.Context().Done():
 					return nil, r.Context().Err()
 				}
