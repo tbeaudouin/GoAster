@@ -20,7 +20,7 @@ func FormatAttempt(result OneShotResult, retry string) string {
 	switch {
 	case status == "retry_later" && result.Code == "no_capacity" && result.CreationState != "created":
 		lines = append(lines, "⏳ Migration waiting for capacity", "Capacity is not available yet.")
-		if result.CreationState == "not_created" && result.ServerID == 0 && result.ServerLabel == "" && result.IP == "" {
+		if result.CreationState == "not_created" && result.ServerID == 0 && result.IP == "" {
 			lines = append(lines, "No server was created.")
 		} else if result.CreationState == "unknown" {
 			lines = append(lines, "It is unknown whether a server was created.")
@@ -49,7 +49,7 @@ func FormatAttempt(result OneShotResult, retry string) string {
 		}
 		switch result.CreationState {
 		case "not_created":
-			if result.ServerID == 0 && result.ServerLabel == "" && result.IP == "" {
+			if result.ServerID == 0 && result.IP == "" {
 				lines = append(lines, "No server was created.")
 			} else {
 				lines = append(lines, "Server creation details conflict; check the outcome.")
