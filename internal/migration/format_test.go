@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -60,5 +61,51 @@ func TestFormatAttemptFailureReasons(t *testing.T) {
 		if strings.Contains(text, "secret-provider-token") {
 			t.Fatal(text)
 		}
+	}
+}
+
+func TestFormatCreationMetadataBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, code, state string
+		id                int64
+		ip, want, absent  string
+	}{
+		{"capacity label only", "no_capacity", "not_created", 0, "", "No server was created.", "Server creation details conflict"},
+		{"generic label only", "provider_http_error", "not_created", 0, "", "No server was created.", "Server creation details conflict"},
+		{"capacity ID conflict", "no_capacity", "not_created", 42, "", "Server creation details conflict", "No server was created."},
+		{"capacity IP conflict", "no_capacity", "not_created", 0, "192.0.2.1", "Server creation details conflict", "No server was created."},
+		{"generic ID conflict", "provider_http_error", "not_created", 42, "", "Server creation details conflict", "No server was created."},
+		{"generic IP conflict", "provider_http_error", "not_created", 0, "192.0.2.1", "Server creation details conflict", "No server was created."},
+		{"unknown label only", "no_capacity", "unknown", 0, "", "It is unknown whether a server was created.", "No server was created."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := OneShotResult{Status: "retry_later", CreationState: tc.state, Code: tc.code, Stage: "provider", HTTPStatus: 409, ProviderCode: "resource_unavailable", ServerID: tc.id, IP: tc.ip}
+			if tc.id == 0 && tc.ip == "" {
+				result.ServerLabel = "planned-label"
+			}
+			encoded, err := json.Marshal(struct {
+				OneShotResult
+				Message string `json:"message"`
+			}{result, "Migration retry scheduled every 30 minutes."})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for boundary, output := range map[string]string{
+				"initial":   FormatToolCompletion(string(encoded)),
+				"scheduled": FormatAttempt(result, "scheduled"),
+			} {
+				for _, want := range []string{tc.want, "Provider code: resource_unavailable", "Status: retry_later", "Creation: " + tc.state, "Retry automatically"} {
+					if !strings.Contains(output, want) {
+						t.Errorf("%s: missing %q in %q", boundary, want, output)
+					}
+				}
+				if result.ServerLabel != "" && !strings.Contains(output, "Server label: planned-label") {
+					t.Errorf("%s: missing label in %q", boundary, output)
+				}
+				if strings.Contains(output, tc.absent) {
+					t.Errorf("%s: unexpected %q in %q", boundary, tc.absent, output)
+				}
+			}
+		})
 	}
 }

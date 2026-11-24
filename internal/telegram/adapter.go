@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"goaster/internal/attachment"
 	"goaster/internal/chat"
@@ -47,6 +48,7 @@ type adapter struct {
 	client                   httpDoer
 	agent                    httpDoer
 	controlSecret            string
+	botUsername              string
 	apiBase                  string
 	attachmentMaxBytes       int64 // test seam; zero uses attachment.MaxBytes.
 	scheduledDeliveryEnabled bool
@@ -255,7 +257,25 @@ func Run(ctx context.Context, paths Paths, ready func() error) error {
 		apiBase:                  "https://api.telegram.org",
 		scheduledDeliveryEnabled: true,
 	}
+	if err := a.loadBotIdentity(ctx); err != nil {
+		return err
+	}
 	return a.run(ctx, ready)
+}
+
+func (a *adapter) loadBotIdentity(ctx context.Context) error {
+	var identity struct {
+		Username string `json:"username"`
+		IsBot    bool   `json:"is_bot"`
+	}
+	if err := a.call(ctx, "getMe", struct{}{}, &identity); err != nil {
+		return telegramStartupError{message: "Telegram bot identity could not be verified", cause: err}
+	}
+	if err := validateBotIdentity(identity.IsBot, identity.Username); err != nil {
+		return telegramStartupError{message: "Telegram bot identity could not be verified", cause: telegramFailure("getMe", err, "200 OK", 0, "", diagnostics.Field{Key: "phase", Value: "identity_validation"})}
+	}
+	a.botUsername = identity.Username
+	return nil
 }
 
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -301,6 +321,16 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 	defer handlers.Wait()
 	for {
 		restartSeen := false
+		for i := range updates {
+			if updates[i].Message != nil {
+				normalized, keep := normalizeMessage(*updates[i].Message, a.botUsername)
+				if keep {
+					*updates[i].Message = normalized
+				} else {
+					updates[i].Message = nil
+				}
+			}
+		}
 		for updateIndex, item := range updates {
 			if ctx.Err() != nil {
 				return nil
@@ -578,6 +608,74 @@ type telegramOrderedClearKey struct{}
 type telegramStartedKey struct{}
 type telegramThreadKey struct{}
 
+// normalizeMessage only changes the first command token; all argument bytes remain intact.
+// A syntactically valid command addressed elsewhere is never dispatched.
+func normalizeMessage(m message, botUsername string) (message, bool) {
+	text := m.Text
+	caption := text == "" && m.hasAttachment()
+	if caption {
+		text = m.Caption
+	}
+	start := len(text) - len(strings.TrimLeftFunc(text, unicode.IsSpace))
+	end := start
+	for end < len(text) {
+		r, size := utf8.DecodeRuneInString(text[end:])
+		if unicode.IsSpace(r) {
+			break
+		}
+		end += size
+	}
+	token := text[start:end]
+	at := strings.IndexByte(token, '@')
+	if at <= 1 || token[0] != '/' || !validTelegramCommandName(token[1:at]) || !validTelegramUsername(token[at+1:]) {
+		return m, true
+	}
+	if !strings.EqualFold(token[at+1:], botUsername) {
+		return m, false
+	}
+	if _, ok := telegramcommands.Dispatch(token[:at]); !ok {
+		return m, true
+	}
+	text = text[:start] + token[:at] + text[end:]
+	if caption {
+		m.Caption = text
+	} else {
+		m.Text = text
+	}
+	return m, true
+}
+
+func validateBotIdentity(isBot bool, username string) error {
+	if !isBot || !validTelegramUsername(username) {
+		return errors.New("Telegram bot identity is missing or invalid")
+	}
+	return nil
+}
+
+func validTelegramCommandName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validTelegramUsername(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *adapter) handle(ctx context.Context, m *message) {
 	started, _ := ctx.Value(telegramStartedKey{}).(chan struct{})
 	signalStarted := func() {
@@ -593,6 +691,11 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 	if m == nil || m.From == nil || m.From.IsBot || m.From.ID <= 0 || m.Chat.ID == 0 || len(m.SenderChat) != 0 && string(m.SenderChat) != "null" {
 		return
 	}
+	normalized, keep := normalizeMessage(*m, a.botUsername)
+	if !keep {
+		return
+	}
+	*m = normalized
 	if m.MediaGroupID != "" && !isTelegramEnvironmentUpdate(*m) {
 		return
 	}
@@ -608,12 +711,6 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 		rawText = m.Caption
 	}
 	text := strings.TrimSpace(rawText)
-	if isTelegramEnvironmentCommandMention(text) {
-		text = telegramEnvironmentCommand
-	}
-	if isTelegramGetEnvironmentCommand(text) {
-		text = telegramGetEnvironmentCommand
-	}
 	a.pairingMu.Lock()
 	pairedUserID := a.pairing.userID
 	paired := false

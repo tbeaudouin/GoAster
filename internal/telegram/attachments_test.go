@@ -335,9 +335,10 @@ func TestTelegramMentionedEnvironmentCommandStaysOutOfNormalChat(t *testing.T) {
 	}
 	paired.userID = 42
 	a := adapter{
-		token:   testToken,
-		pairing: paired,
-		apiBase: "https://example.invalid",
+		botUsername: "botname",
+		token:       testToken,
+		pairing:     paired,
+		apiBase:     "https://example.invalid",
 		client: doerFunc(func(r *http.Request) (*http.Response, error) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/sendChatAction"):

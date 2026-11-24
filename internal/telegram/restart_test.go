@@ -246,7 +246,7 @@ func TestRestartPollingSkipsStaleBeyondFirstPageAndDuplicate(t *testing.T) {
 	defer cancel()
 	finished := make(chan struct{})
 	polls, calls := 0, 0
-	a := adapter{pairing: &pairing{userID: 42}, apiBase: "https://example.invalid", controlSecret: "secret"}
+	a := adapter{botUsername: "ExampleBot", pairing: &pairing{userID: 42}, apiBase: "https://example.invalid", controlSecret: "secret"}
 	a.restartService = func(context.Context) error { calls++; return nil }
 	a.agent = doerFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/internal/restart-guard" {
@@ -276,14 +276,18 @@ func TestRestartPollingSkipsStaleBeyondFirstPageAndDuplicate(t *testing.T) {
 		case 1:
 			var updates []map[string]any
 			for i := 1; i <= 100; i++ {
-				updates = append(updates, map[string]any{"update_id": i})
+				if i == 1 {
+					updates = append(updates, map[string]any{"update_id": i, "message": map[string]any{"date": time.Now().Add(time.Second).Unix(), "text": "/restart@ExampleBot", "from": map[string]any{"id": 42}, "chat": map[string]any{"id": 42, "type": "private"}}})
+				} else {
+					updates = append(updates, map[string]any{"update_id": i})
+				}
 			}
 			data, _ := json.Marshal(map[string]any{"ok": true, "result": updates})
 			return response(200, string(data)), nil
 		case 2:
-			return response(200, fmt.Sprintf(`{"ok":true,"result":[{"update_id":101,"message":{"date":%d,"text":"/restart","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`, time.Now().Add(-time.Hour).Unix())), nil
+			return response(200, fmt.Sprintf(`{"ok":true,"result":[{"update_id":101,"message":{"date":%d,"text":"/restart@ExampleBot","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`, time.Now().Add(-time.Hour).Unix())), nil
 		case 3:
-			return response(200, fmt.Sprintf(`{"ok":true,"result":[{"update_id":102,"message":{"date":%d,"text":"/restart","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":103,"message":{"date":%d,"text":"/restart","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`, time.Now().Add(time.Second).Unix(), time.Now().Add(time.Second).Unix())), nil
+			return response(200, fmt.Sprintf(`{"ok":true,"result":[{"update_id":102,"message":{"date":%d,"text":"/restart@ExampleBot","from":{"id":42},"chat":{"id":42,"type":"private"}}},{"update_id":103,"message":{"date":%d,"text":"/restart@ExampleBot","from":{"id":42},"chat":{"id":42,"type":"private"}}}]}`, time.Now().Add(time.Second).Unix(), time.Now().Add(time.Second).Unix())), nil
 		default:
 			<-finished
 			cancel()
