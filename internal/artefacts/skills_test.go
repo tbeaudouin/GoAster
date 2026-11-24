@@ -44,7 +44,7 @@ func TestMigrationRetryPolicyInstalledAndLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phrase := range []string{"unlimited automatic attempts every 30 minutes after any migration error", "residual duplicate risk", "Keep this job enabled", "Never adopt an existing", "max_runs null or 0", "finish without creating a retry job"} {
+	for _, phrase := range []string{"unlimited automatic attempts every 30 minutes after any migration error", "residual duplicate risk", "Make exactly one migration tool call", "Never adopt an existing", "Do not create a cron job", "Success and an existing target need no retry job"} {
 		if !strings.Contains(content, phrase) {
 			t.Errorf("loaded migration policy missing %q", phrase)
 		}

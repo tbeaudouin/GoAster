@@ -180,59 +180,8 @@ The same automatic private delivery applies to immediate and cron-triggered crea
 
 Do not claim that setup or migration is complete merely because the server was created.
 
-c. Handle an existing target or arrange retries
+c. Handle the result
 
-If the immediate result is validated `target_exists` for the exact approved server name, report that the named server already exists and finish without creating a retry job. Do not adopt it or retrieve a key or setup link.
+Make exactly one migration tool call. The runtime schedules a durable retry every 30 minutes when needed, using the same approved name, type and locations. Do not create a cron job. Report a scheduling failure explicitly. Success and an existing target need no retry job. Manual cancellation remains available.
 
-After any immediate migration error, including no capacity, timeout, provider lookup,
-authentication or network failure, unavailable capability, unknown creation, or
-incomplete handoff, create one ordinary recurring cron job, once, with a 30-minute interval, max_runs null or 0 (unlimited), and delete_after_run false. Do not set a final run cap.
-
-Record its job ID. Keep the exact approved server name, type and locations. Do not create another job for the same request.
-
-The job’s message must contain the actual approved values, not unresolved placeholders. It must not contain tokens, SSH keys or instructions to schedule another job.
-
-Use the following wording, substituting the actual approved values and the job’s own ID:
-
-Run goaster_migration once with these exact parameters:
-
-action: "create"
-server_name: "<approved server name>"
-server_type: "<approved server type>"
-locations: <approved location list, or []>
-
-This job's ID is: <own job ID>.
-
-Never create or schedule another cron job.
-Never change the approved server name, type or locations.
-
-The runtime handles the completed scheduled tool result directly; no follow-up model response is needed. The result policy is:
-
-1. If creation_state is "created" and handoff is "delivered":
-   Disable this job using its own job ID.
-   The runtime sends a fixed safe status after stopping the job.
-
-2. If code is "target_exists" for the exact approved server name:
-   Disable this job.
-   The runtime sends a fixed safe status after stopping the job.
-   Do not adopt it or try to retrieve a key or setup link.
-
-3. If creation_state is "not_created" and code is "no_capacity":
-   Capacity unavailable means retry, not disable.
-   The runtime sends a fixed safe status; make no cron changes.
-   Wait for this same job's next scheduled run.
-
-4. For every other error, uncertain creation outcome, or failed, partial or
-   unknown delivery:
-   Keep this job enabled. The runtime sends a fixed safe status.
-   Wait for the next scheduled run.
-
-Do not run overlapping attempts or immediately retry a tool call. Each scheduled
-run makes at most one normal create call with the same approved parameters. The
-existing GoAsterWeb exact-name check precedes each create. Never adopt an existing
-server, recover keys, or resend or replay a handoff. After partial delivery the
-next normal run should find the existing name and stop; it must not resend.
-
-Report useful safe details after initial errors and arrange the same single job.
-Manual cancellation remains available. Local scheduler ownership, claim or storage
-corruption requires review and must fail closed.
+Each retry checks the exact name before creation. Never adopt an existing server, recover keys, or replay a handoff. Local scheduler, ownership or storage failure requires review.

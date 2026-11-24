@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"goaster/internal/artefacts"
 	"goaster/internal/filesync"
+	"goaster/internal/migration"
 )
 
 const (
@@ -86,24 +88,29 @@ type Schedule struct {
 }
 
 // Job is the persisted representation of a scheduled chat turn.
+const TaskMigrationCreateOnce = "migration_create_once"
+
+// Job is the persisted representation of a scheduled turn or direct task.
 type Job struct {
-	ID             string     `json:"id"`
-	Kind           string     `json:"kind"`
-	AtSeconds      int64      `json:"at_seconds,omitempty"`
-	EverySeconds   int64      `json:"every_seconds,omitempty"`
-	CronExpr       string     `json:"cron_expr,omitempty"`
-	Message        string     `json:"message"`
-	Enabled        bool       `json:"enabled"`
-	NextRun        *time.Time `json:"next_run,omitempty"`
-	LastRun        *time.Time `json:"last_run,omitempty"`
-	Status         string     `json:"status"`
-	Error          string     `json:"error,omitempty"`
-	ReviewRequired bool       `json:"review_required,omitempty"`
-	ExecutionClaim bool       `json:"execution_claim,omitempty"`
-	SelfDisabled   bool       `json:"self_disabled,omitempty"`
-	RunCount       int        `json:"run_count"`
-	MaxRuns        int        `json:"max_runs,omitempty"`
-	DeleteAfterRun bool       `json:"delete_after_run,omitempty"`
+	TaskType         string            `json:"task_type,omitempty"`
+	MigrationRequest migration.Request `json:"migration_request,omitempty"`
+	ID               string            `json:"id"`
+	Kind             string            `json:"kind"`
+	AtSeconds        int64             `json:"at_seconds,omitempty"`
+	EverySeconds     int64             `json:"every_seconds,omitempty"`
+	CronExpr         string            `json:"cron_expr,omitempty"`
+	Message          string            `json:"message"`
+	Enabled          bool              `json:"enabled"`
+	NextRun          *time.Time        `json:"next_run,omitempty"`
+	LastRun          *time.Time        `json:"last_run,omitempty"`
+	Status           string            `json:"status"`
+	Error            string            `json:"error,omitempty"`
+	ReviewRequired   bool              `json:"review_required,omitempty"`
+	ExecutionClaim   bool              `json:"execution_claim,omitempty"`
+	SelfDisabled     bool              `json:"self_disabled,omitempty"`
+	RunCount         int               `json:"run_count"`
+	MaxRuns          int               `json:"max_runs,omitempty"`
+	DeleteAfterRun   bool              `json:"delete_after_run,omitempty"`
 	// Origin fields are captured from transport context by the generic cron
 	// tool. They are never accepted from model arguments. Jobs created without
 	// transport context leave them empty.
@@ -405,7 +412,16 @@ func validateJob(job Job) error {
 	if strings.TrimSpace(job.ID) == "" {
 		return fmt.Errorf("job ID is required")
 	}
-	if strings.TrimSpace(job.Message) == "" {
+	if job.TaskType == TaskMigrationCreateOnce {
+		if err := migration.ValidateRequest(job.MigrationRequest); err != nil {
+			return fmt.Errorf("invalid migration task: %w", err)
+		}
+		if job.Kind != ScheduleEvery || job.EverySeconds != 1800 || job.MaxRuns != 0 || job.DeleteAfterRun || job.OriginChatID <= 0 || job.OriginChatType != "private" || job.OriginThreadID != 0 {
+			return errors.New("invalid migration task schedule or origin")
+		}
+	} else if job.TaskType != "" {
+		return errors.New("unknown task type")
+	} else if strings.TrimSpace(job.Message) == "" {
 		return fmt.Errorf("job message is required")
 	}
 	if job.RunCount < 0 {
@@ -537,6 +553,15 @@ func New(options Options) (*Scheduler, error) {
 			changed = true
 		}
 		if job.Status == StatusRunning && runErr == nil {
+			if job.TaskType == TaskMigrationCreateOnce && job.Enabled {
+				job.Status = StatusScheduled
+				job.Error = "previous migration attempt was interrupted"
+				job.ExecutionClaim = false
+				job.NextRun = timePointer(now().Add(30 * time.Minute))
+				scheduler.jobs[job.ID] = job
+				changed = true
+				continue
+			}
 			job.Status = StatusFailed
 			job.Error = "previous run was interrupted"
 			job.Enabled = false
@@ -567,6 +592,11 @@ func (s *Scheduler) Path() string {
 	return s.store.Path
 }
 
+// CreateOnce schedules an approved migration using the fixed retry interval.
+func (s *Scheduler) CreateOnce(request migration.Request, owner int64) (Job, error) {
+	return s.add(Job{TaskType: TaskMigrationCreateOnce, MigrationRequest: request, Kind: ScheduleEvery, EverySeconds: 1800, OriginChatID: owner, OriginChatType: "private"}, nil)
+}
+
 func (s *Scheduler) Add(job Job) (Job, error) {
 	return s.add(job, nil)
 }
@@ -589,8 +619,9 @@ func (s *Scheduler) add(job Job, guard func([]Job) error) (Job, error) {
 		return Job{}, err
 	}
 	defer unlock()
+	job = cloneJob(job)
 	job.Message = strings.TrimSpace(job.Message)
-	if job.Message == "" {
+	if job.Message == "" && job.TaskType == "" {
 		return Job{}, fmt.Errorf("job message is required")
 	}
 	if job.ID == "" {
@@ -704,6 +735,9 @@ func (s *Scheduler) Update(id string, patch Patch) (Job, error) {
 	}
 	if current.ExecutionClaim {
 		return Job{}, ErrExecutionInProgress
+	}
+	if current.TaskType != "" {
+		return Job{}, errors.New("direct tasks cannot be edited")
 	}
 	updated := current
 	scheduleFields := 0
@@ -986,7 +1020,7 @@ func (s *Scheduler) claimExecution(ctx context.Context, id string, expected Job,
 	if !ok {
 		return Job{}, nil, fmt.Errorf("%w: %s", ErrJobNotFound, id)
 	}
-	if job.ReviewRequired || !job.Enabled || (match && (job.Message != expected.Message || !sameSchedule(job, expected) || job.OriginChatID != expected.OriginChatID || job.OriginChatType != expected.OriginChatType || job.OriginThreadID != expected.OriginThreadID || job.MaxRuns != expected.MaxRuns)) || (!scheduled && job.Status != StatusScheduled) || (scheduled && job.Status != StatusRunning) {
+	if job.ReviewRequired || !job.Enabled || (match && (job.Message != expected.Message || job.TaskType != expected.TaskType || job.MigrationRequest.ServerName != expected.MigrationRequest.ServerName || job.MigrationRequest.ServerType != expected.MigrationRequest.ServerType || !slices.Equal(job.MigrationRequest.Locations, expected.MigrationRequest.Locations) || !sameSchedule(job, expected) || job.OriginChatID != expected.OriginChatID || job.OriginChatType != expected.OriginChatType || job.OriginThreadID != expected.OriginThreadID || job.MaxRuns != expected.MaxRuns)) || (!scheduled && job.Status != StatusScheduled) || (scheduled && job.Status != StatusRunning) {
 		return Job{}, nil, ErrExecutionClaimUnavailable
 	}
 	previous := job
@@ -1224,6 +1258,15 @@ func (s *Scheduler) RunDue(ctx context.Context) int {
 	changed := false
 	for id, job := range s.jobs {
 		if job.Status == StatusRunning {
+			if job.TaskType == TaskMigrationCreateOnce && job.Enabled {
+				job.Status = StatusScheduled
+				job.Error = "previous migration attempt was interrupted"
+				job.ExecutionClaim = false
+				job.NextRun = timePointer(s.now().Add(30 * time.Minute))
+				s.jobs[id] = job
+				changed = true
+				continue
+			}
 			job.Status = StatusFailed
 			job.Error = "previous run was interrupted"
 			job.Enabled = false
@@ -1535,6 +1578,7 @@ func newJobID(now time.Time) string {
 }
 
 func cloneJob(job Job) Job {
+	job.MigrationRequest.Locations = append([]string(nil), job.MigrationRequest.Locations...)
 	if job.NextRun != nil {
 		next := *job.NextRun
 		job.NextRun = &next

@@ -25,7 +25,7 @@ func TestMigrationToolOneShotPrivate(t *testing.T) {
 		if owner != 7 || req.ServerType != "cx22" {
 			t.Error("wrong request")
 		}
-		return migration.OneShotResult{CreationState: "created", Handoff: "delivered"}
+		return migration.OneShotResult{Status: "success", CreationState: "created", Handoff: "delivered"}
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +150,7 @@ func TestMigrationToolExposesOnlySafeProviderDiagnostics(t *testing.T) {
 	tools := make(chan Tool, 1)
 	if err := RegisterMigrationTool(channelToolRegistrar(tools), MigrationToolOperations{Create: func(context.Context, migration.Request, int64) migration.OneShotResult {
 		return migration.OneShotResult{
+			Status:          "stop",
 			CreationState:   "unknown",
 			Code:            "invalid_input",
 			Stage:           "provider",
@@ -183,6 +184,7 @@ func TestMigrationToolNormalizesMissingOrInvalidCreationState(t *testing.T) {
 			tools := make(chan Tool, 1)
 			if err := RegisterMigrationTool(channelToolRegistrar(tools), MigrationToolOperations{Create: func(context.Context, migration.Request, int64) migration.OneShotResult {
 				return migration.OneShotResult{
+					Status:        "stop",
 					CreationState: test.state,
 					Code:          "invalid_input",
 					Stage:         "provider",
