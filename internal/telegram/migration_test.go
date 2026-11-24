@@ -132,7 +132,7 @@ func TestMigrationTransportEOFThroughCreateOnce(t *testing.T) {
 			creates.Add(1)
 			secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"%s","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, targetName, r.Host, secret)
+			fmt.Fprintf(w, `{"status":"success","creation_state":"created","attempt":"attempt1","server_label":"%s","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, targetName, r.Host, secret)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/sendMessage") {

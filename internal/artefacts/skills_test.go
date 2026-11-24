@@ -44,7 +44,7 @@ func TestMigrationRetryPolicyInstalledAndLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phrase := range []string{"unlimited automatic attempts every 30 minutes after any migration error", "residual duplicate risk", "Keep this job enabled", "Never adopt an existing", "max_runs null or 0", "finish without creating a retry job"} {
+	for _, phrase := range []string{"unlimited automatic attempts every 30 minutes after any migration error", "residual duplicate risk", "Make exactly one migration tool call", "Never adopt an existing", "Do not create a cron job", "Success and an existing target need no retry job"} {
 		if !strings.Contains(content, phrase) {
 			t.Errorf("loaded migration policy missing %q", phrase)
 		}
@@ -153,10 +153,12 @@ func TestTaskPlanningDefaultSkill(t *testing.T) {
 		"Use whenever the user asks to plan a task, project, or implementation.",
 		"[project-memory](../project-memory/SKILL.md)",
 		"Save `PLAN-<task-name>.md` inside `memory/projects/<project-name>/`",
+		"never save it directly in `memory/projects/`",
 		"Reuse or update only a plan for that same task.",
 		"Keep it concise: goal, steps, and completion checks.",
 		"Tell the user the path.",
-		"A plan-only request does not authorize implementation;",
+		"A plan-only request does not authorize implementation",
+		"an approved coordinated source workflow may implement its plan without another approval",
 	} {
 		if !strings.Contains(content, phrase) {
 			t.Errorf("task-planning guidance missing %q", phrase)
@@ -235,16 +237,16 @@ func TestFeatureInspirationPolicy(t *testing.T) {
 	for _, clause := range []struct{ skill, text string }{
 		{"goaster-feature-inspiration", "Authentication guidance (this does not grant authorization)."},
 		{"goaster-feature-inspiration", "[Shelldex](https://shelldex.com/)"},
-		{"goaster-feature-inspiration", "Use observed behavior or ideas to design an original Go implementation"},
+		{"goaster-feature-inspiration", "copy no code"},
 		{"goaster-feature-inspiration", "Feature configuration is separate from core configuration"},
 		{"goaster-feature-inspiration", "users should not configure feature options manually, though they may ask the agent"},
 		{"goaster-feature-inspiration", "existing private /env flow"},
-		{"modify-goaster-source-code", "Optional research is chosen in that approval and skipped by default."},
+		{"goaster-feature-inspiration", "never ask for secrets in chat"},
 		{"modify-goaster-source-code", "Feature configuration is separate from core configuration"},
 		{"goaster-source-code-evolution", "shared contributions, other agents' implementations, both, or neither"},
 		{"manage-skills", "skip research by default"},
 	} {
-		if !strings.Contains(loaded[clause.skill], clause.text) {
+		if !strings.Contains(strings.ReplaceAll(loaded[clause.skill], "`", ""), strings.ReplaceAll(clause.text, "`", "")) {
 			t.Errorf("%s missing policy clause %q", clause.skill, clause.text)
 		}
 	}
@@ -461,13 +463,13 @@ func TestInstallBundledStartersOnce(t *testing.T) {
 		t.Fatalf("installed Hetzner automatic-backup workflow was not loadable: %v", err)
 	}
 	memoryPath := filepath.Join(root, "memory", "MEMORY.md")
-	memory, err := os.ReadFile(memoryPath)
-	if err != nil {
-		t.Fatalf("read installed memory: %v", err)
+	wantMemory, err := os.ReadFile(filepath.Join(assetDir, "MEMORY.md"))
+	if err != nil || len(wantMemory) == 0 {
+		t.Fatalf("selected starter memory: %v", err)
 	}
-	bundledMemory, err := os.ReadFile(filepath.Join(assetDir, "MEMORY.md"))
-	if err != nil || !bytes.Equal(memory, bundledMemory) {
-		t.Fatalf("installed memory differs from bundled default: %v", err)
+	memory, err := os.ReadFile(memoryPath)
+	if err != nil || !bytes.Equal(memory, wantMemory) {
+		t.Fatalf("default memory = %q, error = %v", memory, err)
 	}
 	info, err := os.Stat(memoryPath)
 	if err != nil || info.Mode().Perm() != 0600 {

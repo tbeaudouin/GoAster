@@ -17,6 +17,8 @@ import (
 
 // OneShotResult contains only information safe to return to the model.
 type OneShotResult struct {
+	LocalFailure    bool            `json:"-"`
+	Status          string          `json:"status"`
 	CreationState   string          `json:"creation_state"`
 	Code            string          `json:"code,omitempty"`
 	Stage           string          `json:"stage,omitempty"`
@@ -42,6 +44,12 @@ type ProviderField struct {
 }
 
 type oneShotResponse struct {
+	Status  string `json:"status"`
+	Details struct {
+		Code    string `json:"code"`
+		Stage   string `json:"stage"`
+		Message string `json:"message"`
+	} `json:"details"`
 	CreationState string `json:"creation_state"`
 	Attempt       string `json:"attempt"`
 	ServerLabel   string `json:"server_label"`
@@ -128,34 +136,23 @@ func anyStringContains(values []string, needle string) bool {
 	return false
 }
 
-func oneShotTimeout(result OneShotResult) bool {
-	return result.Code == "provider_timeout" || result.Code == "timeout" || result.ProviderCode == "timeout" || result.ProviderCode == "request_timeout"
-}
-
-// normalizeOneShotCreationState keeps an explicit service outcome authoritative
-// when error metadata is contradictory. A confirmed creation wins over a
-// timeout, and an explicit uncertainty is never weakened into not_created.
-// A timeout can only turn an explicit not-created state into uncertainty;
-// missing or unrecognized states remain unknown regardless of error metadata.
 func normalizeOneShotCreationState(result OneShotResult) string {
 	state := diagnostics.MigrationCreationState(result.CreationState)
-	switch state {
-	case "created", "unknown":
-		return state
-	case "not_created":
-		if oneShotTimeout(result) {
-			return "unknown"
-		}
-		return "not_created"
-	default:
+	if state == "" {
 		return "unknown"
 	}
+	return state
 }
 
 // SanitizeOneShotResult applies the same fixed bounds and allowlists to every
 // model-facing result, including results supplied by test or runtime seams.
 // It never copies arbitrary provider text or private handoff material.
 func SanitizeOneShotResult(result OneShotResult) OneShotResult {
+	switch result.Status {
+	case "success", "stop":
+	default:
+		result.Status = "retry_later"
+	}
 	result.Code = diagnostics.MigrationCode(result.Code)
 	result.Stage = diagnostics.MigrationStage(result.Stage)
 	if result.HTTPStatus < 100 || result.HTTPStatus > 599 {
@@ -186,13 +183,14 @@ func SanitizeOneShotResult(result OneShotResult) OneShotResult {
 	default:
 		result.Handoff = ""
 	}
-	if result.Code == "response_unusable" {
-		result.Handoff = ""
+	if result.Status == "success" && result.Handoff != "delivered" {
+		result.Status = "retry_later"
 	}
 	return result
 }
 
 func unusableOneShotResponse(result OneShotResult, status int, err error) OneShotResult {
+	result.Status = "retry_later"
 	result.HTTPStatus = status
 	result = SanitizeOneShotResult(result)
 	if result.CreationState != "created" {
@@ -247,6 +245,16 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		diagnostics.Field{Key: "phase", Value: "create"},
 		diagnostics.Field{Key: "dispatch_state", Value: dispatchState})
 	defer func() {
+		if dispatchState == "pending" {
+			result.LocalFailure = true
+		}
+		if dispatchState != "pending" && options.MigrationRecipient != nil {
+			current, err := options.MigrationRecipient()
+			if err != nil || current != owner {
+				result.LocalFailure = true
+				diagnostics.Error("migration.recipient", errors.Join(errors.New("paired recipient changed"), err))
+			}
+		}
 		safe := SanitizeOneShotResult(result)
 		code, stage := safe.Code, safe.Stage
 		if code == "" {
@@ -279,7 +287,10 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		if err != nil {
 			diagnostics.Error("migration.create", err, diagnostics.Field{Key: "creation_state", Value: state}, diagnostics.Field{Key: "code", Value: code})
 		}
-		return OneShotResult{CreationState: state, Code: code, ServerName: safeServerName}
+		return OneShotResult{Status: "retry_later", CreationState: state, Code: code, ServerName: safeServerName}
+	}
+	if err := ctx.Err(); err != nil {
+		return fail("not_created", "request_invalid", err)
 	}
 	if err := validateOneShotRequest(request); err != nil {
 		return fail("not_created", "invalid_arguments", err)
@@ -350,13 +361,13 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	defer clear(data)
 	topLevelFields, fieldsErr := decodeUniqueTopLevelFields(data)
 	if fieldsErr != nil {
-		return unusableOneShotResponse(OneShotResult{ServerName: safeServerName}, response.StatusCode, errors.New("invalid create response"))
+		return unusableOneShotResponse(OneShotResult{ServerName: safeServerName}, response.StatusCode, fmt.Errorf("invalid create response: %w", fieldsErr))
 	}
 	var decoded oneShotResponse
 	if err := decodeExactJSON(data, &decoded); err != nil {
-		return unusableOneShotResponse(creationEvidenceFromTopLevel(topLevelFields, request, safeServerName), response.StatusCode, errors.New("invalid create response"))
+		return unusableOneShotResponse(creationEvidenceFromTopLevel(topLevelFields, request, safeServerName), response.StatusCode, fmt.Errorf("invalid create response: %w", err))
 	}
-	result = OneShotResult{CreationState: decoded.CreationState, ServerName: safeServerName, ServerID: decoded.ServerID, ServerLabel: safeCreateField(decoded.ServerLabel), IP: safeCreateField(decoded.IP), Location: safeCreateField(decoded.Location), Expires: decoded.Expires, Attempt: safeCreateField(decoded.Attempt)}
+	result = OneShotResult{Status: "retry_later", CreationState: decoded.CreationState, ServerName: safeServerName, ServerID: decoded.ServerID, ServerLabel: safeCreateField(decoded.ServerLabel), IP: safeCreateField(decoded.IP), Location: safeCreateField(decoded.Location), Expires: decoded.Expires, Attempt: safeCreateField(decoded.Attempt)}
 	// Treat all service-provided labels as untrusted; never return request secrets.
 	scrub := func(value string) string {
 		if strings.Contains(value, secret) || token != "" && strings.Contains(value, token) || strings.Contains(value, pub) {
@@ -380,34 +391,35 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 	if result.Expires < 0 {
 		result.Expires = 0
 	}
-	if response.StatusCode != http.StatusCreated {
+	result.Code = diagnostics.MigrationCode(scrub(decoded.Details.Code))
+	result.Stage = diagnostics.MigrationStage(scrub(decoded.Details.Stage))
+	if result.Code == "" {
 		result.Code = diagnostics.MigrationCode(scrub(decoded.Error.Code))
+	}
+	if result.Stage == "" {
 		result.Stage = diagnostics.MigrationStage(scrub(decoded.Error.Stage))
-		result.HTTPStatus = response.StatusCode
-		result.ProviderCode = diagnostics.BackendValue(scrub(decoded.Error.ProviderCode))
-		result.ProviderMessage = diagnostics.MigrationProviderMessage(scrub(decoded.Error.ProviderMessage))
-		result.ProviderFields = scrubProviderFields(safeProviderFields(decoded.Error.ProviderFields), secret, token, pub)
-		result = SanitizeOneShotResult(result)
-		if diagnostics.MigrationCreationState(decoded.CreationState) == "" || decoded.Error.HTTPStatus != response.StatusCode || result.Code == "" || result.Stage == "" {
-			return unusableOneShotResponse(result, response.StatusCode, errors.New("invalid create error response"))
-		}
-		if result.Code == "target_exists" || result.Code == "provider_lookup_failure" {
-			if result.CreationState != "not_created" || result.Stage != "provider" || result.Code == "target_exists" && (response.StatusCode != http.StatusConflict || result.ServerID <= 0 || result.ServerLabel == "" || result.ServerLabel != request.ServerName) {
-				return unusableOneShotResponse(result, response.StatusCode, errors.New("invalid exact-name lookup response"))
-			}
-		}
-		logFields := []diagnostics.Field{{Key: "status", Value: fmt.Sprint(response.StatusCode)}, {Key: "code", Value: result.Code}, {Key: "stage", Value: result.Stage}, {Key: "creation_state", Value: result.CreationState}, {Key: "backend_code", Value: result.ProviderCode}, {Key: "provider_message", Value: result.ProviderMessage}}
-		for _, field := range result.ProviderFields {
-			logFields = append(logFields, diagnostics.Field{Key: "provider_field", Value: diagnostics.MigrationProviderFieldValue(field.Field, field.Messages)})
-		}
-		diagnostics.Error("migration.create", errors.New("service returned create error"), logFields...)
+	}
+	result.ProviderCode = diagnostics.BackendValue(scrub(decoded.Error.ProviderCode))
+	result.ProviderMessage = diagnostics.MigrationProviderMessage(scrub(decoded.Error.ProviderMessage))
+	result.ProviderFields = safeProviderFields(scrubProviderFields(decoded.Error.ProviderFields, secret, token, pub))
+	result.HTTPStatus = response.StatusCode
+	switch decoded.Status {
+	case "stop":
+		result.Status = "stop"
 		return SanitizeOneShotResult(result)
+	case "retry_later":
+		fields := []diagnostics.Field{{Key: "status", Value: fmt.Sprint(response.StatusCode)}, {Key: "code", Value: result.Code}, {Key: "stage", Value: result.Stage}, {Key: "creation_state", Value: result.CreationState}, {Key: "backend_code", Value: result.ProviderCode}, {Key: "provider_message", Value: result.ProviderMessage}}
+		for _, field := range result.ProviderFields {
+			fields = append(fields, diagnostics.Field{Key: "provider_field", Value: diagnostics.MigrationProviderFieldValue(field.Field, field.Messages)})
+		}
+		diagnostics.Error("migration.create", errors.New("service requested retry"), fields...)
+		return SanitizeOneShotResult(result)
+	case "success":
+	default:
+		return unusableOneShotResponse(result, response.StatusCode, errors.New("missing or invalid create status"))
 	}
 	setup, parseErr := url.Parse(decoded.SetupURL)
 	origin, originErr := url.Parse(options.WebOrigin)
-	if decoded.CreationState != "created" {
-		return fail("unknown", "response_unusable", errors.New("invalid create success response"))
-	}
 	fragmentMatches := false
 	if parseErr == nil {
 		values, fragmentErr := url.ParseQuery(setup.Fragment)
@@ -439,6 +451,7 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		result.Code = "handoff_failed"
 		result.Stage = "handoff"
 		result.Handoff = "failed"
+		result.LocalFailure = true
 		diagnostics.Error("migration.handoff", errors.Join(errors.New("paired recipient changed"), err))
 		return result
 	}
@@ -453,5 +466,6 @@ func CreateOnce(ctx context.Context, request Request, options Options, owner int
 		return result
 	}
 	result.Handoff = "delivered"
+	result.Status = "success"
 	return result
 }

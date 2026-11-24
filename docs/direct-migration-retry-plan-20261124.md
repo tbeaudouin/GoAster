@@ -1,0 +1,7 @@
+# Direct migration retry state (2026-11-24)
+
+The client implements status-only direct migration retries. After private owner approval, one tool call makes one create attempt. A retryable result schedules a persistent typed task every 30 minutes; direct attempts bypass the model and report fixed safe status messages. A validated successful handoff or Web `stop` ends the task. Scheduling and local authorization failures are reported without claiming completion. Existing ordinary cron and legacy jobs remain supported.
+
+The scheduler persists the approved name, type, locations and transport-derived owner, validates claims, and prevents edits to typed tasks. Each attempt rechecks owner and credentials. An interrupted claimed attempt requires review; an interrupted unclaimed migration run is rescheduled. Each attempt sends at most one create request and does not replay a handoff. The exact-name lookup retains a check-then-create duplicate risk.
+
+Web must supply the compatible `success`, `retry_later`, or `stop` status contract; unknown or missing statuses retry. Status controls retry, while successful handoff fields and private delivery are validated separately. Offline evidence is recorded in the final review. Live Web contract compatibility, end-to-end Telegram partial delivery, and the residual lookup race remain unverified; compatible Web rollout is required before enabling this client. No deployment is authorized by this work.

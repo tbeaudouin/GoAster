@@ -55,7 +55,7 @@ func TestOneShotOffline(t *testing.T) {
 					t.Error("locations widened")
 				}
 				w.WriteHeader(201)
-				fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"%s","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, oneShotTargetName, r.Host, secret)
+				fmt.Fprintf(w, `{"status":"success","creation_state":"created","attempt":"attempt1","server_label":"%s","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, oneShotTargetName, r.Host, secret)
 			}))
 			defer server.Close()
 			opts := DefaultOptions()
@@ -112,15 +112,15 @@ func TestOneShotOfflineFailures(t *testing.T) {
 			secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			if lookupFailure {
 				w.WriteHeader(http.StatusBadGateway)
-				fmt.Fprint(w, `{"creation_state":"not_created","error":{"code":"provider_lookup_failure","stage":"provider","http_status":502}}`)
+				fmt.Fprint(w, `{"status":"retry_later","creation_state":"not_created","error":{"code":"provider_lookup_failure","stage":"provider","http_status":502}}`)
 				return
 			}
 			w.WriteHeader(http.StatusConflict)
-			fmt.Fprintf(w, `{"creation_state":"not_created","server_id":42,"server_label":%q,"setup_url":"https://private.invalid/setup#owner=%s","error":{"code":"target_exists","stage":"provider","http_status":409}}`, oneShotTargetName, secret)
+			fmt.Fprintf(w, `{"status":"stop","creation_state":"not_created","server_id":42,"server_label":%q,"setup_url":"https://private.invalid/setup#owner=%s","error":{"code":"target_exists","stage":"provider","http_status":409}}`, oneShotTargetName, secret)
 			return
 		}
 		w.WriteHeader(503)
-		fmt.Fprint(w, `{"creation_state":"unknown","error":{"code":"unavailable","stage":"provider","http_status":503}}`)
+		fmt.Fprint(w, `{"status":"retry_later","creation_state":"unknown","error":{"code":"unavailable","stage":"provider","http_status":503}}`)
 	}))
 	defer server.Close()
 	opts := DefaultOptions()
@@ -165,7 +165,7 @@ func TestOneShotProviderDiagnosticsAreSafeAndClassified(t *testing.T) {
 				state = "not_created"
 			}
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			fmt.Fprintf(w, `{"creation_state":%q,"error":{"code":"invalid_input","stage":"provider","http_status":422,"provider_code":"invalid_input","provider_message":"invalid input","provider_fields":[{"field":"server_type","messages":["is not available"]},{"field":"location","messages":["not available in this location","https://private.invalid/secret"]},{"field":"private_url","messages":["https://private.invalid/secret"]},{"field":"server_type","messages":["private provider detail"]}]}}`, state)
+			fmt.Fprintf(w, `{"status":"retry_later","creation_state":%q,"error":{"code":"invalid_input","stage":"provider","http_status":422,"provider_code":"invalid_input","provider_message":"invalid input","provider_fields":[{"field":"server_type","messages":["is not available"]},{"field":"location","messages":["not available in this location","https://private.invalid/secret"]},{"field":"private_url","messages":["https://private.invalid/secret"]},{"field":"server_type","messages":["private provider detail"]}]}}`, state)
 			return
 		}
 		state := "unknown"
@@ -173,7 +173,7 @@ func TestOneShotProviderDiagnosticsAreSafeAndClassified(t *testing.T) {
 			state = "created"
 		}
 		w.WriteHeader(http.StatusGatewayTimeout)
-		fmt.Fprintf(w, `{"creation_state":%q,"error":{"code":"provider_timeout","stage":"provider","http_status":504,"provider_code":"timeout","provider_message":"private timeout detail"}}`, state)
+		fmt.Fprintf(w, `{"status":"retry_later","creation_state":%q,"error":{"code":"provider_timeout","stage":"provider","http_status":504,"provider_code":"timeout","provider_message":"private timeout detail"}}`, state)
 	}))
 	defer server.Close()
 	options := DefaultOptions()
@@ -231,7 +231,7 @@ func TestSanitizeOneShotResultRequiresExplicitCreationState(t *testing.T) {
 		{name: "not created with invalid input", state: "not_created", code: "invalid_input", providerCode: "invalid_input", want: "not_created"},
 		{name: "created with timeout", state: "created", code: "provider_timeout", providerCode: "timeout", want: "created"},
 		{name: "unknown with timeout", state: "unknown", code: "provider_timeout", providerCode: "timeout", want: "unknown"},
-		{name: "not created with timeout", state: "not_created", code: "provider_timeout", providerCode: "timeout", want: "unknown"},
+		{name: "not created with timeout", state: "not_created", code: "provider_timeout", providerCode: "timeout", want: "not_created"},
 		{name: "provider rejection without state", state: "", code: "invalid_input", providerCode: "invalid_input", want: "unknown"},
 		{name: "provider rejection with invalid state", state: "maybe_created", code: "invalid_input", providerCode: "invalid_input", want: "unknown"},
 	} {
@@ -321,7 +321,7 @@ func TestOneShotBoundaries(t *testing.T) {
 					return
 				case "created_error":
 					w.WriteHeader(500)
-					fmt.Fprintf(w, `{"creation_state":"created","server_id":42,"error":{"code":"unavailable","stage":"handoff","provider_code":"rate_limit_exceeded","http_status":500}}`)
+					fmt.Fprintf(w, `{"status":"retry_later","creation_state":"created","server_id":42,"error":{"code":"unavailable","stage":"handoff","provider_code":"rate_limit_exceeded","http_status":500}}`)
 					return
 				}
 				origin := "http://" + r.Host
@@ -336,7 +336,7 @@ func TestOneShotBoundaries(t *testing.T) {
 					serverLabel = "server1"
 				}
 				w.WriteHeader(201)
-				fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":%q,"server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":%q}`, serverLabel, origin+"/setup#owner="+secret)
+				fmt.Fprintf(w, `{"status":"success","creation_state":"created","attempt":"attempt1","server_label":%q,"server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":%q}`, serverLabel, origin+"/setup#owner="+secret)
 			}))
 			defer server.Close()
 			opts := DefaultOptions()
@@ -487,7 +487,7 @@ type oneShotDoer func(*http.Request) (*http.Response, error)
 func (do oneShotDoer) Do(request *http.Request) (*http.Response, error) { return do(request) }
 
 func TestOneShotRejectsAmbiguousResponses(t *testing.T) {
-	const valid = `{"creation_state":"not_created","error":{"code":"no_capacity","stage":"provider","http_status":409}}`
+	const valid = `{"status":"retry_later","creation_state":"not_created","error":{"code":"no_capacity","stage":"provider","http_status":409}}`
 	for _, tc := range []struct {
 		name, body  string
 		code, state string

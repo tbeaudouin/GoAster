@@ -309,15 +309,42 @@ func newAgentPromptSetup(ctx context.Context) (agentPromptSetup, error) {
 }
 
 // registerAgentScheduledTools adds runtime capabilities to the same provider used by all turns.
-func registerAgentScheduledTools(provider chat.ToolRegistrar, jobs cronSchedulerRuntime, create scheduledMigrationCreate) error {
+func registerAgentScheduledTools(provider chat.ToolRegistrar, jobs cronSchedulerRuntime, create scheduledMigrationCreate, authorize ...func(int64) error) error {
 	if err := chat.RegisterCronTool(provider, jobs); err != nil {
 		return fmt.Errorf("register cron tool: %w", err)
 	}
 	if err := chat.RegisterCronSelfDisableTool(provider, jobs); err != nil {
 		return fmt.Errorf("register cron self-disable tool: %w", err)
 	}
-	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{Create: create}); err != nil {
+	if err := chat.RegisterMigrationTool(provider, chat.MigrationToolOperations{Create: create, Schedule: func(request migration.Request, owner int64) error {
+		scheduler, ok := jobs.(interface {
+			CreateOnce(migration.Request, int64) (scheduler.Job, error)
+		})
+		if !ok {
+			return errors.New("migration scheduler unavailable")
+		}
+		if len(authorize) > 0 {
+			if err := authorize[0](owner); err != nil {
+				return err
+			}
+		} else if err := authorizeMigrationOwner(owner); err != nil {
+			return err
+		}
+		_, err := scheduler.CreateOnce(request, owner)
+		return err
+	}}); err != nil {
 		return fmt.Errorf("register migration tool: %w", err)
+	}
+	return nil
+}
+
+func authorizeMigrationOwner(owner int64) error {
+	current, err := telegram.MigrationRecipient()
+	if err != nil || current != owner {
+		return errors.Join(errors.New("paired recipient unavailable or changed"), err)
+	}
+	if _, err := telegram.PrepareRecipientMigrationHandoffParts(owner); err != nil {
+		return fmt.Errorf("prepare migration handoff: %w", err)
 	}
 	return nil
 }

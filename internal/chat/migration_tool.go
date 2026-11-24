@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"goaster/internal/diagnostics"
 	"goaster/internal/migration"
 )
 
@@ -94,7 +95,8 @@ func WithScheduledMigration(ctx context.Context, create func(context.Context, mi
 // The owner identity and private handoff are supplied by the transport/runtime
 // rather than by model arguments.
 type MigrationToolOperations struct {
-	Create func(context.Context, migration.Request, int64) migration.OneShotResult
+	Create   func(context.Context, migration.Request, int64) migration.OneShotResult
+	Schedule func(migration.Request, int64) error
 }
 
 // RegisterMigrationTool exposes one-shot server creation after ordinary
@@ -150,10 +152,13 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 		return reject("owner_unavailable")
 	}
 	request := migration.Request{ServerType: parsed.ServerType, ServerName: parsed.ServerName, Locations: parsed.Locations}
+	if migration.ValidateRequest(request) != nil {
+		return reject("invalid_arguments")
+	}
+	if thread, _ := ConversationThreadID(ctx); thread != 0 {
+		return reject("private_conversation_required")
+	}
 	if scheduled, _ := ctx.Value(scheduledTurnKey{}).(bool); scheduled {
-		if thread, _ := ConversationThreadID(ctx); thread != 0 {
-			return reject("private_conversation_required")
-		}
 		create, ok := ctx.Value(scheduledMigrationKey{}).(func(context.Context, migration.Request, string) migration.OneShotResult)
 		if !ok {
 			if report, ok := ctx.Value(scheduledMigrationUnavailableKey{}).(func()); ok {
@@ -166,7 +171,33 @@ func executeMigrationTool(ctx context.Context, arguments string, operations Migr
 	if operations.Create == nil {
 		return reject("capability_unavailable")
 	}
-	return encodeMigrationToolResult(migration.SanitizeOneShotResult(operations.Create(ctx, request, owner)))
+	result := migration.SanitizeOneShotResult(operations.Create(ctx, request, owner))
+	if result.LocalFailure || ctx.Err() != nil {
+		return `{"status":"failed","message":"Migration could not be completed. Check the outcome before retrying."}`, nil
+	}
+	if result.Status == "retry_later" {
+		if operations.Schedule == nil {
+			diagnostics.Error("chat.migration.schedule", errors.New("migration scheduler unavailable"))
+			result.Status = "schedule_failed"
+			return encodeMigrationToolResult(struct {
+				migration.OneShotResult
+				Message string `json:"message"`
+			}{result, "Migration retry could not be scheduled. Check the outcome before retrying."})
+		}
+		if err := operations.Schedule(request, owner); err != nil {
+			diagnostics.Error("chat.migration.schedule", err)
+			result.Status = "schedule_failed"
+			return encodeMigrationToolResult(struct {
+				migration.OneShotResult
+				Message string `json:"message"`
+			}{result, "Migration retry could not be scheduled. Check the outcome before retrying."})
+		}
+		return encodeMigrationToolResult(struct {
+			migration.OneShotResult
+			Message string `json:"message"`
+		}{result, "Migration retry scheduled every 30 minutes."})
+	}
+	return encodeMigrationToolResult(result)
 }
 
 func parseMigrationToolArguments(arguments string) (migrationToolArguments, error) {

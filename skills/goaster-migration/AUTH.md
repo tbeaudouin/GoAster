@@ -23,9 +23,9 @@ keys internally and, only after validated confirmed success, sends the setup URL
 as a separate clickable private message and the SSH private key as a key-only
 `id_ed25519` attachment to the revalidated paired owner. Keep the token, URL,
 key, request body, and provider response out of model input/output, tool output,
-cron messages, and logs. Do not persist them or make extra copies; the
+scheduler records, and logs. Do not persist them or make extra copies; the
 protected environment is the intended token storage. A validated initial `target_exists` for the exact approved name finishes without creating a retry job. If delivery is uncertain
-or partial, report the state and keep the same job enabled. The next normal create
+or partial, the runtime schedules the same direct retry. The next normal create
 uses the existing exact-name guard; never resend or replay the handoff, recover keys,
 or adopt an existing target. The two
 handoff parts are separate private messages.

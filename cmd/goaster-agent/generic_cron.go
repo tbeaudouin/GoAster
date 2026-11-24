@@ -85,6 +85,9 @@ func newCronSchedulerWithMigrationAt(sessionFor func(int64, int64) agentSession,
 }
 
 func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cronExecutionCoordinator, sessionFor func(int64, int64) agentSession, enqueue func(scheduler.Job, string) error, create scheduledMigrationCreate) error {
+	if job.TaskType == scheduler.TaskMigrationCreateOnce {
+		return executeDirectMigration(ctx, job, coordinator, enqueue, create)
+	}
 	if coordinator == nil {
 		cause := errors.New("generic cron execution coordinator is unavailable")
 		diagnostics.Error("agent.cron.execute", cause, diagnostics.Field{Key: "reason", Value: "execution coordinator is unavailable"})
@@ -278,6 +281,56 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	return nil
 }
 
+// executeDirectMigration never invokes an agent session or replays a handoff.
+func executeDirectMigration(ctx context.Context, job scheduler.Job, coordinator cronExecutionCoordinator, enqueue func(scheduler.Job, string) error, create scheduledMigrationCreate) error {
+	if coordinator == nil || create == nil {
+		cause := errors.New("direct migration capability unavailable")
+		diagnostics.Error("agent.cron.migration", cause)
+		return scheduler.ReviewRequiredError{Message: "direct migration unavailable", Cause: cause}
+	}
+	if _, _, err := coordinator.ClaimExecutionMatching(ctx, job); err != nil {
+		diagnostics.Error("agent.cron.claim", err)
+		return scheduler.ReviewRequiredError{Message: "migration claim failed", Cause: err}
+	}
+	if err := ctx.Err(); err != nil {
+		return scheduler.ReviewRequiredError{Message: "migration cancelled", Cause: err}
+	}
+	result := migration.SanitizeOneShotResult(create(ctx, job.MigrationRequest, job.OriginChatID))
+	if result.LocalFailure || ctx.Err() != nil {
+		return scheduler.ReviewRequiredError{Message: "migration local authorization or execution failed", Cause: ctx.Err()}
+	}
+	terminal := scheduledMigrationTerminal(result, job.MigrationRequest.ServerName)
+	if terminal {
+		disabler, ok := coordinator.(chat.CronSelfDisabler)
+		if !ok {
+			cause := errors.New("direct migration disable unavailable")
+			diagnostics.Error("agent.cron.migration", cause)
+			return scheduler.ReviewRequiredError{Message: "migration stop failed", Cause: cause}
+		}
+		if _, err := disabler.DisableOwnExecution(ctx, job); err != nil {
+			diagnostics.Error("agent.cron.migration", err)
+			return scheduler.ReviewRequiredError{Message: "migration stop failed", Cause: err}
+		}
+	}
+	status := "Migration attempt did not complete. The job will retry in 30 minutes."
+	if result.Status == "retry_later" && result.Code == "no_capacity" {
+		status = "Capacity is unavailable. The job will retry in 30 minutes."
+	}
+	if result.Status == "stop" {
+		status = "The exact target server already exists. Migration retry stopped."
+	}
+	if result.Status == "success" && result.Handoff == "delivered" {
+		status = "Server created; private key and setup link sent. Migration retry stopped."
+	}
+	if err := enqueueCronStatus(enqueue, job, status); err != nil {
+		return err
+	}
+	if !terminal {
+		return scheduler.ErrRetry
+	}
+	return nil
+}
+
 func earlyCronFailure(job scheduler.Job, enqueue func(scheduler.Job, string) error, message string, cause error) error {
 	if job.OriginChatID != 0 && enqueue != nil {
 		if deliveryErr := enqueueCronStatus(enqueue, job, "Scheduled run failed before completion. Check the job status before retrying."); deliveryErr != nil {
@@ -310,7 +363,7 @@ func scheduledMigrationStatusForJob(result migration.OneShotResult, stopped bool
 
 func scheduledMigrationStatus(result migration.OneShotResult, stopped bool) string {
 	if stopped {
-		if result.Code == "target_exists" {
+		if result.Status == "stop" {
 			return "The exact target server already exists. Migration cron stopped."
 		}
 		return "Server created; private key and setup link sent. Migration cron stopped."
@@ -339,8 +392,7 @@ func scheduledMigrationStatus(result migration.OneShotResult, stopped bool) stri
 }
 
 func scheduledMigrationTerminal(result migration.OneShotResult, name string) bool {
-	return result.CreationState == "created" && result.Handoff == "delivered" ||
-		result.CreationState == "not_created" && result.Code == "target_exists" && result.ServerName == name
+	return result.Status == "stop" || result.Status == "success" && result.Handoff == "delivered"
 }
 
 const (

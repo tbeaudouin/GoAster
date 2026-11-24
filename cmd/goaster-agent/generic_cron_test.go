@@ -412,7 +412,7 @@ func TestGenericCronRealSessionMigrationCanDisableItselfAfterCreate(t *testing.T
 		}
 		return result, nil
 	}), func(_ context.Context, request migration.Request, _ int64) migration.OneShotResult {
-		return migration.OneShotResult{CreationState: "created", Code: "created", Handoff: "delivered", ServerName: request.ServerName}
+		return migration.OneShotResult{Status: "success", CreationState: "created", Code: "created", Handoff: "delivered", ServerName: request.ServerName}
 	})
 	job := addScheduledMigrationJob(t, harness)
 	if runs := harness.jobs.RunDue(context.Background()); runs != 1 {
@@ -443,8 +443,8 @@ func TestGenericCronRealSessionMigrationTerminalResultsDoNotReplay(t *testing.T)
 		name   string
 		result migration.OneShotResult
 	}{
-		{name: "target_exists", result: migration.OneShotResult{CreationState: "not_created", Code: "target_exists"}},
-		{name: "success", result: migration.OneShotResult{CreationState: "created", Code: "created", Handoff: "delivered"}},
+		{name: "target_exists", result: migration.OneShotResult{Status: "stop", CreationState: "not_created", Code: "target_exists"}},
+		{name: "success", result: migration.OneShotResult{Status: "success", CreationState: "created", Code: "created", Handoff: "delivered"}},
 		{name: "created_without_handoff", result: migration.OneShotResult{CreationState: "created", Code: "created"}},
 		{name: "unknown", result: migration.OneShotResult{CreationState: "unknown", Code: "response_unavailable"}},
 		{name: "partial", result: migration.OneShotResult{CreationState: "created", Code: "handoff_failed", Handoff: "failed"}},
@@ -711,7 +711,7 @@ func TestGenericCronMigrationCrashClaimDoesNotReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return migration.OneShotResult{CreationState: "created", Handoff: "delivered"}
+		return migration.OneShotResult{Status: "success", CreationState: "created", Handoff: "delivered"}
 	})
 	job := addScheduledMigrationJob(t, h)
 	h.jobs.RunDue(context.Background())
@@ -754,12 +754,12 @@ func TestScheduledMigrationDiagnosticOwnership(t *testing.T) {
 					creates.Add(1)
 					if !split {
 						w.WriteHeader(http.StatusBadGateway)
-						fmt.Fprint(w, `{"creation_state":"not_created","error":{"code":"provider_lookup_failure","stage":"provider","http_status":502}}`)
+						fmt.Fprint(w, `{"status":"retry_later","creation_state":"not_created","error":{"code":"provider_lookup_failure","stage":"provider","http_status":502}}`)
 						return
 					}
 					secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 					w.WriteHeader(http.StatusCreated)
-					fmt.Fprintf(w, `{"creation_state":"created","attempt":"attempt1","server_label":"goaster-migration-0123456789abcdef","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, r.Host, secret)
+					fmt.Fprintf(w, `{"status":"success","creation_state":"created","attempt":"attempt1","server_label":"goaster-migration-0123456789abcdef","server_id":42,"ip":"192.0.2.1","location":"fsn1","expires":2000000000,"setup_url":"http://%s/setup#owner=%s"}`, r.Host, secret)
 					return
 				}
 				io.Copy(io.Discard, r.Body)
@@ -954,7 +954,7 @@ func TestGenericCronToolAddedMigrationRetriesAndStops(t *testing.T) {
 					}
 					switch outcome {
 					case "created":
-						return migration.OneShotResult{CreationState: "created", Handoff: "delivered"}
+						return migration.OneShotResult{Status: "success", CreationState: "created", Handoff: "delivered"}
 					case "unknown", "timeout":
 						return migration.OneShotResult{CreationState: "unknown", Code: "response_unavailable"}
 					case "auth_error":
@@ -964,7 +964,10 @@ func TestGenericCronToolAddedMigrationRetriesAndStops(t *testing.T) {
 					case "lookup_error":
 						return migration.OneShotResult{CreationState: "not_created", Code: "provider_lookup_failure"}
 					}
-					return migration.OneShotResult{CreationState: "not_created", Code: outcome, ServerName: req.ServerName}
+					if outcome == "target_exists" {
+						return migration.OneShotResult{Status: "stop", CreationState: "not_created", Code: outcome, ServerName: req.ServerName}
+					}
+					return migration.OneShotResult{Status: "retry_later", CreationState: "not_created", Code: outcome, ServerName: req.ServerName}
 				})
 				registrar := genericCronRegistrar{tools: make(chan chat.Tool, 1)}
 				if err := chat.RegisterCronTool(registrar, h.jobs); err != nil {
@@ -1200,7 +1203,7 @@ func TestMigrationPartialDeliveryNextRunStopsAtExistingName(t *testing.T) {
 		if calls == 1 {
 			return migration.OneShotResult{CreationState: "created", Handoff: "partial", Code: "handoff_failed", ServerName: request.ServerName}
 		}
-		return migration.OneShotResult{CreationState: "not_created", Code: "target_exists", ServerName: request.ServerName}
+		return migration.OneShotResult{Status: "stop", CreationState: "not_created", Code: "target_exists", ServerName: request.ServerName}
 	})
 	job := addScheduledMigrationJob(t, h)
 	if h.jobs.RunDue(context.Background()) != 1 {
@@ -1221,9 +1224,9 @@ func TestMigrationPartialDeliveryNextRunStopsAtExistingName(t *testing.T) {
 }
 
 func TestMigrationTerminalRequiresMatchingTargetName(t *testing.T) {
-	result := migration.OneShotResult{CreationState: "not_created", Code: "target_exists", ServerName: "goaster-migration-ffffffffffffffff"}
-	if scheduledMigrationTerminal(result, "goaster-migration-0123456789abcdef") {
-		t.Fatal("mismatched target was terminal")
+	result := migration.OneShotResult{Status: "stop", CreationState: "not_created", Code: "target_exists", ServerName: "goaster-migration-ffffffffffffffff"}
+	if !scheduledMigrationTerminal(result, "goaster-migration-0123456789abcdef") {
+		t.Fatal("stop status must be terminal")
 	}
 }
 
@@ -1329,8 +1332,8 @@ func TestGenericCronCompletedMigrationToolOutcome(t *testing.T) {
 		{"timeout", migration.OneShotResult{CreationState: "unknown", Code: "timeout"}, false},
 		{"unknown", migration.OneShotResult{CreationState: "unknown"}, false},
 		{"partial", migration.OneShotResult{CreationState: "created", Handoff: "failed"}, false},
-		{"created", migration.OneShotResult{CreationState: "created", Handoff: "delivered"}, true},
-		{"existing", migration.OneShotResult{CreationState: "not_created", Code: "target_exists"}, true},
+		{"created", migration.OneShotResult{Status: "success", CreationState: "created", Handoff: "delivered"}, true},
+		{"existing", migration.OneShotResult{Status: "stop", CreationState: "not_created", Code: "target_exists"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -1445,7 +1448,7 @@ func TestGenericCronMigrationDirectCompletionLocalFailures(t *testing.T) {
 					}
 				}
 				if scenario == "diagnostic_checkpoint" {
-					return migration.OneShotResult{CreationState: "created", Handoff: "delivered", ServerName: request.ServerName}
+					return migration.OneShotResult{Status: "success", CreationState: "created", Handoff: "delivered", ServerName: request.ServerName}
 				}
 				return migration.OneShotResult{CreationState: "not_created", Code: "no_capacity", ServerName: request.ServerName}
 			}, func() time.Time { return now })
@@ -1579,7 +1582,7 @@ func TestScheduledMigrationFailureNoticeAndCauseRetention(t *testing.T) {
 				}
 				return nil
 			}, func(context.Context, migration.Request, int64) migration.OneShotResult {
-				return migration.OneShotResult{CreationState: "created", Handoff: "delivered"}
+				return migration.OneShotResult{Status: "success", CreationState: "created", Handoff: "delivered"}
 			})
 			if !errors.Is(err, tc.original) || (tc.queueFail && !errors.Is(err, queueErr)) {
 				t.Fatalf("lost cause: %v", err)

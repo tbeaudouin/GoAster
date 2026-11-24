@@ -109,6 +109,11 @@ func validateMachineRequest(serverType string, locations []string) error {
 	return nil
 }
 
+// ValidateRequest checks the exact non-secret parameters for a create attempt.
+func ValidateRequest(request Request) error {
+	return validateOneShotRequest(request)
+}
+
 func validateOneShotRequest(request Request) error {
 	if err := validateMachineRequest(request.ServerType, request.Locations); err != nil {
 		return err

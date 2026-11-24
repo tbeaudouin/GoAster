@@ -48,10 +48,10 @@ func TestCodexProviderObservesMigrationResultBeforeContinuation(t *testing.T) {
 		return nil
 	})
 	reply, _, err := provider.requestReply(ctx, Credential{}, "test", nil, true)
-	if err != nil || reply != "continued" {
+	if err != nil || reply != safeMigrationDiagnosticOutput {
 		t.Fatalf("model continuation = %q, error = %v", reply, err)
 	}
-	if requests != 2 || !strings.Contains(observed, `"provider_message":"invalid input"`) {
+	if requests != 1 || !strings.Contains(observed, `"provider_message":"invalid input"`) {
 		t.Fatalf("migration observer output = %q, backend requests = %d", observed, requests)
 	}
 }
@@ -197,6 +197,10 @@ func TestMigrationResponseDecoderToolAndPersistedFollowupPreserveCreated(t *test
 				t.Fatal(err)
 			}
 			ctx := WithConversationID(WithConversationType(context.Background(), "private"), 7)
+			ctx = context.WithValue(ctx, scheduledTurnKey{}, true)
+			ctx = WithScheduledMigration(ctx, func(ctx context.Context, request migration.Request, _ string) migration.OneShotResult {
+				return migration.CreateOnce(ctx, request, options, 7)
+			})
 			toolOutput, err := registrar.tool.Handler(ctx, `{"action":"create","server_type":"cx22","server_name":"goaster-migration-0123456789abcdef"}`)
 			if err != nil {
 				t.Fatal(err)
@@ -828,7 +832,7 @@ func TestCodexScheduledMigrationDirectCompletionSaveFailures(t *testing.T) {
 		wantCompleted int
 	}{
 		{"diagnostic_checkpoint", 1, 0},
-		{"final_session_storage", 2, 1},
+		{"final_session_storage", 2, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests, creates, completed := 0, 0, 0
