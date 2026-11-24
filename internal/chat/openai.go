@@ -29,6 +29,7 @@ import (
 	"goaster/internal/attachment"
 	"goaster/internal/command"
 	"goaster/internal/diagnostics"
+	"goaster/internal/migration"
 )
 
 const (
@@ -2195,7 +2196,7 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return "", status, ctxErr
 					}
-					return result, status, nil
+					return migration.FormatToolCompletion(result), status, nil
 				}
 				if call.Name == loadSkillCodexTool.Name && err == nil {
 					if !skillFitsContext(instructions, input, callItems, outputItems, result) {

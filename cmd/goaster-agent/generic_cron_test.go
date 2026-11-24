@@ -1378,8 +1378,18 @@ func TestGenericCronCompletedMigrationToolOutcome(t *testing.T) {
 			jobs.RunDue(context.Background())
 			saved, _ := jobs.Get(job.ID)
 			deliveries, err := queue.Pending()
-			if err != nil || len(deliveries) != 1 || deliveries[0].ChatID != 42 || deliveries[0].Text != scheduledMigrationStatus(tc.result, tc.terminal) || strings.Contains(deliveries[0].Text, "secret-provider-token") {
+			if err != nil || len(deliveries) != 1 || deliveries[0].ChatID != 42 || !strings.Contains(deliveries[0].Text, "Target: goaster-migration-0123456789abcdef") || strings.Contains(deliveries[0].Text, "secret-provider-token") {
 				t.Fatalf("deliveries=%+v err=%v", deliveries, err)
+			}
+			wantOutcome := map[string]string{"capacity": "Capacity is not available", "remote": "Provider request failed", "timeout": "Provider request timed out", "unknown": "unknown whether a server was created", "partial": "private delivery was incomplete", "created": "private key and setup link were delivered", "existing": "exact target server already exists"}[tc.name]
+			wantStatus, wantRetry := "Status: retry_later", "Retry automatically every 30 minutes"
+			if tc.terminal {
+				wantStatus, wantRetry = "Status: "+tc.result.Status, "Automatic retry stopped"
+			}
+			for _, want := range []string{wantOutcome, wantStatus, wantRetry, "Creation: " + tc.result.CreationState} {
+				if !strings.Contains(deliveries[0].Text, want) {
+					t.Errorf("missing %q in %q", want, deliveries[0].Text)
+				}
 			}
 			if requests != 1 || creates != 1 || len(deliveries) != 1 || saved.Enabled == tc.terminal || saved.ReviewRequired || (!tc.terminal && saved.RunCount != 0) {
 				t.Fatalf("requests=%d creates=%d enqueued=%d state=%+v", requests, creates, len(deliveries), saved)
@@ -1525,19 +1535,10 @@ func TestGenericCronPreToolFailureQueuesOriginAndQueueFailureRequiresReview(t *t
 }
 
 func TestScheduledMigrationStatusSafeExactMessages(t *testing.T) {
-	for _, tc := range []struct {
-		result migration.OneShotResult
-		want   string
-	}{
-		{migration.OneShotResult{CreationState: "not_created", Code: "provider_auth_rejected"}, "Provider authentication failed. No server was created. The job will retry in 30 minutes and check the existing name."},
-		{migration.OneShotResult{CreationState: "not_created", Code: "provider_lookup_failure"}, "Provider lookup failed. No server was created. The job will retry in 30 minutes and check the existing name."},
-		{migration.OneShotResult{CreationState: "not_created", Code: "provider_http_error"}, "Provider request failed. No server was created. The job will retry in 30 minutes and check the existing name."},
-		{migration.OneShotResult{CreationState: "unknown", Code: "provider_timeout"}, "Provider request timed out. Creation outcome is unknown. The job will retry in 30 minutes and check the existing name."},
-		{migration.OneShotResult{CreationState: "unknown", Code: "secret-provider-token", ServerName: "secret-provider-token"}, "Creation outcome is unknown. The job will retry in 30 minutes and check the existing name."},
-	} {
-		if got := scheduledMigrationStatus(tc.result, false); got != tc.want {
-			t.Errorf("got %q want %q", got, tc.want)
-		}
+	result := migration.OneShotResult{Status: "retry_later", CreationState: "unknown", Code: "secret-provider-token", ServerName: "secret-provider-token"}
+	text := scheduledMigrationStatusForJob(result, false, scheduler.Job{Kind: scheduler.ScheduleEvery, EverySeconds: 3600})
+	if strings.Contains(text, "secret-provider-token") || strings.Contains(text, "30 minutes") || !strings.Contains(text, "next scheduled run") {
+		t.Fatal(text)
 	}
 }
 
@@ -1590,7 +1591,7 @@ func TestScheduledMigrationFailureNoticeAndCauseRetention(t *testing.T) {
 			if len(notices) != 1 {
 				t.Fatalf("notices=%v", notices)
 			}
-			if tc.coordinator.disableErr != nil && notices[0] != "Migration attempt requires review; automatic stopping could not be confirmed." {
+			if tc.coordinator.disableErr != nil && !strings.Contains(notices[0], "automatic stopping could not be confirmed") {
 				t.Fatalf("notice=%q", notices[0])
 			}
 		})

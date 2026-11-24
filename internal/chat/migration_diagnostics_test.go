@@ -18,41 +18,62 @@ import (
 const safeMigrationDiagnosticOutput = `{"creation_state":"not_created","code":"invalid_input","stage":"provider","http_status":422,"provider_code":"invalid_input","provider_message":"invalid input","provider_fields":[{"field":"server_type","messages":["is not available"]}]}`
 
 func TestCodexProviderObservesMigrationResultBeforeContinuation(t *testing.T) {
-	requests := 0
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		if requests == 1 {
-			writeCodexFunctionCall(t, w, "migration-call", migrationToolName, `{"action":"create","server_type":"cx22","server_name":"goaster-migration-0123456789abcdef"}`)
-			return
-		}
-		fmt.Fprint(w, `{"output_text":"continued"}`)
-	}))
-	defer backend.Close()
+	for _, tc := range []struct {
+		name, output string
+		wants        []string
+	}{
+		{"diagnostics", safeMigrationDiagnosticOutput, []string{"Provider message: invalid input", "No server was created", "Check the outcome manually"}},
+		{"failure", `{"status":"failed","message":"Migration could not be completed. Check the outcome before retrying."}`, []string{"Status: failed", "Check the outcome manually"}},
+		{"success", `{"status":"success","creation_state":"created","handoff":"delivered"}`, []string{"Server created", "Complete the server setup"}},
+		{"stop", `{"status":"stop","code":"target_exists","creation_state":"not_created"}`, []string{"exact target server already exists", "Check the existing target"}},
+		{"retry", `{"status":"retry_later","creation_state":"unknown","message":"Migration retry scheduled every 30 minutes."}`, []string{"unknown whether a server was created", "every 30 minutes"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if requests == 1 {
+					writeCodexFunctionCall(t, w, "migration-call", migrationToolName, `{"action":"create","server_type":"cx22","server_name":"goaster-migration-0123456789abcdef"}`)
+					return
+				}
+				fmt.Fprint(w, `{"output_text":"continued"}`)
+			}))
+			defer backend.Close()
 
-	provider := NewCodexProvider(CredentialStore{})
-	provider.backendURL = backend.URL
-	provider.httpClient = backend.Client()
-	if err := provider.RegisterTool(Tool{
-		Name:        migrationToolName,
-		Description: "test migration tool",
-		Parameters:  map[string]any{"type": "object"},
-		Handler: func(context.Context, string) (string, error) {
-			return safeMigrationDiagnosticOutput, nil
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	observed := ""
-	ctx := WithMigrationDiagnosticObserver(context.Background(), func(output string) error {
-		observed = output
-		return nil
-	})
-	reply, _, err := provider.requestReply(ctx, Credential{}, "test", nil, true)
-	if err != nil || reply != safeMigrationDiagnosticOutput {
-		t.Fatalf("model continuation = %q, error = %v", reply, err)
-	}
-	if requests != 1 || !strings.Contains(observed, `"provider_message":"invalid input"`) {
-		t.Fatalf("migration observer output = %q, backend requests = %d", observed, requests)
+			provider := NewCodexProvider(CredentialStore{})
+			provider.backendURL = backend.URL
+			provider.httpClient = backend.Client()
+			if err := provider.RegisterTool(Tool{
+				Name:        migrationToolName,
+				Description: "test migration tool",
+				Parameters:  map[string]any{"type": "object"},
+				Handler: func(context.Context, string) (string, error) {
+					return tc.output, nil
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			observed := ""
+			ctx := WithMigrationDiagnosticObserver(context.Background(), func(output string) error {
+				observed = output
+				return nil
+			})
+			reply, _, err := provider.requestReply(ctx, Credential{}, "test", nil, true)
+			if err != nil {
+				t.Fatalf("model continuation = %q, error = %v", reply, err)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(reply, want) {
+					t.Errorf("missing %q in %q", want, reply)
+				}
+			}
+			if strings.Contains(reply, "Automatic retry stopped") || strings.Contains(reply, "Migration completed") {
+				t.Fatal(reply)
+			}
+			if requests != 1 || observed != tc.output {
+				t.Fatalf("migration observer output = %q, backend requests = %d", observed, requests)
+			}
+		})
 	}
 }
 

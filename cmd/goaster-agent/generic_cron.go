@@ -227,7 +227,7 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 		if !ok {
 			cause := errors.New("scheduled migration self-disable unavailable")
 			diagnostics.Error("agent.cron.migration", cause)
-			if deliveryErr := enqueueCronStatus(enqueue, job, "Migration attempt requires review; automatic stopping could not be confirmed."); deliveryErr != nil {
+			if deliveryErr := enqueueCronStatus(enqueue, job, migration.FormatAttempt(migrationResult, "unknown")+"\nNext step: Review required; automatic stopping could not be confirmed."); deliveryErr != nil {
 				return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(cause, deliveryErr)}
 			}
 			return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: cause}
@@ -235,7 +235,7 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 		if _, err := disabler.DisableOwnExecution(ctx, job); err != nil {
 			cause := fmt.Errorf("disable completed scheduled migration: %w", err)
 			diagnostics.Error("agent.cron.migration", cause)
-			if deliveryErr := enqueueCronStatus(enqueue, job, "Migration attempt requires review; automatic stopping could not be confirmed."); deliveryErr != nil {
+			if deliveryErr := enqueueCronStatus(enqueue, job, migration.FormatAttempt(migrationResult, "unknown")+"\nNext step: Review required; automatic stopping could not be confirmed."); deliveryErr != nil {
 				return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(cause, deliveryErr)}
 			}
 			return scheduler.ReviewRequiredError{Message: "scheduled migration result requires review", Cause: cause}
@@ -244,7 +244,7 @@ func executeAgentCronJob(ctx context.Context, job scheduler.Job, coordinator cro
 	if called {
 		status := scheduledMigrationStatusForJob(migrationResult, terminal, job)
 		if review {
-			status = "Migration attempt requires review. Check the job status before retrying."
+			status = migration.FormatAttempt(migrationResult, "unknown") + "\nNext step: Review required; check the job status before retrying."
 		}
 		if deliveryErr := enqueueCronStatus(enqueue, job, status); deliveryErr != nil {
 			return scheduler.ReviewRequiredError{Message: "scheduled reply could not be queued", Cause: errors.Join(reviewCause, deliveryErr)}
@@ -312,16 +312,7 @@ func executeDirectMigration(ctx context.Context, job scheduler.Job, coordinator 
 			return scheduler.ReviewRequiredError{Message: "migration stop failed", Cause: err}
 		}
 	}
-	status := "Migration attempt did not complete. The job will retry in 30 minutes."
-	if result.Status == "retry_later" && result.Code == "no_capacity" {
-		status = "Capacity is unavailable. The job will retry in 30 minutes."
-	}
-	if result.Status == "stop" {
-		status = "The exact target server already exists. Migration retry stopped."
-	}
-	if result.Status == "success" && result.Handoff == "delivered" {
-		status = "Server created; private key and setup link sent. Migration retry stopped."
-	}
+	status := scheduledMigrationStatusForJob(result, terminal, job)
 	if err := enqueueCronStatus(enqueue, job, status); err != nil {
 		return err
 	}
@@ -354,41 +345,13 @@ func enqueueCronStatus(enqueue func(scheduler.Job, string) error, job scheduler.
 }
 
 func scheduledMigrationStatusForJob(result migration.OneShotResult, stopped bool, job scheduler.Job) string {
-	status := scheduledMigrationStatus(result, stopped)
-	if job.Kind != scheduler.ScheduleEvery || job.EverySeconds != 1800 {
-		status = strings.ReplaceAll(status, "in 30 minutes", "at its next scheduled run")
-	}
-	return status
-}
-
-func scheduledMigrationStatus(result migration.OneShotResult, stopped bool) string {
+	retry := "scheduled"
 	if stopped {
-		if result.Status == "stop" {
-			return "The exact target server already exists. Migration cron stopped."
-		}
-		return "Server created; private key and setup link sent. Migration cron stopped."
+		retry = "stopped"
+	} else if job.Kind == scheduler.ScheduleEvery && job.EverySeconds == 1800 {
+		retry = "30m"
 	}
-	if result.CreationState == "not_created" && result.Code == "no_capacity" {
-		return "No capacity: no server was created. The job will retry in 30 minutes."
-	}
-	if result.CreationState == "created" {
-		return "Server created, but private delivery was incomplete. The handoff will not be resent; the next run checks the existing name in 30 minutes."
-	}
-	reason := ""
-	switch result.Code {
-	case "timeout", "provider_timeout":
-		reason = "Provider request timed out. "
-	case "provider_http_error", "web_http_error":
-		reason = "Provider request failed. "
-	case "provider_auth_rejected":
-		reason = "Provider authentication failed. "
-	case "provider_lookup_failure":
-		reason = "Provider lookup failed. "
-	}
-	if result.CreationState == "not_created" {
-		return reason + "No server was created. The job will retry in 30 minutes and check the existing name."
-	}
-	return reason + "Creation outcome is unknown. The job will retry in 30 minutes and check the existing name."
+	return migration.FormatAttempt(result, retry)
 }
 
 func scheduledMigrationTerminal(result migration.OneShotResult, name string) bool {

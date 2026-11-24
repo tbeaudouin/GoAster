@@ -39,3 +39,9 @@ the migration create begins. Confirmed delivered success, `target_exists`,
 uncertainty, partial handoff, and other errors disable/report as appropriate;
 an existing target is never adopted. Existing files from older installations
 are not read, deleted, migrated, or resumed by this runtime.
+
+Migration attempt messages use deterministic plain text for the initial result and scheduled retries. They include sanitized diagnostics and server details, and report the scheduling outcome when known. A legacy job with a different interval is described by its next scheduled run. Unknown or conflicting outcomes remain uncertain; private setup material is excluded from these status messages. Structured tool results and retry decisions are unchanged.
+
+### Friendly status validation (2026-11-24)
+
+Offline full `go test ./...`, `go vet ./...`, and `go build ./...` pass. Focused migration/formatting race checks pass in `internal/migration`, `internal/chat`, and `cmd/goaster-agent`. Coverage includes sanitized fields and redaction, conflicting creation evidence, success versus incomplete delivery, stop, scheduling failure and non-30-minute schedules. Initial-display tests verify the recorded structured tool result is unchanged; persisted retry integration still verifies no additional model request, including after restart. One full helper run hit the existing command cancellation-cleanup timing test; the full rerun and independent full validations passed. Real Telegram delivery and runtime rollout were not tested or performed; source changes alone do not update running agents or existing installed skills/jobs.
