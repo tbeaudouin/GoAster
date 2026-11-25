@@ -2,7 +2,7 @@
 
 [Set up your agent on the GoAster website](https://goaster.fly.dev) in **about 5 minutes**.
 
-> GoAster setup is free; costs apply for the Hetzner server and your OpenAI subscription.
+> GoAster is completely free. You only pay for your Hetzner server and OpenAI subscription.
 
 ## ✨ Meet GoAster
 
