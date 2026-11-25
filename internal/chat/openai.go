@@ -28,6 +28,7 @@ import (
 	"goaster/internal/attachment"
 	"goaster/internal/command"
 	"goaster/internal/diagnostics"
+	"goaster/internal/filesync"
 	"goaster/internal/migration"
 )
 
@@ -199,18 +200,17 @@ func (s CredentialStore) withLock(ctx context.Context, action func() error) erro
 	}
 	defer f.Close()
 	for {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err = filesync.LockFile(f)
 		if err == nil {
 			break
 		}
-		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		if !filesync.IsLockBusy(err) {
 			return fmt.Errorf("lock credentials: %w", err)
 		}
 		if err = sleepContext(ctx, 20*time.Millisecond); err != nil {
 			return err
 		}
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return action()
 }
 
