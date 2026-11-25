@@ -23,6 +23,20 @@ import (
 
 const oneShotTargetName = "goaster-migration-0123456789abcdef"
 
+func TestDefaultMigrationOrigin(t *testing.T) {
+	options := DefaultOptions()
+	if options.WebOrigin != "https://goaster.fly.dev" {
+		t.Fatalf("default origin = %q", options.WebOrigin)
+	}
+	endpoint, err := webEndpoint(options.WebOrigin, "/api/migration/create", false)
+	if err != nil || endpoint != "https://goaster.fly.dev/api/migration/create" {
+		t.Fatalf("default endpoint = %q, error = %v", endpoint, err)
+	}
+	if noRedirect(nil, nil) != http.ErrUseLastResponse {
+		t.Fatal("redirect policy must return the original response")
+	}
+}
+
 func TestOneShotOffline(t *testing.T) {
 	for _, locations := range [][]string{nil, {}, {"fsn1"}} {
 		t.Run(fmt.Sprint(locations), func(t *testing.T) {
@@ -88,7 +102,7 @@ func TestOneShotOffline(t *testing.T) {
 				t.Fatal("handoff key does not match request")
 			}
 			encoded, _ := json.Marshal(result)
-			if calls != 1 || result.CreationState != "created" || result.Handoff != "delivered" || !strings.Contains(setupURL, "/setup#owner=") || !strings.Contains(string(privateKey), "PRIVATE KEY") || strings.Contains(string(encoded), "PRIVATE KEY") || strings.Contains(string(encoded), "setup_url") || strings.Contains(string(encoded), setupURL) {
+			if calls != 1 || result.CreationState != "created" || result.Handoff != "delivered" || !strings.HasPrefix(setupURL, server.URL+"/setup#owner=") || !strings.Contains(string(privateKey), "PRIVATE KEY") || strings.Contains(string(encoded), "PRIVATE KEY") || strings.Contains(string(encoded), "setup_url") || strings.Contains(string(encoded), setupURL) {
 				t.Fatalf("result %s calls %d setup=%q key=%q", encoded, calls, setupURL, privateKey)
 			}
 		})
