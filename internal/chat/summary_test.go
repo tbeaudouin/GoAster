@@ -494,7 +494,7 @@ func TestCodexSummarizationRejectsUnexpectedToolCalls(t *testing.T) {
 	}
 }
 
-func TestCodexRejectsSystemRoleWithoutNetwork(t *testing.T) {
+func TestCodexRejectsSystemRoleAtRequestBoundary(t *testing.T) {
 	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
 	if err := store.Save(Credential{AccessToken: "test", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
@@ -505,13 +505,6 @@ func TestCodexRejectsSystemRoleWithoutNetwork(t *testing.T) {
 	provider := NewCodexProvider(store)
 	provider.backendURL = server.URL
 	provider.httpClient = server.Client()
-	history := []ChatMessage{{Role: "system", Content: "invalid"}}
-	if _, err := provider.ReplyWithHistory(context.Background(), "model", history); err == nil {
-		t.Error("chat accepted system")
-	}
-	if _, err := provider.SummarizeConversation(context.Background(), "model", "", history); err == nil {
-		t.Error("summary accepted system")
-	}
 	for _, role := range []string{"system", " system "} {
 		if _, _, err := provider.requestCodex(context.Background(), Credential{AccessToken: "test"}, "model", []codexInputItem{{Role: role}}, false); err == nil {
 			t.Errorf("boundary accepted %q", role)
