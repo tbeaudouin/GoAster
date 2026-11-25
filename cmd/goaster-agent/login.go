@@ -93,8 +93,8 @@ func handleAgentLogin(w http.ResponseWriter, r *http.Request, controlSecret stri
 	}
 	if err := writeAgentLoginEvent(w, controltransport.LoginCompleteEvent, "OpenAI subscription authentication complete.", flush); err != nil {
 		if r.Context().Err() == nil {
-			diagnostics.Error("agent.login", err,
-				diagnostics.Field{Key: "phase", Value: "result_delivery"},
+			diagnostics.Error("agent.login.result_delivery", err,
+				diagnostics.Field{Key: "phase", Value: "result"},
 				diagnostics.Field{Key: "request_reference", Value: requestReference},
 			)
 		}

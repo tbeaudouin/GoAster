@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"goaster/internal/attachment"
+	"goaster/internal/diagnostics"
 	"goaster/internal/localenv"
 	"goaster/internal/scheduler"
 )
@@ -253,6 +254,23 @@ func TestOpenAIAuthenticatorDeviceLogin(t *testing.T) {
 	}
 	if credential.AccessToken != "access-token" || credential.RefreshToken != "refresh-token" || credential.AccountID != "account-123" {
 		t.Fatalf("saved credential = %+v", credential)
+	}
+	var logs bytes.Buffer
+	restore := diagnostics.SetOutput(&logs)
+	defer restore()
+	writes := 0
+	err = authenticator.Login(context.Background(), diagnosticWriter(func(p []byte) (int, error) {
+		writes++
+		if writes == 2 {
+			return 0, errors.New("write failed token=SECRET private detail")
+		}
+		return len(p), nil
+	}))
+	if err != nil || writes != 2 {
+		t.Fatalf("committed login: writes=%d error=%v", writes, err)
+	}
+	if !strings.Contains(logs.String(), "ERROR operation=openai.login.result_delivery") || !strings.Contains(logs.String(), `phase="result"`) || strings.Contains(logs.String(), "SECRET") || strings.Contains(logs.String(), "private detail") {
+		t.Fatalf("completion diagnostic = %q", logs.String())
 	}
 }
 

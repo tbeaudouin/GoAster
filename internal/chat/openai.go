@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -289,7 +288,6 @@ func (c Credential) needsRefresh(now time.Time) bool {
 }
 
 type OpenAIAuthenticator struct {
-	mu          sync.Mutex
 	Store       CredentialStore
 	HTTPClient  *http.Client
 	AuthBaseURL string
@@ -465,7 +463,9 @@ func (a *OpenAIAuthenticator) Login(ctx context.Context, output io.Writer) error
 		return err
 	}
 	// Authentication has committed; a terminal write failure cannot undo it.
-	_, _ = fmt.Fprintf(output, "OpenAI subscription authentication complete. Credentials saved to %s.\n", a.Store.Path)
+	if _, err := fmt.Fprintf(output, "OpenAI subscription authentication complete. Credentials saved to %s.\n", a.Store.Path); err != nil {
+		diagnostics.Error("openai.login.result_delivery", err, diagnostics.Field{Key: "phase", Value: "result"})
+	}
 	return nil
 }
 

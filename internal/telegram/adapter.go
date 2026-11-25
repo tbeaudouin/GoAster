@@ -42,7 +42,6 @@ type adapter struct {
 	restarting               bool
 	restartService           func(context.Context) error
 	loginActive              bool
-	loginBlocked             bool
 	environmentMu            sync.Mutex
 	environmentBlocked       map[environmentProposalKey]bool
 	client                   httpDoer

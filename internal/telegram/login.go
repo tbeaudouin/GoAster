@@ -35,11 +35,6 @@ func isLoginCommand(text string) bool {
 func (a *adapter) runLogin(ctx context.Context, m message) {
 	key := telegramTurnKeyForMessage(m)
 	a.turnMu.Lock()
-	if a.loginBlocked {
-		a.turnMu.Unlock()
-		a.send(ctx, m.Chat.ID, "OpenAI login outcome is unknown. Check the agent status before trying again.")
-		return
-	}
 	if a.restarting {
 		a.turnMu.Unlock()
 		a.send(ctx, m.Chat.ID, "Agent restart in progress. Please try again shortly.")
@@ -80,9 +75,6 @@ func (a *adapter) runLogin(ctx context.Context, m message) {
 		}
 	}
 	a.loginActive = false
-	if outcome == loginAgentUnknown && turnCtx.Err() == nil {
-		a.loginBlocked = true
-	}
 	a.turnMu.Unlock()
 	canceled := turnCtx.Err() != nil
 	cancelTurn()
@@ -128,8 +120,7 @@ func (a *adapter) loginAgent(ctx context.Context, chatID int64) (loginAgentOutco
 		return loginAgentBusy, nil
 	}
 	if response.StatusCode != http.StatusOK {
-		_, err := telegramLoginProtocolFailure(fmt.Errorf("login agent returned status %s", response.Status), response.Status, requestReference)
-		return loginAgentFailed, err
+		return telegramLoginProtocolFailure(fmt.Errorf("login agent returned status %s", response.Status), response.Status, requestReference)
 	}
 
 	scanner := bufio.NewScanner(io.LimitReader(response.Body, loginResponseLimit))

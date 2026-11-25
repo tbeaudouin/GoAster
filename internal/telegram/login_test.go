@@ -107,10 +107,15 @@ func TestStopCancelsPrivateOwnerLogin(t *testing.T) {
 			if r.URL.Path != controltransport.LoginPath {
 				return nil, errors.New("unexpected agent path")
 			}
-			close(entered)
-			<-r.Context().Done()
-			close(canceled)
-			return nil, r.Context().Err()
+			select {
+			case <-entered:
+				return response(http.StatusOK, `{"type":"complete"}`+"\n"), nil
+			default:
+				close(entered)
+				<-r.Context().Done()
+				close(canceled)
+				return nil, r.Context().Err()
+			}
 		}),
 	}
 	done := make(chan struct{})
@@ -134,7 +139,8 @@ func TestStopCancelsPrivateOwnerLogin(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("canceled login did not finish")
 	}
-	if len(sent) != 1 || sent[0] != telegramStopMessage {
+	a.handle(context.Background(), privateMessage(42, telegramLoginCommand))
+	if len(sent) != 2 || sent[0] != telegramStopMessage || !strings.Contains(sent[1], "authentication complete") {
 		t.Fatalf("cancellation messages = %q", sent)
 	}
 }
@@ -160,8 +166,11 @@ func TestLoginDoesNotReplayUncertainTransportOutcome(t *testing.T) {
 		}),
 	}
 	a.handle(context.Background(), privateMessage(42, telegramLoginCommand))
+	if loginCalls != 1 {
+		t.Fatalf("automatic retry: login calls=%d", loginCalls)
+	}
 	a.handle(context.Background(), privateMessage(42, telegramLoginCommand))
-	if loginCalls != 1 || len(sent) != 2 || !strings.Contains(sent[0], "outcome is unknown") || !strings.Contains(sent[1], "outcome is unknown") {
+	if loginCalls != 2 || len(sent) != 2 || !strings.Contains(sent[0], "outcome is unknown") || !strings.Contains(sent[1], "outcome is unknown") {
 		t.Fatalf("login calls=%d messages=%q", loginCalls, sent)
 	}
 }
