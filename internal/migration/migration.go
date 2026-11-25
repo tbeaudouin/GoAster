@@ -25,7 +25,7 @@ import (
 	"goaster/internal/localenv"
 )
 
-const MigrationWebOrigin = "https://goasterweb-thomas.fly.dev"
+const MigrationWebOrigin = "https://goaster.fly.dev"
 
 var (
 	errInvalidRequest = errors.New("invalid migration request")
