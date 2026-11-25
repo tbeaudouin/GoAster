@@ -13,8 +13,12 @@ import (
 const (
 	SocketEnv                  = "GOASTER_AGENT_SOCKET"
 	Address                    = "127.0.0.1:8765"
+	LoginPath                  = "/login"
 	ScheduledDeliveriesPath    = "/cron-deliveries"
 	ScheduledDeliveriesAckPath = "/cron-deliveries/ack"
+	LoginOutputEvent           = "output"
+	LoginCompleteEvent         = "complete"
+	LoginFailedEvent           = "failed"
 )
 
 var invalidSocket = errors.New("agent socket configuration is invalid or unavailable")

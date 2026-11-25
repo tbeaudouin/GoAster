@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -258,6 +259,22 @@ func TestCodexTransientRetryDoesNotDuplicateToolExecution(t *testing.T) {
 	var backendCalls atomic.Int32
 	var toolCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload codexRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		found := false
+		for _, item := range payload.Input {
+			if item.Role == "system" {
+				t.Error("system role in retry or tool continuation")
+			}
+			if item.Role == "developer" && len(item.Content) > 0 && item.Content[0].Text == "new instruction" {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("new instruction missing from retry or tool continuation")
+		}
 		switch backendCalls.Add(1) {
 		case 1:
 			writer.WriteHeader(http.StatusBadGateway)
@@ -284,7 +301,7 @@ func TestCodexTransientRetryDoesNotDuplicateToolExecution(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := provider.Reply(context.Background(), DefaultModel, "run the tool once")
+	reply, err := provider.ReplyWithHistory(context.Background(), DefaultModel, []ChatMessage{{Role: "developer", Content: "new instruction"}, {Role: "user", Content: "run the tool once"}})
 	if err != nil || reply != "tool completed" || backendCalls.Load() != 3 || toolCalls.Load() != 1 {
 		t.Fatalf("tool retry = reply %q, error %v, backend calls %d, tool calls %d", reply, err, backendCalls.Load(), toolCalls.Load())
 	}

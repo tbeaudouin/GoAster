@@ -29,15 +29,16 @@ type agentSession interface {
 
 func newAgentSessionFactory(create func(int64) agentSession) func(int64, int64) agentSession {
 	var sessionsMu sync.Mutex
-	sessions := make(map[int64]agentSession)
-	return func(chatID, _ int64) agentSession {
+	sessions := make(map[attachment.RetainedScope]agentSession)
+	return func(chatID, topicID int64) agentSession {
+		key := attachment.RetainedScope{ChatID: chatID, ThreadID: topicID}
 		sessionsMu.Lock()
 		defer sessionsMu.Unlock()
-		if session := sessions[chatID]; session != nil {
+		if session := sessions[key]; session != nil {
 			return session
 		}
 		session := create(chatID)
-		sessions[chatID] = session
+		sessions[key] = session
 		return session
 	}
 }

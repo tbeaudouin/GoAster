@@ -1,6 +1,6 @@
 # Telegram `send_file`
 
-GoAster now registers a model-facing `send_file` tool in the production agent. It accepts a path inside the private GoAster artefact workspace and an optional safe basename. It reads one regular file, including binary ZIP files, with an 8 MiB bound and sends it with Telegram `sendDocument` to the transport-bound current chat and forum topic.
+GoAster now registers a model-facing `send_file` tool in the production agent. It accepts a path inside the private GoAster artefact workspace and an optional safe basename. It reads one regular file, including binary ZIP files, with the then-current 8 MiB bound and sends it with Telegram `sendDocument` to the transport-bound current chat and forum topic.
 
 The model cannot select a chat, topic, bot token, or arbitrary filesystem path. Symlinks, workspace escapes, directories, FIFOs, other non-regular files, unsafe filenames, and oversized files are rejected. Telegram errors are bounded and redacted; the tool reports success only after one confirmed API response and never retries an uncertain send. This capability does not automatically export memory or change the private-only policy for environment and migration material.
 

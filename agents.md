@@ -21,3 +21,7 @@ This rule applies to every GoAster package and every unexpected runtime failure,
 # Scheduled tool parity
 
 - Every new normal agent tool must also be available to genuine scheduled turns through the shared registry. Scheduled turns cannot use cron action `add`; `cron_disable_self` is a scheduled-only convenience. Add or update tests for this invariant. Existing authorization, ownership, and safety guards remain in force.
+
+# Model message role invariant
+
+- GoAster must never create or send system-role messages. Use developer-role messages for instructions. Reject system roles at the shared model request boundary, including summarization, retries, and tool continuations. Add regression tests for instruction construction and these paths.

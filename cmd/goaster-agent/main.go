@@ -443,6 +443,13 @@ func serve(store chat.CredentialStore) (serveErr error) {
 	if err != nil {
 		return err
 	}
+	root, rootErr := attachment.DefaultRetainedRoot()
+	if rootErr == nil {
+		rootErr = attachment.SweepRetainedExpired(root, attachment.RetainedScope{})
+	}
+	if rootErr != nil {
+		diagnostics.Error("agent.startup.retained_sweep", rootErr)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	setup, err := newAgentPromptSetup(ctx)
@@ -493,7 +500,7 @@ func serve(store chat.CredentialStore) (serveErr error) {
 			serveErr = errors.Join(serveErr, err)
 		}
 	}()
-	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntime(provider.CheckAuth, setup.registry, controlSecret, sessionFor, deliveryQueue, backgroundManager.List), ReadHeaderTimeout: 10 * time.Second}
+	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(provider.CheckAuth, setup.registry, controlSecret, provider.LoginInstructions, sessionFor, deliveryQueue, backgroundManager.List), ReadHeaderTimeout: 10 * time.Second}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -540,6 +547,10 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 }
 
 func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue, listBackground ...func(context.Context) ([]command.BackgroundSession, error)) http.Handler {
+	return handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth, registry, controlSecret, nil, sessionFor, deliveryQueue, listBackground...)
+}
+
+func handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, login func(context.Context, func(string, string) error) error, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue, listBackground ...func(context.Context) ([]command.BackgroundSession, error)) http.Handler {
 	if sessionFor == nil {
 		sessionFor = func(int64, int64) agentSession { return nil }
 	}
@@ -644,6 +655,9 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		}{Acknowledged: true}); err != nil {
 			diagnostics.Error("agent.cron.outbox.ack_encode", err)
 		}
+	})
+	mux.HandleFunc(controltransport.LoginPath, func(w http.ResponseWriter, r *http.Request) {
+		handleAgentLogin(w, r, controlSecret, login)
 	})
 	mux.HandleFunc("/internal/restart-guard", func(w http.ResponseWriter, r *http.Request) {
 		if !validControlRequest(r, controlSecret) {
@@ -972,6 +986,51 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			}
 			return
 		}
+		var retainedLease attachment.RetainedLease
+		var retainedFiles []attachment.RetainedFile
+		clearCommand := chat.IsClearCommand(request.Message)
+		modelCommand := chat.IsModelCommand(request.Message)
+		useRetained := !modelCommand && (!clearCommand || (strings.TrimSpace(request.Message) == "/clear" && len(metadata) == 0))
+		if useRetained {
+			root, err := attachment.DefaultRetainedRoot()
+			if err != nil {
+				diagnostics.Error("agent.chat.retained_root", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
+				http.Error(w, "Retained uploads are unavailable.", http.StatusServiceUnavailable)
+				return
+			}
+			var release func()
+			if !clearCommand {
+				if sweepErr := attachment.SweepRetainedExpired(root, attachment.RetainedScope{ChatID: request.ChatID, ThreadID: request.ThreadID}); sweepErr != nil {
+					diagnostics.Error("agent.chat.retained_sweep", sweepErr, diagnostics.Field{Key: "request_reference", Value: requestReference})
+				}
+			}
+			retainedLease, release, err = attachment.AcquireRetainedScope(root, attachment.RetainedScope{ChatID: request.ChatID, ThreadID: request.ThreadID})
+			if err != nil {
+				diagnostics.Error("agent.chat.retained_scope", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
+				http.Error(w, "Retained uploads are unavailable.", http.StatusServiceUnavailable)
+				return
+			}
+			defer release()
+			if !clearCommand {
+				for _, item := range request.Attachments {
+					if _, err = retainedLease.Retain(item); err != nil {
+						diagnostics.Error("agent.chat.retained_write", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
+						if errors.Is(err, attachment.ErrRetainedQuota) {
+							http.Error(w, "Retained upload limit reached (128 files or 256 MiB). Use /clear or wait for expiry.", http.StatusRequestEntityTooLarge)
+						} else {
+							http.Error(w, "Retained uploads are unavailable. Use /clear to delete this conversation’s uploads and history, then upload files again.", http.StatusServiceUnavailable)
+						}
+						return
+					}
+				}
+				retainedFiles, err = retainedLease.List()
+				if err != nil {
+					diagnostics.Error("agent.chat.retained_list", err, diagnostics.Field{Key: "request_reference", Value: requestReference})
+					http.Error(w, "Retained uploads are unavailable. Use /clear to delete this conversation’s uploads and history, then upload files again.", http.StatusServiceUnavailable)
+					return
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.Header().Set("Cache-Control", "no-cache")
 		encoder := json.NewEncoder(w)
@@ -1049,6 +1108,9 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			return
 		}
 		requestContext := chat.WithConversationType(streamContext, request.ChatType)
+		if useRetained && !clearCommand {
+			requestContext = chat.WithRetainedAttachments(requestContext, retainedFiles)
+		}
 		requestContext = chat.WithConversationID(requestContext, request.ChatID)
 		requestContext = chat.WithConversationThreadID(requestContext, request.ThreadID)
 		requestContext = chat.WithToolCallObserver(requestContext, observer)
@@ -1152,6 +1214,19 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 			http.Error(w, "agent request failed. Request reference: "+requestReference+".", http.StatusServiceUnavailable)
 			return
 		}
+		if clearCommand && err == nil && len(metadata) == 0 {
+			if strings.TrimSpace(request.Message) == "/clear" && reply == "Conversation history cleared." {
+				if clearErr := retainedLease.Clear(); clearErr != nil {
+					diagnostics.Error("agent.chat.retained_clear", clearErr, diagnostics.Field{Key: "request_reference", Value: requestReference})
+					reply += " Retained uploads could not be cleared; please retry /clear."
+				} else {
+					reply += " Retained uploads cleared."
+				}
+			} else if strings.HasPrefix(reply, "Removed ") {
+				reply += " Retained files remain until expiry or a full /clear."
+			}
+		}
+
 		emit("final", "final_reply", struct {
 			Type  string `json:"type"`
 			Reply string `json:"reply"`

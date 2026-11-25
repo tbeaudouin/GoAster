@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"goaster/internal/attachment"
+	"goaster/internal/diagnostics"
 	"goaster/internal/localenv"
 	"goaster/internal/scheduler"
 )
@@ -237,7 +239,7 @@ func TestOpenAIAuthenticatorDeviceLogin(t *testing.T) {
 	if err := authenticator.Login(context.Background(), &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), server.URL+"/codex/device") || !strings.Contains(output.String(), "ABCD-EFGH") {
+	if !strings.Contains(output.String(), openAIAuthURL+"/codex/device") || !strings.Contains(output.String(), "ABCD-EFGH") {
 		t.Fatalf("login output = %q", output.String())
 	}
 	if got := pollCount.Load(); got != 2 {
@@ -252,6 +254,66 @@ func TestOpenAIAuthenticatorDeviceLogin(t *testing.T) {
 	}
 	if credential.AccessToken != "access-token" || credential.RefreshToken != "refresh-token" || credential.AccountID != "account-123" {
 		t.Fatalf("saved credential = %+v", credential)
+	}
+	var logs bytes.Buffer
+	restore := diagnostics.SetOutput(&logs)
+	defer restore()
+	writes := 0
+	err = authenticator.Login(context.Background(), diagnosticWriter(func(p []byte) (int, error) {
+		writes++
+		if writes == 2 {
+			return 0, errors.New("write failed token=SECRET private detail")
+		}
+		return len(p), nil
+	}))
+	if err != nil || writes != 2 {
+		t.Fatalf("committed login: writes=%d error=%v", writes, err)
+	}
+	if !strings.Contains(logs.String(), "ERROR operation=openai.login.result_delivery") || !strings.Contains(logs.String(), `phase="result"`) || strings.Contains(logs.String(), "SECRET") || strings.Contains(logs.String(), "private detail") {
+		t.Fatalf("completion diagnostic = %q", logs.String())
+	}
+}
+
+func TestOpenAIAuthenticatorLoginReplacesInvalidCredentialWithoutBackup(t *testing.T) {
+	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
+	if err := os.WriteFile(store.Path, []byte("not valid JSON"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			fmt.Fprint(w, `{"device_auth_id":"device","user_code":"NEW-CODE","interval":1}`)
+		case "/api/accounts/deviceauth/token":
+			fmt.Fprint(w, `{"authorization_code":"authorization-code","code_verifier":"verifier"}`)
+		case "/oauth/token":
+			fmt.Fprint(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	authenticator := NewOpenAIAuthenticator(store)
+	authenticator.AuthBaseURL = server.URL
+	authenticator.HTTPClient = server.Client()
+	authenticator.Sleep = func(context.Context, time.Duration) error { return nil }
+	if err := authenticator.Login(context.Background(), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.AccessToken != "new-access" || credential.RefreshToken != "new-refresh" {
+		t.Fatalf("replaced credential = %+v", credential)
+	}
+	entries, err := os.ReadDir(filepath.Dir(store.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".bak") || strings.HasPrefix(entry.Name(), ".auth-") {
+			t.Fatalf("login left a credential backup or temporary file: %q", entry.Name())
+		}
 	}
 }
 
@@ -1261,7 +1323,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	provider.auth.AuthBaseURL = server.URL
 	provider.auth.HTTPClient = server.Client()
 	_, err := provider.Reply(context.Background(), "gpt-test", "hello")
-	missingError := "OpenAI subscription authentication required: credentials were not found; restart GoAster to authenticate"
+	missingError := "OpenAI subscription authentication required: credentials were not found; use paired private Telegram /openailogin or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || !errors.Is(err, errCredentialsMissing) || err.Error() != missingError {
 		t.Fatalf("authentication error = %v", err)
 	}
@@ -1289,7 +1351,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	var output bytes.Buffer
 	err = runChatLoopWithUI(context.Background(), TerminalInput{reader: strings.NewReader("hello\n"), interactive: true}, &output,
 		NewSession(Config{Model: "gpt-test"}, provider), terminalStore,
-		EnvironmentFilePickerFunc(func() (string, error) { return "", ErrEnvironmentFilePickerCanceled }), terminalUI{interactive: true, width: 100})
+		EnvironmentFilePickerFunc(func() (string, error) { return "", ErrEnvironmentFilePickerCanceled }), terminalUI{interactive: true, width: 140})
 	if err != nil || !strings.Contains(output.String(), requestFailureCredentialsMissing) || strings.Contains(output.String(), missingError) {
 		t.Fatalf("missing credentials interactive error = %v, output %q", err, output.String())
 	}
@@ -1298,7 +1360,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 		t.Fatal(err)
 	}
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	malformedError := "OpenAI subscription authentication required: parse credential file: unexpected end of JSON input; restart GoAster to authenticate"
+	malformedError := "OpenAI subscription authentication required: parse credential file: unexpected end of JSON input; use paired private Telegram /openailogin or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || errors.Is(err, errCredentialsMissing) || err.Error() != malformedError {
 		t.Fatalf("malformed credentials error = %v", err)
 	}
@@ -1314,7 +1376,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 		t.Fatal(err)
 	}
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	expiredError := "OpenAI subscription authentication required: saved access token is expired and has no refresh token; restart GoAster to authenticate"
+	expiredError := "OpenAI subscription authentication required: saved access token is expired and has no refresh token; use paired private Telegram /openailogin or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || err.Error() != expiredError || !strings.Contains(requestFailureDiagnostic(err), expiredError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("expired credentials error = %v", err)
 	}
@@ -1324,7 +1386,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	}
 	refreshStatus.Store(http.StatusUnauthorized)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	rejectedRefreshError := "OpenAI session expired; restart GoAster to authenticate:"
+	rejectedRefreshError := "OpenAI session expired; use paired private Telegram /openailogin or run goaster-agent login:"
 	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refresh error = %v", err)
 	}
@@ -1344,7 +1406,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	checkLineError(refreshFailureError, "Codex backend request failed with status 401 Unauthorized", "token refresh failed with status 500 Internal Server Error")
 	refreshStatus.Store(http.StatusOK)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	unauthorizedError := "OpenAI subscription authentication required; restart GoAster to authenticate:"
+	unauthorizedError := "OpenAI subscription authentication required; use paired private Telegram /openailogin or run goaster-agent login:"
 	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refreshed credentials error = %v", err)
 	}
@@ -2021,5 +2083,123 @@ func TestCodexInputFromHistoryMapsSystemToDeveloper(t *testing.T) {
 	}
 	if items[2].Content[0].Type != "output_text" || items[0].Content[0].Type != "input_text" {
 		t.Fatal("unexpected content types")
+	}
+}
+
+func TestReloginDoesNotBlockCredentialAndStale401DoesNotRefresh(t *testing.T) {
+	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
+	old := Credential{AccessToken: "old", RefreshToken: "old-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := store.Save(old); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var refreshes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			fmt.Fprint(w, `{"device_auth_id":"private-device","user_code":"ABCD-EFGH","interval":1}`)
+		case "/api/accounts/deviceauth/token":
+			close(entered)
+			<-release
+			fmt.Fprint(w, `{"authorization_code":"private-code","code_verifier":"private-verifier"}`)
+		case "/oauth/token":
+			if strings.Contains(r.Header.Get("Content-Type"), "json") {
+				refreshes.Add(1)
+			}
+			fmt.Fprint(w, `{"access_token":"new","refresh_token":"new-refresh","expires_in":3600}`)
+		}
+	}))
+	defer server.Close()
+	auth := NewOpenAIAuthenticator(store)
+	auth.AuthBaseURL = server.URL
+	auth.HTTPClient = server.Client()
+	done := make(chan error, 1)
+	go func() {
+		done <- auth.LoginInstructions(context.Background(), func(url, code string) error {
+			if url != openAIAuthURL+"/codex/device" || code != "ABCD-EFGH" {
+				return errors.New("bad instructions")
+			}
+			return nil
+		})
+	}()
+	<-entered
+	if got, err := auth.Credential(context.Background()); err != nil || got.AccessToken != "old" {
+		t.Fatalf("credential during login: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, err := auth.refreshAfter(context.Background(), old)
+	if err != nil || got.AccessToken != "new" || refreshes.Load() != 0 {
+		t.Fatalf("stale 401 refreshed new account: %v, calls %d", err, refreshes.Load())
+	}
+}
+
+func TestReloginRejectsUnsafeInstructions(t *testing.T) {
+	for _, response := range []string{`{"device_auth_id":"id","user_code":"ABCD","verification_url":"https://evil.example/"}`, `{"device_auth_id":"id","user_code":"ABC\nSECRET"}`, `{"device_auth_id":"id","user_code":"ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"}`} {
+		t.Run(response, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, response) }))
+			defer server.Close()
+			auth := NewOpenAIAuthenticator(CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")})
+			auth.AuthBaseURL = server.URL
+			auth.HTTPClient = server.Client()
+			called := false
+			err := auth.LoginInstructions(context.Background(), func(string, string) error { called = true; return nil })
+			if err == nil || called {
+				t.Fatal("unsafe instructions accepted")
+			}
+		})
+	}
+}
+
+func TestCredentialWriterCrossProcessLock(t *testing.T) {
+	if path := os.Getenv("GOASTER_TEST_CREDENTIAL_PATH"); path != "" {
+		if err := os.WriteFile(path+".started", []byte("ready"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := (CredentialStore{Path: path}).Save(Credential{AccessToken: "child"}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
+	var cmdErr error
+	done := make(chan struct{})
+	err := store.withLock(context.Background(), func() error {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCredentialWriterCrossProcessLock$")
+		cmd.Env = append(os.Environ(), "GOASTER_TEST_CREDENTIAL_PATH="+store.Path)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		go func() { cmdErr = cmd.Wait(); close(done) }()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(store.Path + ".started"); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return errors.New("child did not start")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		select {
+		case <-done:
+			return errors.New("child wrote while lock held")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return store.save(Credential{AccessToken: "parent"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if cmdErr != nil {
+		t.Fatal(cmdErr)
+	}
+	got, err := store.Load()
+	if err != nil || got.AccessToken != "child" {
+		t.Fatalf("serialized save failed: %v", err)
 	}
 }

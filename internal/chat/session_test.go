@@ -447,3 +447,18 @@ func totalMessageTokens(history []ChatMessage) int {
 	}
 	return total
 }
+
+func TestDeveloperRolePersists(t *testing.T) {
+	store := NewSessionStoreAt(filepath.Join(t.TempDir(), "session.json"))
+	messages := []ChatMessage{{Role: "developer", Content: "instruction"}, {Role: "user", Content: "hello"}}
+	if err := store.Save(messages); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Messages) != 2 || loaded.Messages[0] != messages[0] {
+		t.Fatalf("loaded: %+v", loaded.Messages)
+	}
+}

@@ -13,13 +13,14 @@ func TestDispatchResolvesSupportedCommands(t *testing.T) {
 		{text: "/help", name: "help"},
 		{text: "/m terra", name: "m"},
 		{text: "/getenv", name: "getenv"},
+		{text: "/openailogin", name: "openailogin"},
 	} {
 		command, ok := Dispatch(test.text)
 		if !ok || command.Name != test.name {
 			t.Errorf("Dispatch(%q) = %+v, %v; want %q", test.text, command, ok, test.name)
 		}
 	}
-	for _, text := range []string{"", "hello", "/more", "/help@other_bot", "/get_env", "/get_migration", "/get" + "-" + "env"} {
+	for _, text := range []string{"", "hello", "/more", "/login", "/help@other_bot", "/get_env", "/get_migration", "/get" + "-" + "env"} {
 		if _, ok := Dispatch(text); ok {
 			t.Errorf("Dispatch(%q) unexpectedly matched", text)
 		}
@@ -50,7 +51,7 @@ func TestHelpContainsOnlyOneConciseLinePerCommand(t *testing.T) {
 }
 
 func TestMenuIncludesSupportedCommands(t *testing.T) {
-	want := []string{"help", "stop", "restart", "start", "pair", "clear", "m", "env", "getenv"}
+	want := []string{"help", "stop", "restart", "openailogin", "start", "pair", "clear", "m", "env", "getenv"}
 	menu := Menu()
 	if len(menu) != len(want) {
 		t.Fatalf("menu count = %d, want %d: %#v", len(menu), len(want), menu)
@@ -71,6 +72,8 @@ func TestMenuIncludesSupportedCommands(t *testing.T) {
 func TestReferenceContainsCanonicalCommandsAndAccessRequirements(t *testing.T) {
 	reference := Reference()
 	for _, want := range []string{
+		"## /openailogin",
+		"Access requirements: Paired account only, private chat only.",
 		"## /getenv",
 		"Primary command: `/getenv`",
 		"Aliases: none",
