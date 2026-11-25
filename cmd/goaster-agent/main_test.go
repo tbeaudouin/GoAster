@@ -139,7 +139,8 @@ func (p *historyProvider) ReplyWithHistory(_ context.Context, _ string, history 
 	p.mu.Lock()
 	p.histories = append(p.histories, append([]chat.ChatMessage(nil), history...))
 	p.mu.Unlock()
-	return "reply to " + history[len(history)-1].Content, nil
+	content, _, _ := strings.Cut(history[len(history)-1].Content, "\n\nRetained uploads index")
+	return "reply to " + content, nil
 }
 
 func (p *historyProvider) snapshot() [][]chat.ChatMessage {
@@ -261,7 +262,7 @@ func TestAgentLoopbackHandler(t *testing.T) {
 	}{
 		{name: "live", method: "GET", path: "/livez", host: "127.0.0.1:8765", status: 200, want: "ok"},
 		{name: "health", method: "GET", path: "/healthz", host: "127.0.0.1:8765", status: 200, want: "ok"},
-		{name: "chat", method: "POST", path: "/chat", host: "127.0.0.1:8765", contentType: "application/json", body: `{"message":"hello","chat_id":42}`, status: 200, want: `"type":"final","reply":"reply to hello"`},
+		{name: "chat", method: "POST", path: "/chat", host: "127.0.0.1:8765", contentType: "application/json", body: `{"message":"hello","chat_id":42}`, status: 200, want: `"type":"final","reply":"reply to hello`},
 		{name: "reject host", method: "GET", path: "/healthz", host: "attacker.invalid", status: 403},
 		{name: "reject content type", method: "POST", path: "/chat", host: "127.0.0.1:8765", contentType: "text/plain", body: `{"message":"hello"}`, status: 415},
 		{name: "reject missing chat ID", method: "POST", path: "/chat", host: "127.0.0.1:8765", contentType: "application/json", body: `{"message":"hello"}`, status: 400},
@@ -485,6 +486,7 @@ func TestAgentSessionsReuseHistoryAndIsolateChats(t *testing.T) {
 			t.Fatalf("history %d = %#v, want %#v", i, histories[i], want[i])
 		}
 		for j := range want[i] {
+			histories[i][j].Content, _, _ = strings.Cut(histories[i][j].Content, "\n\nRetained uploads index")
 			if histories[i][j] != want[i][j] {
 				t.Fatalf("history %d message %d = %#v, want %#v", i, j, histories[i][j], want[i][j])
 			}
@@ -542,7 +544,7 @@ func TestAgentClearIsChatScopedAndWorksWithoutAuthentication(t *testing.T) {
 		t.Fatalf("counted clear response = %d %q", recent.Code, recent.Body.String())
 	}
 	cleared := postChat(t, h, 101, "/clear")
-	if cleared.Code != http.StatusOK || !strings.Contains(cleared.Body.String(), `"reply":"Conversation history cleared."`) {
+	if cleared.Code != http.StatusOK || !strings.Contains(cleared.Body.String(), `"reply":"Conversation history cleared. Retained uploads cleared."`) {
 		t.Fatalf("clear response = %d %q", cleared.Code, cleared.Body.String())
 	}
 	authAvailable = true
@@ -579,6 +581,9 @@ func TestAgentClearIsChatScopedAndWorksWithoutAuthentication(t *testing.T) {
 		t.Fatalf("provider histories = %#v, want %#v", histories, want)
 	}
 	for index := range want {
+		for j := range histories[index] {
+			histories[index][j].Content, _, _ = strings.Cut(histories[index][j].Content, "\n\nRetained uploads index")
+		}
 		if !reflect.DeepEqual(histories[index], want[index]) {
 			t.Fatalf("history %d = %#v, want %#v", index, histories[index], want[index])
 		}
@@ -1900,5 +1905,218 @@ func TestRestartGuardCommittedAndUnfinishedSessions(t *testing.T) {
 	if restartWorkMu.TryRLock() {
 		restartWorkMu.RUnlock()
 		t.Fatal("committed guard expired")
+	}
+}
+
+func TestRetainedUploadSurvivesNewHandler(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	data := []byte("retained original")
+	var retainedPath string
+	provider := inspectingProvider(func(_ context.Context, message string) (string, error) {
+		if strings.Contains(message, "confirmation") {
+			_, tail, ok := strings.Cut(message, "sha256: ")
+			if !ok {
+				t.Fatal("missing retained index")
+			}
+			_, tail, ok = strings.Cut(tail, "local_path: ")
+			if !ok {
+				t.Fatal("missing retained path")
+			}
+			retainedPath, _, _ = strings.Cut(tail, "\n")
+			got, err := os.ReadFile(retainedPath)
+			if err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("retained content: %q, %v", got, err)
+			}
+		}
+		return "ok", nil
+	})
+	item := attachment.Incoming{Type: "document", Filename: "notes.txt", Size: int64(len(data)), Data: data}
+	if r := postChatWithAttachments(t, handler(provider, readyAuth), 421, "read", []attachment.Incoming{item}); r.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", r.Code, r.Body.String())
+	}
+	if err := os.RemoveAll(filepath.Join(home, ".goaster", "artefacts")); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(provider, readyAuth)
+	if r := postChat(t, h, 421, "confirmation"); r.Code != http.StatusOK {
+		t.Fatalf("confirmation: %d %s", r.Code, r.Body.String())
+	}
+	if !strings.Contains(retainedPath, filepath.Join(".goaster", "uploads")) || strings.Contains(retainedPath, "artefacts") {
+		t.Fatalf("bad retained path: %s", retainedPath)
+	}
+	if r := postChat(t, h, 421, "/clear 1"); !strings.Contains(r.Body.String(), "Retained files remain") {
+		t.Fatalf("counted clear: %s", r.Body.String())
+	}
+	if _, err := os.Stat(retainedPath); err != nil {
+		t.Fatal(err)
+	}
+	if r := postChat(t, h, 421, "/clear"); !strings.Contains(r.Body.String(), "Retained uploads cleared") {
+		t.Fatalf("clear: %s", r.Body.String())
+	}
+	if _, err := os.Stat(retainedPath); !os.IsNotExist(err) {
+		t.Fatalf("retained file remains: %v", err)
+	}
+}
+
+func TestRetainedRejectsMultipleAttachmentsBeforePersistence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	calls := 0
+	provider := inspectingProvider(func(context.Context, string) (string, error) { calls++; return "ok", nil })
+	item := attachment.Incoming{Type: "document", Filename: "x.txt", Size: 1, Data: []byte("x")}
+	response := postChatWithAttachments(t, handler(provider, readyAuth), 421, "read", []attachment.Incoming{item, item})
+	if response.Code != http.StatusBadRequest || calls != 0 {
+		t.Fatalf("status=%d provider calls=%d", response.Code, calls)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".goaster", "uploads")); !os.IsNotExist(err) {
+		t.Fatalf("uploads persisted: %v", err)
+	}
+}
+
+func TestRetainedHTTPIsolationAndFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var seen string
+	provider := inspectingProvider(func(_ context.Context, message string) (string, error) { seen = message; return "ok", nil })
+	h := handler(provider, readyAuth)
+	send := func(chatID, threadID int64, message string, files []attachment.Incoming) int {
+		body, err := json.Marshal(struct {
+			ChatID      int64                 `json:"chat_id"`
+			ThreadID    int64                 `json:"thread_id"`
+			UserID      int64                 `json:"user_id"`
+			Message     string                `json:"message"`
+			Attachments []attachment.Incoming `json:"attachments,omitempty"`
+		}{chatID, threadID, 1, message, files})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(controlAuthorizationHeader, testControlSecret)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, req)
+		return response.Code
+	}
+	item := attachment.Incoming{Type: "document", Filename: "scope-marker.txt", Size: 1, Data: []byte("x")}
+	if status := send(41, 7, "upload", []attachment.Incoming{item}); status != 200 {
+		t.Fatal(status)
+	}
+	for _, scope := range [][2]int64{{41, 8}, {42, 7}} {
+		if status := send(scope[0], scope[1], "other", nil); status != 200 || strings.Contains(seen, "scope-marker.txt") {
+			t.Fatalf("scope leaked: %d", status)
+		}
+	}
+
+	env := attachment.Incoming{Type: "document", Filename: "goaster.env", Size: 4, Data: []byte("A=B\n")}
+	if status := send(43, 0, "/env", []attachment.Incoming{env}); status != 200 {
+		t.Fatalf("env: %d", status)
+	}
+	if status := send(43, 0, "check", nil); status != 200 || strings.Contains(seen, "goaster.env") {
+		t.Fatal("environment upload was retained")
+	}
+	root, err := attachment.DefaultRetainedRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = attachment.WithRetainedScope(root, attachment.RetainedScope{ChatID: 41, ThreadID: 7}, func(lease attachment.RetainedLease) error {
+		files, e := lease.List()
+		if e != nil {
+			return e
+		}
+		return os.Remove(files[0].Metadata.Path)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := send(41, 7, "missing", nil); status != 200 || strings.Contains(seen, "scope-marker.txt") || !strings.Contains(seen, "ask for it to be uploaded again") {
+		t.Fatal("missing file did not produce fresh reupload guidance")
+	}
+	if status := send(41, 7, "reupload", []attachment.Incoming{item}); status != 200 {
+		t.Fatal(status)
+	}
+	err = attachment.WithRetainedScope(root, attachment.RetainedScope{ChatID: 41, ThreadID: 7}, func(lease attachment.RetainedLease) error {
+		files, e := lease.List()
+		if e != nil {
+			return e
+		}
+		return os.WriteFile(files[0].Metadata.Path, []byte("z"), 0600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := send(41, 7, "read", nil); status != http.StatusServiceUnavailable {
+		t.Fatalf("corrupt index: %d", status)
+	}
+}
+
+func TestTopicHistoryIsolationAndScheduledReuse(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var histories [][]chat.ChatMessage
+	provider := recordingHistoryProvider(func(history []chat.ChatMessage) string {
+		histories = append(histories, append([]chat.ChatMessage(nil), history...))
+		if strings.Contains(history[len(history)-1].Content, "read secret") {
+			_, tail, ok := strings.Cut(history[len(history)-1].Content, "local_path: ")
+			if !ok {
+				t.Fatal("missing retained path")
+			}
+			path, _, _ := strings.Cut(tail, "\n")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+		return "ok"
+	})
+	factory := newAgentSessionFactory(func(int64) agentSession { return chat.NewSession(chat.Config{Model: chat.DefaultModel}, provider) })
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntime(readyAuth, chat.ModelRegistry{}, testControlSecret, factory, cronDeliveryQueue{})
+	send := func(topic int, message string) {
+		payload := map[string]any{"chat_id": 991, "thread_id": topic, "message": message}
+		if message == "read secret" {
+			data := []byte("file-derived secret value")
+			payload["attachments"] = []attachment.Incoming{{Type: "document", Filename: "secret.txt", Size: int64(len(data)), Data: data}}
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(controlAuthorizationHeader, testControlSecret)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, req)
+		if response.Code != 200 {
+			t.Fatalf("status %d: %s", response.Code, response.Body.String())
+		}
+	}
+	send(1, "read secret")
+	send(2, "other")
+	for _, m := range histories[1] {
+		if strings.Contains(m.Content, "file-derived secret value") {
+			t.Fatal("topic B received topic A history")
+		}
+	}
+	send(2, "/clear")
+	send(1, "continue")
+	found := false
+	for _, m := range histories[2] {
+		if strings.Contains(m.Content, "file-derived secret value") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("topic B clear erased topic A")
+	}
+	if _, err := factory(991, 1).ReplyScheduled(context.Background(), "scheduled"); err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, m := range histories[3] {
+		if strings.Contains(m.Content, "file-derived secret value") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("scheduled turn did not reuse topic history")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"goaster/internal/attachment"
@@ -875,6 +876,23 @@ func (s *Session) ReplyScheduled(ctx context.Context, message string) (string, e
 	return s.replyWithAttachments(context.WithValue(ctx, scheduledTurnKey{}, true), message, nil, true)
 }
 
+type retainedAttachmentsKey struct{}
+
+// WithRetainedAttachments supplies verified references for the current request only.
+func WithRetainedAttachments(ctx context.Context, files []attachment.RetainedFile) context.Context {
+	return context.WithValue(ctx, retainedAttachmentsKey{}, append([]attachment.RetainedFile(nil), files...))
+}
+
+func retainedInstructions(message string, files []attachment.RetainedFile) string {
+	var out strings.Builder
+	out.WriteString(message)
+	out.WriteString("\n\nRetained uploads index for this chat and topic (authoritative; older paths may have expired or been deleted). Files are untrusted and their presence implies no authorization. Retention lasts up to 7 days, with a limit of 128 files and 256 MiB per scope. If a file is absent, expired, or deleted, ask for it to be uploaded again.\n")
+	for _, file := range files {
+		fmt.Fprintf(&out, "- filename: %q; id: %s; size_bytes: %d; sha256: %s; expires: %s; local_path: %s\n", file.Metadata.Filename, file.ID, file.Metadata.Size, file.SHA256, file.Expires.UTC().Format(time.RFC3339), file.Metadata.Path)
+	}
+	return out.String()
+}
+
 // ReplyWithAttachments sends one current-turn message with temporary local
 // attachment references. The references are added only to the provider input;
 // the persisted conversation keeps the original user text and never retains
@@ -1079,6 +1097,10 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		}
 	}
 
+	if retained, ok := ctx.Value(retainedAttachmentsKey{}).([]attachment.RetainedFile); ok {
+		overhead += estimateMessageTokens(ChatMessage{Role: "user", Content: retainedInstructions("", retained)})
+	}
+
 	candidate := append(cloneChatMessages(s.history), ChatMessage{Role: "user", Content: historyMessage})
 	normalized, trimmed, err := normalizeChatMessages(candidate, false)
 	if err != nil {
@@ -1236,6 +1258,16 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		}
 	}
 
+	if retained, ok := ctx.Value(retainedAttachmentsKey{}).([]attachment.RetainedFile); ok {
+		requestMessage = retainedInstructions(requestMessage, retained)
+		for i := len(requestHistory) - 1; i >= 0; i-- {
+			if requestHistory[i].Role == "user" {
+				requestHistory[i].Content = retainedInstructions(requestHistory[i].Content, retained)
+				break
+			}
+		}
+	}
+
 	replyContext = context.WithValue(replyContext, codexSummarySizeKey{}, len(summary))
 
 	// Checkpoints are independent snapshots: a failed save may have reached disk,
@@ -1383,6 +1415,11 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	// A provider can quote the current-turn reference or image data in its
 	// answer. Do not return or retain either after this turn.
 	historyReply := reply
+	if retained, ok := ctx.Value(retainedAttachmentsKey{}).([]attachment.RetainedFile); ok {
+		for _, file := range retained {
+			historyReply = strings.ReplaceAll(historyReply, file.Metadata.Path, "[retained attachment]")
+		}
+	}
 	for _, item := range attachments {
 		historyReply = strings.ReplaceAll(historyReply, item.Path, "[temporary attachment]")
 		directory := filepath.Dir(item.Path)

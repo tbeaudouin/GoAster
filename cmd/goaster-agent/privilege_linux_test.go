@@ -37,14 +37,17 @@ func TestRootAdapterCanSendBytesToUnprivilegedAgent(t *testing.T) {
 	}
 	agentTemp := filepath.Join(root, "agent")
 	adapterTemp := filepath.Join(root, "adapter")
-	for _, dir := range []string{agentTemp, adapterTemp} {
+	agentHome := filepath.Join(root, "home")
+	for _, dir := range []string{agentTemp, adapterTemp, agentHome} {
 		if err := os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	const agentUID, agentGID = 65534, 65534
-	if err := os.Chown(agentTemp, agentUID, agentGID); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{agentTemp, agentHome} {
+		if err := os.Chown(dir, agentUID, agentGID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	data := []byte("private document from the root adapter")
 	body, err := json.Marshal(struct {
@@ -56,7 +59,7 @@ func TestRootAdapterCanSendBytesToUnprivilegedAgent(t *testing.T) {
 	}
 	child := exec.Command("/proc/self/exe", "-test.run=^TestUnprivilegedAgentHelper$")
 	child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: agentUID, Gid: agentGID}}
-	child.Env = append(os.Environ(), "TMPDIR="+agentTemp, "GOASTER_PRIVILEGE_TEST=1")
+	child.Env = append(os.Environ(), "TMPDIR="+agentTemp, "HOME="+agentHome, "GOASTER_PRIVILEGE_TEST=1")
 	child.Stdin = bytes.NewReader(body)
 	if output, err := child.CombinedOutput(); err != nil {
 		t.Fatalf("unprivileged agent failed: %v\n%s", err, output)

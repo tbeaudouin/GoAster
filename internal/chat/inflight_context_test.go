@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"goaster/internal/attachment"
 )
 
 type inflightTestProvider struct{ fail bool }
@@ -482,5 +484,91 @@ func TestInflightCodexHandlerContextFailureRedactsCause(t *testing.T) {
 				t.Fatalf("disk evidence: %s", disk)
 			}
 		})
+	}
+}
+
+func TestRetainedIndexCountsAgainstRequestBudget(t *testing.T) {
+	request := "hello"
+	provider := budgetTestProvider{overhead: maxContextTokens - estimateMessageTokens(ChatMessage{Role: "user", Content: request}) - 30}
+	session := NewSession(Config{Model: "test"}, &provider)
+	ctx := WithRetainedAttachments(context.Background(), nil)
+	if _, err := session.Reply(ctx, request); err == nil {
+		t.Fatal("retained index exceeded budget but reached provider")
+	}
+	_, histories := provider.calls()
+	if len(histories) != 0 {
+		t.Fatal("provider called over budget")
+	}
+}
+
+type retainedBudgetProvider struct {
+	overhead int
+	run      func(context.Context) error
+}
+
+func (p retainedBudgetProvider) skillContextOverhead(context.Context) (int, error) {
+	return p.overhead, nil
+}
+func (p retainedBudgetProvider) Reply(ctx context.Context, _ string, _ string) (string, error) {
+	if err := p.run(ctx); err != nil {
+		return "", err
+	}
+	return "done", nil
+}
+
+func TestPopulatedRetainedIndexReservesCheckpointBudget(t *testing.T) {
+	files := []attachment.RetainedFile{{ID: "file-id", SHA256: strings.Repeat("a", 64), Metadata: attachment.Metadata{Filename: "report.txt", Path: "/private/uploads/report.txt", Size: 5}}}
+	listing := estimateMessageTokens(ChatMessage{Role: "user", Content: retainedInstructions("", files)})
+	fixed := maxContextTokens - 700
+	path := filepath.Join(t.TempDir(), "session.json")
+	checks := 0
+	provider := retainedBudgetProvider{overhead: fixed, run: func(ctx context.Context) error {
+		check := func(want string) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := decodeSessionFile(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if totalMessageTokens(state.Messages)+fixed+listing > maxContextTokens {
+				t.Fatal("checkpoint consumed reserved listing budget")
+			}
+			if checks == 1 && totalMessageTokens(state.Messages)+fixed+2*listing <= maxContextTokens {
+				t.Fatal("checkpoint fixture is not near the reserved listing boundary")
+			}
+			if !strings.Contains(fmt.Sprint(state.Messages), want) {
+				t.Fatalf("checkpoint missing %q: %v", want, state.Messages)
+			}
+			checks++
+		}
+		observer := ctx.Value(toolEvidenceObserverKey{}).(toolEvidenceObserver)
+		if err := observer("shell_execute", "", false, ""); err != nil {
+			return err
+		}
+		if err := observer("shell_execute", "", true, "done"); err != nil {
+			return err
+		}
+		check("shell_execute completed")
+		if err := ctx.Value(skillSessionKey{}).(skillSessionContext).remember(strings.Repeat("g", 2000)); err != nil {
+			return err
+		}
+		check(strings.Repeat("g", 2000))
+		return nil
+	}}
+	session, err := NewPersistentSessionAt(Config{Model: "test"}, provider, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 25; i++ {
+		session.history = append(session.history, ChatMessage{Role: "assistant", Content: strings.Repeat("old ", 20)})
+	}
+	ctx := WithRetainedAttachments(context.Background(), files)
+	if _, err = session.Reply(ctx, "read report"); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 2 {
+		t.Fatalf("checked %d checkpoints", checks)
 	}
 }
