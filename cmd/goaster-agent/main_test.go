@@ -1301,7 +1301,7 @@ func TestAgentReportsModelRecoveryEventOnceAndUsesEmergencyModel(t *testing.T) {
 	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"type":"model_recovery"`) || !strings.Contains(first.Body.String(), "parse model configuration") {
 		t.Fatalf("recovery event = %d %q", first.Code, first.Body.String())
 	}
-	if len(provider.histories) != 1 || provider.histories[0][0].Role != "system" || !strings.Contains(provider.histories[0][0].Content, "parse model configuration") {
+	if len(provider.histories) != 1 || provider.histories[0][0].Role != "developer" || !strings.Contains(provider.histories[0][0].Content, "parse model configuration") {
 		t.Fatalf("recovery message was not supplied to the model: %#v", provider.histories)
 	}
 	second := postChat(t, h, 303, "again")

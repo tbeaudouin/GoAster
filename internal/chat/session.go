@@ -301,7 +301,7 @@ func (s *SessionStore) loadStateUnderTurnLock(version *[sha256.Size]byte) (loade
 	if err != nil {
 		return s.recoverInvalid()
 	}
-	messages, normalized, err := normalizeChatMessages(disk.Messages, false)
+	messages, normalized, err := normalizeChatMessages(disk.Messages)
 	if err != nil {
 		return s.recoverInvalid()
 	}
@@ -350,7 +350,7 @@ func (s *SessionStore) saveStateWithVersionAndDiagnostics(summary string, messag
 	if err := s.validatePath(); err != nil {
 		return [sha256.Size]byte{}, err
 	}
-	normalized, _, err := normalizeChatMessages(messages, false)
+	normalized, _, err := normalizeChatMessages(messages)
 	if err != nil {
 		return [sha256.Size]byte{}, fmt.Errorf("conversation contains unsupported message data")
 	}
@@ -515,12 +515,12 @@ func encodeSessionFile(summary string, messages []ChatMessage, migrationDiagnost
 	return append(data, '\n'), nil
 }
 
-func normalizeChatMessages(messages []ChatMessage, allowSystem bool) ([]ChatMessage, bool, error) {
+func normalizeChatMessages(messages []ChatMessage) ([]ChatMessage, bool, error) {
 	normalized := make([]ChatMessage, 0, len(messages))
 	trimmed := false
 	for _, message := range messages {
 		role := strings.TrimSpace(message.Role)
-		if role != "user" && role != "assistant" && role != "guidance" && !(allowSystem && role == "system") {
+		if role != "user" && role != "assistant" && role != "guidance" && role != "developer" {
 			return nil, false, errors.New("unsupported conversation role")
 		}
 		content := message.Content
@@ -542,13 +542,13 @@ func normalizeChatMessages(messages []ChatMessage, allowSystem bool) ([]ChatMess
 }
 
 func boundChatHistory(messages []ChatMessage) ([]ChatMessage, bool) {
-	normalized, trimmed, err := normalizeChatMessages(messages, true)
+	normalized, trimmed, err := normalizeChatMessages(messages)
 	if err != nil {
 		// Session-generated messages only use the roles above. Keep a safe,
 		// bounded fallback if a custom caller supplied something else.
 		normalized = nil
 		for _, message := range messages {
-			if message.Role != "user" && message.Role != "assistant" && message.Role != "guidance" && message.Role != "system" {
+			if message.Role != "user" && message.Role != "assistant" && message.Role != "guidance" && message.Role != "developer" {
 				trimmed = true
 				continue
 			}
@@ -619,7 +619,7 @@ func normalizeSummary(summary string) (string, bool) {
 }
 
 func summaryMessage(summary string) ChatMessage {
-	return ChatMessage{Role: "system", Content: "Summary of earlier conversation:\n" + summary}
+	return ChatMessage{Role: "developer", Content: "Summary of earlier conversation:\n" + summary}
 }
 
 // Reserve room for the summary and any trimming notice so neither can be
@@ -630,7 +630,7 @@ func boundSessionMessages(summary string, messages []ChatMessage, notice bool, b
 		maxMessages--
 	}
 	if notice {
-		budget -= estimateMessageTokens(ChatMessage{Role: "system", Content: contextTrimNotice})
+		budget -= estimateMessageTokens(ChatMessage{Role: "developer", Content: contextTrimNotice})
 		maxMessages--
 	}
 	return trimNormalizedChatMessagesToLimit(messages, budget, maxMessages)
@@ -645,7 +645,7 @@ func estimateMessageTokens(message ChatMessage) int {
 }
 
 func historyWithContextNotice(messages []ChatMessage) []ChatMessage {
-	notice := ChatMessage{Role: "system", Content: contextTrimNotice}
+	notice := ChatMessage{Role: "developer", Content: contextTrimNotice}
 	budget := maxContextTokens - estimateMessageTokens(notice)
 	if budget < 1 {
 		budget = 1
@@ -659,7 +659,7 @@ func historyWithContextNotice(messages []ChatMessage) []ChatMessage {
 
 func containsContextNotice(messages []ChatMessage) bool {
 	for _, message := range messages {
-		if message.Role == "system" && message.Content == contextTrimNotice {
+		if message.Role == "developer" && message.Content == contextTrimNotice {
 			return true
 		}
 	}

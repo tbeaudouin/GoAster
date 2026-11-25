@@ -332,7 +332,7 @@ func TestSessionSuppliesModelRecoveryNoticeOnceAndUsesTerra(t *testing.T) {
 	if _, err := session.Reply(context.Background(), "hello"); err != nil {
 		t.Fatal(err)
 	}
-	if len(provider.histories) != 1 || len(provider.histories[0]) == 0 || provider.histories[0][0].Role != "system" || !strings.Contains(provider.histories[0][0].Content, "parse model configuration") {
+	if len(provider.histories) != 1 || len(provider.histories[0]) == 0 || provider.histories[0][0].Role != "developer" || !strings.Contains(provider.histories[0][0].Content, "parse model configuration") {
 		t.Fatalf("recovery history = %#v", provider.histories)
 	}
 	if session.PendingModelRecoveryNotice() != "" {

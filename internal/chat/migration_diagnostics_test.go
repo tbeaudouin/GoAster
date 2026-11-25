@@ -271,7 +271,7 @@ func TestMigrationResponseDecoderToolAndPersistedFollowupPreserveCreated(t *test
 			}
 			metadata := ""
 			for _, message := range restartedProvider.histories[0] {
-				if message.Role == "system" && strings.Contains(message.Content, "migration diagnostic metadata") {
+				if message.Role == "developer" && strings.Contains(message.Content, "migration diagnostic metadata") {
 					metadata = message.Content
 				}
 			}
@@ -321,7 +321,7 @@ func TestMigrationDiagnosticsPersistAsMetadataAcrossSuccessAndRestart(t *testing
 	history := restartedProvider.histories[0]
 	metadata := ""
 	for _, message := range history {
-		if message.Role == "system" && strings.Contains(message.Content, "migration diagnostic metadata") {
+		if message.Role == "developer" && strings.Contains(message.Content, "migration diagnostic metadata") {
 			metadata = message.Content
 		}
 	}
@@ -329,7 +329,7 @@ func TestMigrationDiagnosticsPersistAsMetadataAcrossSuccessAndRestart(t *testing
 		t.Fatalf("follow-up omitted safe migration metadata: %+v", history)
 	}
 	for _, message := range loaded.Messages {
-		if message.Role == "system" {
+		if message.Role == "developer" {
 			t.Fatalf("migration metadata became a synthetic persisted message: %+v", loaded.Messages)
 		}
 	}
@@ -511,7 +511,7 @@ func TestMigrationDiagnosticCheckpointFailureRetainsLiveCreatedOutcome(t *testin
 	}
 	metadata := ""
 	for _, message := range provider.histories[2] {
-		if message.Role == "system" && strings.Contains(message.Content, "migration diagnostic metadata") {
+		if message.Role == "developer" && strings.Contains(message.Content, "migration diagnostic metadata") {
 			metadata = message.Content
 		}
 	}
@@ -761,7 +761,7 @@ func TestMigrationDiagnosticsWorstCaseDetailsSurviveRestart(t *testing.T) {
 	}
 	metadata := ""
 	for _, message := range restartedProvider.histories[0] {
-		if message.Role == "system" && strings.Contains(message.Content, "migration diagnostic metadata") {
+		if message.Role == "developer" && strings.Contains(message.Content, "migration diagnostic metadata") {
 			metadata = message.Content
 		}
 	}
@@ -822,7 +822,7 @@ func TestMigrationDiagnosticsPreserveRepeatedOutcomesAcrossFailedRestarts(t *tes
 				}
 				metadata := ""
 				for _, message := range followUpProvider.histories[0] {
-					if message.Role == "system" && strings.Contains(message.Content, "migration diagnostic metadata") {
+					if message.Role == "developer" && strings.Contains(message.Content, "migration diagnostic metadata") {
 						metadata = message.Content
 					}
 				}

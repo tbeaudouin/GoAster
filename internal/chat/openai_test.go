@@ -972,7 +972,7 @@ func TestCodexProviderSendsConversationHistory(t *testing.T) {
 			found := false
 			for _, item := range request.Input {
 				for _, content := range item.Content {
-					if item.Role == "system" && strings.Contains(content.Text, "parse model configuration") {
+					if item.Role == "developer" && strings.Contains(content.Text, "parse model configuration") {
 						found = true
 					}
 				}

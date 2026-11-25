@@ -435,6 +435,9 @@ func TestCodexSessionSummarizesWithSubscriptionAndNoTools(t *testing.T) {
 		t.Fatalf("requests = %d, want summary and chat", len(requests))
 	}
 	summaryRequest, chatRequest := requests[0], requests[1]
+	if len(summaryRequest.Input) == 0 || summaryRequest.Input[0].Role != "developer" || len(chatRequest.Input) == 0 || chatRequest.Input[0].Role != "developer" {
+		t.Fatalf("instruction roles: summary=%+v chat=%+v", summaryRequest.Input, chatRequest.Input)
+	}
 	if summaryRequest.Model != "configured-model" || len(summaryRequest.Tools) != 0 {
 		t.Fatalf("summary model/tools = %q/%v", summaryRequest.Model, summaryRequest.Tools)
 	}
@@ -488,5 +491,33 @@ func TestCodexSummarizationRejectsUnexpectedToolCalls(t *testing.T) {
 	}
 	if executions.Load() != 0 {
 		t.Fatal("summarization executed a tool")
+	}
+}
+
+func TestCodexRejectsSystemRoleWithoutNetwork(t *testing.T) {
+	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
+	if err := store.Save(Credential{AccessToken: "test", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusInternalServerError) }))
+	defer server.Close()
+	provider := NewCodexProvider(store)
+	provider.backendURL = server.URL
+	provider.httpClient = server.Client()
+	history := []ChatMessage{{Role: "system", Content: "invalid"}}
+	if _, err := provider.ReplyWithHistory(context.Background(), "model", history); err == nil {
+		t.Error("chat accepted system")
+	}
+	if _, err := provider.SummarizeConversation(context.Background(), "model", "", history); err == nil {
+		t.Error("summary accepted system")
+	}
+	for _, role := range []string{"system", " system "} {
+		if _, _, err := provider.requestCodex(context.Background(), Credential{AccessToken: "test"}, "model", []codexInputItem{{Role: role}}, false); err == nil {
+			t.Errorf("boundary accepted %q", role)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("network calls: %d", calls)
 	}
 }

@@ -1102,7 +1102,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	}
 
 	candidate := append(cloneChatMessages(s.history), ChatMessage{Role: "user", Content: historyMessage})
-	normalized, trimmed, err := normalizeChatMessages(candidate, false)
+	normalized, trimmed, err := normalizeChatMessages(candidate)
 	if err != nil {
 		normalized, trimmed = boundChatHistory(candidate)
 	}
@@ -1195,14 +1195,14 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	}
 
 	recoveryNotice := s.registry.takeRecoveryNotice()
-	modelNotice := ChatMessage{Role: "system", Content: "Pending GoAster model configuration recovery notice: " + recoveryNotice}
+	modelNotice := ChatMessage{Role: "developer", Content: "Pending GoAster model configuration recovery notice: " + recoveryNotice}
 	budget, maxMessages := maxContextTokens-overhead, maxSessionMessages
 	if recoveryNotice != "" {
 		budget -= estimateMessageTokens(modelNotice)
 		maxMessages--
 	}
 	diagnosticNotice := migrationDiagnosticsMessage(s.migrationDiagnostics)
-	modelDiagnosticNotice := ChatMessage{Role: "system", Content: diagnosticNotice}
+	modelDiagnosticNotice := ChatMessage{Role: "developer", Content: diagnosticNotice}
 	if diagnosticNotice != "" {
 		budget -= estimateMessageTokens(modelDiagnosticNotice)
 		maxMessages--
@@ -1216,7 +1216,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		}
 	} else {
 		// Reserve the explicit context-trim notice even if earlier normalization trimmed history.
-		budget -= estimateMessageTokens(ChatMessage{Role: "system", Content: contextTrimNotice})
+		budget -= estimateMessageTokens(ChatMessage{Role: "developer", Content: contextTrimNotice})
 		maxMessages--
 		bounded, budgetTrimmed, err = boundInflightMessages(summary, candidate, budget, maxMessages)
 		if err != nil {
@@ -1235,7 +1235,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 		requestHistory = append(requestHistory, modelDiagnosticNotice)
 	}
 	if trimmed {
-		requestHistory = append(requestHistory, ChatMessage{Role: "system", Content: contextTrimNotice})
+		requestHistory = append(requestHistory, ChatMessage{Role: "developer", Content: contextTrimNotice})
 	}
 	requestHistory = append(requestHistory, bounded...)
 	if recoveryNotice != "" {
@@ -1436,7 +1436,7 @@ func (s *Session) replyWithAttachments(ctx context.Context, message string, atta
 	}
 	completedCandidate := cloneChatMessages(bounded)
 	completedCandidate = append(completedCandidate, ChatMessage{Role: "assistant", Content: historyReply})
-	completed, completedTrimmed, err := normalizeChatMessages(completedCandidate, false)
+	completed, completedTrimmed, err := normalizeChatMessages(completedCandidate)
 	if err != nil {
 		completed, completedTrimmed = boundChatHistory(completedCandidate)
 	}
