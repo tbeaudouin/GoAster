@@ -7,45 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"time"
 
 	"goaster/internal/controltransport"
 	"goaster/internal/diagnostics"
 )
 
-const maxLoginOutputChunkBytes = 64 << 10
-
 type agentLoginEvent struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-}
-
-type agentLoginOutputWriter struct {
-	writer http.ResponseWriter
-	flush  func()
-}
-
-func (writer agentLoginOutputWriter) Write(data []byte) (int, error) {
-	if len(data) == 0 {
-		return 0, nil
-	}
-	if len(data) > maxLoginOutputChunkBytes {
-		return 0, fmt.Errorf("login output chunk exceeds %d bytes", maxLoginOutputChunkBytes)
-	}
-	// The terminal login output includes the credential path. The paired
-	// Telegram flow only needs the device instructions; completion is emitted
-	// as a separate safe event below.
-	text := string(data)
-	if completion := strings.Index(text, "OpenAI subscription authentication complete."); completion >= 0 {
-		text = text[:completion]
-	}
-	if strings.TrimSpace(text) == "" {
-		return len(data), nil
-	}
-	if err := writeAgentLoginEvent(writer.writer, controltransport.LoginOutputEvent, text, writer.flush); err != nil {
-		return 0, err
-	}
-	return len(data), nil
 }
 
 func writeAgentLoginEvent(writer http.ResponseWriter, eventType, text string, flush func()) error {
@@ -67,7 +37,7 @@ func writeAgentLoginEvent(writer http.ResponseWriter, eventType, text string, fl
 	return nil
 }
 
-func handleAgentLogin(w http.ResponseWriter, r *http.Request, controlSecret string, login func(context.Context, io.Writer) error) {
+func handleAgentLogin(w http.ResponseWriter, r *http.Request, controlSecret string, login func(context.Context, func(string, string) error) error) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -96,8 +66,19 @@ func handleAgentLogin(w http.ResponseWriter, r *http.Request, controlSecret stri
 		}
 	}
 	flush()
-	output := agentLoginOutputWriter{writer: w, flush: flush}
-	if err := login(r.Context(), output); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	defer cancel()
+	if err := login(ctx, func(url, code string) error {
+		if url != "https://auth.openai.com/codex/device" || len(code) < 4 || len(code) > 32 {
+			return errors.New("invalid login instructions")
+		}
+		for _, c := range code {
+			if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return errors.New("invalid login instructions")
+			}
+		}
+		return writeAgentLoginEvent(w, controltransport.LoginOutputEvent, fmt.Sprintf("Open %s\nEnter this one-time code: %s", url, code), flush)
+	}); err != nil {
 		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
 			return
 		}

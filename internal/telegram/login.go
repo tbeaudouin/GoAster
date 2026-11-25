@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"goaster/internal/controltransport"
 	"goaster/internal/diagnostics"
@@ -104,7 +105,7 @@ func (a *adapter) loginAgent(ctx context.Context, chatID int64) (loginAgentOutco
 	if a == nil || a.agent == nil {
 		return telegramLoginProtocolFailure(errors.New("remote agent client is unavailable"), "", "")
 	}
-	requestContext, cancel := context.WithCancel(ctx)
+	requestContext, cancel := context.WithTimeout(ctx, 16*time.Minute)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, "http://127.0.0.1:8765"+controltransport.LoginPath, nil)
 	if err != nil {

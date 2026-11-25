@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -237,7 +238,7 @@ func TestOpenAIAuthenticatorDeviceLogin(t *testing.T) {
 	if err := authenticator.Login(context.Background(), &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), server.URL+"/codex/device") || !strings.Contains(output.String(), "ABCD-EFGH") {
+	if !strings.Contains(output.String(), openAIAuthURL+"/codex/device") || !strings.Contains(output.String(), "ABCD-EFGH") {
 		t.Fatalf("login output = %q", output.String())
 	}
 	if got := pollCount.Load(); got != 2 {
@@ -2042,4 +2043,122 @@ func TestCodexChatSendsExitTextToProviderAndRequiresAuth(t *testing.T) {
 func testJWT(claims map[string]any) string {
 	payload, _ := json.Marshal(claims)
 	return base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+}
+
+func TestReloginDoesNotBlockCredentialAndStale401DoesNotRefresh(t *testing.T) {
+	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
+	old := Credential{AccessToken: "old", RefreshToken: "old-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := store.Save(old); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var refreshes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			fmt.Fprint(w, `{"device_auth_id":"private-device","user_code":"ABCD-EFGH","interval":1}`)
+		case "/api/accounts/deviceauth/token":
+			close(entered)
+			<-release
+			fmt.Fprint(w, `{"authorization_code":"private-code","code_verifier":"private-verifier"}`)
+		case "/oauth/token":
+			if strings.Contains(r.Header.Get("Content-Type"), "json") {
+				refreshes.Add(1)
+			}
+			fmt.Fprint(w, `{"access_token":"new","refresh_token":"new-refresh","expires_in":3600}`)
+		}
+	}))
+	defer server.Close()
+	auth := NewOpenAIAuthenticator(store)
+	auth.AuthBaseURL = server.URL
+	auth.HTTPClient = server.Client()
+	done := make(chan error, 1)
+	go func() {
+		done <- auth.LoginInstructions(context.Background(), func(url, code string) error {
+			if url != openAIAuthURL+"/codex/device" || code != "ABCD-EFGH" {
+				return errors.New("bad instructions")
+			}
+			return nil
+		})
+	}()
+	<-entered
+	if got, err := auth.Credential(context.Background()); err != nil || got.AccessToken != "old" {
+		t.Fatalf("credential during login: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, err := auth.refreshAfter(context.Background(), old)
+	if err != nil || got.AccessToken != "new" || refreshes.Load() != 0 {
+		t.Fatalf("stale 401 refreshed new account: %v, calls %d", err, refreshes.Load())
+	}
+}
+
+func TestReloginRejectsUnsafeInstructions(t *testing.T) {
+	for _, response := range []string{`{"device_auth_id":"id","user_code":"ABCD","verification_url":"https://evil.example/"}`, `{"device_auth_id":"id","user_code":"ABC\nSECRET"}`, `{"device_auth_id":"id","user_code":"ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"}`} {
+		t.Run(response, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, response) }))
+			defer server.Close()
+			auth := NewOpenAIAuthenticator(CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")})
+			auth.AuthBaseURL = server.URL
+			auth.HTTPClient = server.Client()
+			called := false
+			err := auth.LoginInstructions(context.Background(), func(string, string) error { called = true; return nil })
+			if err == nil || called {
+				t.Fatal("unsafe instructions accepted")
+			}
+		})
+	}
+}
+
+func TestCredentialWriterCrossProcessLock(t *testing.T) {
+	if path := os.Getenv("GOASTER_TEST_CREDENTIAL_PATH"); path != "" {
+		if err := os.WriteFile(path+".started", []byte("ready"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := (CredentialStore{Path: path}).Save(Credential{AccessToken: "child"}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
+	var cmdErr error
+	done := make(chan struct{})
+	err := store.withLock(context.Background(), func() error {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCredentialWriterCrossProcessLock$")
+		cmd.Env = append(os.Environ(), "GOASTER_TEST_CREDENTIAL_PATH="+store.Path)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		go func() { cmdErr = cmd.Wait(); close(done) }()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(store.Path + ".started"); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return errors.New("child did not start")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		select {
+		case <-done:
+			return errors.New("child wrote while lock held")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return store.save(Credential{AccessToken: "parent"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if cmdErr != nil {
+		t.Fatal(cmdErr)
+	}
+	got, err := store.Load()
+	if err != nil || got.AccessToken != "child" {
+		t.Fatalf("serialized save failed: %v", err)
+	}
 }

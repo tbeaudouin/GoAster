@@ -187,7 +187,39 @@ func (s CredentialStore) Load() (Credential, error) {
 	return credential, nil
 }
 
+func (s CredentialStore) withLock(ctx context.Context, action func() error) error {
+	if strings.TrimSpace(s.Path) == "" {
+		return fmt.Errorf("credential path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0700); err != nil {
+		return fmt.Errorf("create credential directory: %w", err)
+	}
+	f, err := os.OpenFile(s.Path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("open credential lock: %w", err)
+	}
+	defer f.Close()
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			return fmt.Errorf("lock credentials: %w", err)
+		}
+		if err = sleepContext(ctx, 20*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return action()
+}
+
 func (s CredentialStore) Save(credential Credential) error {
+	return s.withLock(context.Background(), func() error { return s.save(credential) })
+}
+
+func (s CredentialStore) save(credential Credential) error {
 	if strings.TrimSpace(s.Path) == "" {
 		return fmt.Errorf("credential path is empty")
 	}
@@ -240,9 +272,6 @@ func (s CredentialStore) Save(credential Credential) error {
 	if err := os.Rename(temporaryName, s.Path); err != nil {
 		return fmt.Errorf("replace credential file: %w", err)
 	}
-	if err := os.Chmod(s.Path, 0600); err != nil {
-		return fmt.Errorf("restrict credential file: %w", err)
-	}
 	return nil
 }
 
@@ -281,30 +310,41 @@ func NewOpenAIAuthenticator(store CredentialStore) *OpenAIAuthenticator {
 }
 
 func (a *OpenAIAuthenticator) Credential(ctx context.Context) (Credential, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	credential, err := a.Store.Load()
-	if err != nil {
-		return Credential{}, err
-	}
-	now := a.now()
-	if !credential.needsRefresh(now) {
-		return credential, nil
-	}
-	if credential.RefreshToken == "" {
-		return Credential{}, fmt.Errorf("%w: saved access token is expired and has no refresh token", ErrLoginRequired)
-	}
-	return a.refresh(ctx, credential)
+	var credential Credential
+	err := a.Store.withLock(ctx, func() error {
+		var err error
+		credential, err = a.Store.Load()
+		if err != nil || !credential.needsRefresh(a.now()) {
+			return err
+		}
+		if credential.RefreshToken == "" {
+			return fmt.Errorf("%w: saved access token is expired and has no refresh token", ErrLoginRequired)
+		}
+		credential, err = a.refresh(ctx, credential)
+		return err
+	})
+	return credential, err
 }
 
 func (a *OpenAIAuthenticator) Refresh(ctx context.Context) (Credential, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	credential, err := a.Store.Load()
-	if err != nil {
-		return Credential{}, err
-	}
-	return a.refresh(ctx, credential)
+	return a.refreshAfter(ctx, Credential{})
+}
+
+func (a *OpenAIAuthenticator) refreshAfter(ctx context.Context, rejected Credential) (Credential, error) {
+	var credential Credential
+	err := a.Store.withLock(ctx, func() error {
+		var err error
+		credential, err = a.Store.Load()
+		if err != nil {
+			return err
+		}
+		if rejected.AccessToken != "" && credential.AccessToken != rejected.AccessToken {
+			return nil
+		}
+		credential, err = a.refresh(ctx, credential)
+		return err
+	})
+	return credential, err
 }
 
 type DeviceCode struct {
@@ -360,7 +400,7 @@ func (a *OpenAIAuthenticator) RequestDeviceCode(ctx context.Context) (DeviceCode
 		verificationURL = strings.TrimSpace(result.VerifyURLAlt)
 	}
 	if verificationURL == "" {
-		verificationURL = a.endpoint("/codex/device")
+		verificationURL = openAIAuthURL + "/codex/device"
 	}
 	return DeviceCode{
 		DeviceAuthID:    result.DeviceAuthID,
@@ -370,18 +410,29 @@ func (a *OpenAIAuthenticator) RequestDeviceCode(ctx context.Context) (DeviceCode
 	}, nil
 }
 
-func (a *OpenAIAuthenticator) Login(ctx context.Context, output io.Writer) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if output == nil {
-		output = io.Discard
-	}
+// LoginInstructions reports only the verification URL and one-time code.
+func (a *OpenAIAuthenticator) LoginInstructions(ctx context.Context, instructions func(string, string) error) error {
+	ctx, cancel := context.WithTimeout(ctx, deviceCodeTimeout)
+	defer cancel()
 	deviceCode, err := a.RequestDeviceCode(ctx)
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(output, "Open %s\nEnter this one-time code: %s\nWaiting for OpenAI authorization...\n", deviceCode.VerificationURL, deviceCode.UserCode); err != nil {
-		return fmt.Errorf("write login instructions: %w", err)
+	if deviceCode.VerificationURL != openAIAuthURL+"/codex/device" {
+		return errors.New("invalid verification URL")
+	}
+	if len(deviceCode.UserCode) < 4 || len(deviceCode.UserCode) > 32 {
+		return errors.New("invalid one-time code")
+	}
+	for _, c := range deviceCode.UserCode {
+		if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+			return errors.New("invalid one-time code")
+		}
+	}
+	if instructions != nil {
+		if err := instructions(deviceCode.VerificationURL, deviceCode.UserCode); err != nil {
+			return fmt.Errorf("deliver login instructions: %w", err)
+		}
 	}
 	result, err := a.pollDeviceCode(ctx, deviceCode)
 	if err != nil {
@@ -391,11 +442,31 @@ func (a *OpenAIAuthenticator) Login(ctx context.Context, output io.Writer) error
 	if err != nil {
 		return fmt.Errorf("complete OpenAI login: %w", err)
 	}
-	if err := a.Store.Save(credential); err != nil {
+	if err := a.Store.withLock(ctx, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return a.Store.save(credential)
+	}); err != nil {
 		return fmt.Errorf("save OpenAI credentials: %w", err)
 	}
-	_, err = fmt.Fprintf(output, "OpenAI subscription authentication complete. Credentials saved to %s.\n", a.Store.Path)
-	return err
+	return nil
+}
+
+func (a *OpenAIAuthenticator) Login(ctx context.Context, output io.Writer) error {
+	if output == nil {
+		output = io.Discard
+	}
+	err := a.LoginInstructions(ctx, func(url, code string) error {
+		_, err := fmt.Fprintf(output, "Open %s\nEnter this one-time code: %s\nWaiting for OpenAI authorization...\n", url, code)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	// Authentication has committed; a terminal write failure cannot undo it.
+	_, _ = fmt.Fprintf(output, "OpenAI subscription authentication complete. Credentials saved to %s.\n", a.Store.Path)
+	return nil
 }
 
 type deviceTokenResponse struct {
@@ -517,7 +588,7 @@ func (a *OpenAIAuthenticator) refresh(ctx context.Context, current Credential) (
 	if err != nil {
 		return Credential{}, err
 	}
-	if err := a.Store.Save(credential); err != nil {
+	if err := a.Store.save(credential); err != nil {
 		return Credential{}, fmt.Errorf("save refreshed credentials: %w", err)
 	}
 	return credential, nil
@@ -1491,6 +1562,10 @@ func (p *CodexProvider) Login(ctx context.Context, output io.Writer) error {
 	return p.auth.Login(ctx, output)
 }
 
+func (p *CodexProvider) LoginInstructions(ctx context.Context, instructions func(string, string) error) error {
+	return p.auth.LoginInstructions(ctx, instructions)
+}
+
 func (p *CodexProvider) Reply(ctx context.Context, model, message string) (string, error) {
 	return p.ReplyWithHistory(ctx, model, []ChatMessage{{Role: "user", Content: message}})
 }
@@ -1594,7 +1669,7 @@ func (p *CodexProvider) modelReply(ctx context.Context, model string, history []
 	}
 	if status == http.StatusUnauthorized && PostToolAuthenticationMessage(err) == "" {
 		firstUnauthorizedErr := err
-		refreshed, refreshErr := p.auth.Refresh(ctx)
+		refreshed, refreshErr := p.auth.refreshAfter(ctx, credential)
 		if refreshErr != nil {
 			combinedErr := errors.Join(firstUnauthorizedErr, refreshErr)
 			if errors.Is(refreshErr, ErrLoginRequired) {

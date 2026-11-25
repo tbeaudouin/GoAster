@@ -500,7 +500,7 @@ func serve(store chat.CredentialStore) (serveErr error) {
 			serveErr = errors.Join(serveErr, err)
 		}
 	}()
-	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(provider.CheckAuth, setup.registry, controlSecret, provider.Login, sessionFor, deliveryQueue, backgroundManager.List), ReadHeaderTimeout: 10 * time.Second}
+	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(provider.CheckAuth, setup.registry, controlSecret, provider.LoginInstructions, sessionFor, deliveryQueue, backgroundManager.List), ReadHeaderTimeout: 10 * time.Second}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -550,7 +550,7 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 	return handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth, registry, controlSecret, nil, sessionFor, deliveryQueue, listBackground...)
 }
 
-func handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, login func(context.Context, io.Writer) error, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue, listBackground ...func(context.Context) ([]command.BackgroundSession, error)) http.Handler {
+func handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, login func(context.Context, func(string, string) error) error, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue, listBackground ...func(context.Context) ([]command.BackgroundSession, error)) http.Handler {
 	if sessionFor == nil {
 		sessionFor = func(int64, int64) agentSession { return nil }
 	}

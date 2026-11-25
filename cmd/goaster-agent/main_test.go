@@ -1453,7 +1453,7 @@ func TestRemoteLoginIsIndependentAndGatesReadiness(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("remote device login did not start")
 	}
-	if !strings.Contains(output.String(), server.URL+"/codex/device") || !strings.Contains(output.String(), "REMOTE-CODE") {
+	if !strings.Contains(output.String(), "https://auth.openai.com/codex/device") || !strings.Contains(output.String(), "REMOTE-CODE") {
 		t.Fatalf("remote login did not present its device instructions: %q", output.String())
 	}
 	check(http.StatusServiceUnavailable)
@@ -1490,10 +1490,9 @@ func TestRemoteLoginIsIndependentAndGatesReadiness(t *testing.T) {
 
 func TestLoginControlEndpointBypassesInvalidReadinessAndUsesControlAuth(t *testing.T) {
 	called := false
-	login := func(_ context.Context, output io.Writer) error {
+	login := func(_ context.Context, output func(string, string) error) error {
 		called = true
-		_, err := io.WriteString(output, "Open https://auth.example/device\nEnter this one-time code: PRIVATE-CODE\n")
-		return err
+		return output("https://auth.openai.com/codex/device", "PRIVATE-CODE")
 	}
 	checkAuth := func(context.Context) error {
 		t.Fatal("login endpoint checked the old credential")
@@ -1534,7 +1533,7 @@ func TestLoginControlEndpointBypassesInvalidReadinessAndUsesControlAuth(t *testi
 func TestLoginControlEndpointSerializesAndCancels(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	login := func(ctx context.Context, _ io.Writer) error {
+	login := func(ctx context.Context, _ func(string, string) error) error {
 		close(entered)
 		select {
 		case <-release:
@@ -1575,7 +1574,7 @@ func TestLoginControlEndpointSerializesAndCancels(t *testing.T) {
 	}
 
 	canceled := make(chan struct{})
-	login = func(ctx context.Context, _ io.Writer) error {
+	login = func(ctx context.Context, _ func(string, string) error) error {
 		<-ctx.Done()
 		close(canceled)
 		return ctx.Err()
@@ -1606,7 +1605,7 @@ func TestLoginControlEndpointRedactsFailureDetails(t *testing.T) {
 	var logs bytes.Buffer
 	restore := diagnostics.SetOutput(&logs)
 	defer restore()
-	login := func(context.Context, io.Writer) error {
+	login := func(context.Context, func(string, string) error) error {
 		return errors.New("login exchange failed token=LOGIN_TOKEN\nprivate device detail")
 	}
 	h := handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(readyAuth, chat.ModelRegistry{}, testControlSecret, login, nil, cronDeliveryQueue{})
