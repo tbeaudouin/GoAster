@@ -195,7 +195,7 @@ const (
 	telegramStartCommand                   = telegramcommands.StartCommand
 	telegramHelpCommand                    = telegramcommands.HelpCommand
 	telegramStopCommand                    = telegramcommands.StopCommand
-	telegramLoginCommand                   = telegramcommands.LoginCommand
+	telegramLoginCommand                   = telegramcommands.OpenAILoginCommand
 	telegramEnvironmentCommand             = telegramcommands.EnvironmentCommand
 	telegramGetEnvironmentCommand          = telegramcommands.GetEnvironmentCommand
 	telegramEnvironmentAcceptKeyword       = "ACCEPT"
@@ -755,7 +755,7 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 	if isLoginCommand(text) {
 		signalStarted()
 		if text != telegramLoginCommand || hasAttachment {
-			a.send(ctx, m.Chat.ID, "Use /login in a private chat without arguments or attachments.")
+			a.send(ctx, m.Chat.ID, "Use /openailogin in a private chat without arguments or attachments.")
 			return
 		}
 		if m.Chat.Type != "private" {

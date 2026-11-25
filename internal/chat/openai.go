@@ -60,7 +60,7 @@ const (
 
 var ErrLoginRequired = errors.New("OpenAI subscription authentication required")
 
-const openAILoginGuidance = "use paired private Telegram /login or run goaster-agent login"
+const openAILoginGuidance = "use paired private Telegram /openailogin or run goaster-agent login"
 
 var (
 	errCodexResponseMissing     = errors.New("Codex response is missing")

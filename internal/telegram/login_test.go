@@ -22,6 +22,7 @@ func TestPrivateOwnerLoginStreamsInstructionsWithoutReadinessCheck(t *testing.T)
 	var loginCalls int
 	a := &adapter{
 		pairing:       &pairing{userID: 42},
+		botUsername:   "ExampleBot",
 		controlSecret: "control-secret",
 		apiBase:       "https://example.invalid",
 		client: doerFunc(func(r *http.Request) (*http.Response, error) {
@@ -50,7 +51,7 @@ func TestPrivateOwnerLoginStreamsInstructionsWithoutReadinessCheck(t *testing.T)
 			return response(http.StatusOK, `{"type":"output","text":"Open https://auth.example/device\nEnter this one-time code: PRIVATE-CODE\nWaiting...\n"}`+"\n"+`{"type":"complete","text":"OpenAI subscription authentication complete."}`+"\n"), nil
 		}),
 	}
-	a.handle(context.Background(), privateMessage(42, telegramLoginCommand))
+	a.handle(context.Background(), privateMessage(42, telegramLoginCommand+"@ExampleBot"))
 	sentMu.Lock()
 	got := append([]string(nil), sent...)
 	sentMu.Unlock()
@@ -82,8 +83,17 @@ func TestLoginRequiresPrivateOwnerAndExactInvocation(t *testing.T) {
 	a.handle(context.Background(), privateMessage(99, telegramLoginCommand))
 	a.handle(context.Background(), textMessage(42, -100, "group", telegramLoginCommand))
 	a.handle(context.Background(), privateMessage(42, telegramLoginCommand+" extra"))
-	if agentCalls != 0 || len(sent) != 2 || sent[0] != "OpenAI login is available only in a private chat." || sent[1] != "Use /login in a private chat without arguments or attachments." {
+	if agentCalls != 0 || len(sent) != 2 || sent[0] != "OpenAI login is available only in a private chat." || sent[1] != "Use /openailogin in a private chat without arguments or attachments." {
 		t.Fatalf("agent calls=%d messages=%q", agentCalls, sent)
+	}
+}
+
+func TestLegacyLoginIsNotRecognizedAsTelegramLoginCommand(t *testing.T) {
+	if isLoginCommand("/login") {
+		t.Fatal("legacy /login was recognized as the Telegram login control command")
+	}
+	if !isLoginCommand("/openailogin") || !isLoginCommand("/openailogin@ExampleBot") {
+		t.Fatal("/openailogin command spellings were not recognized")
 	}
 }
 

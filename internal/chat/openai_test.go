@@ -1323,7 +1323,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	provider.auth.AuthBaseURL = server.URL
 	provider.auth.HTTPClient = server.Client()
 	_, err := provider.Reply(context.Background(), "gpt-test", "hello")
-	missingError := "OpenAI subscription authentication required: credentials were not found; use paired private Telegram /login or run goaster-agent login"
+	missingError := "OpenAI subscription authentication required: credentials were not found; use paired private Telegram /openailogin or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || !errors.Is(err, errCredentialsMissing) || err.Error() != missingError {
 		t.Fatalf("authentication error = %v", err)
 	}
@@ -1351,7 +1351,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	var output bytes.Buffer
 	err = runChatLoopWithUI(context.Background(), TerminalInput{reader: strings.NewReader("hello\n"), interactive: true}, &output,
 		NewSession(Config{Model: "gpt-test"}, provider), terminalStore,
-		EnvironmentFilePickerFunc(func() (string, error) { return "", ErrEnvironmentFilePickerCanceled }), terminalUI{interactive: true, width: 100})
+		EnvironmentFilePickerFunc(func() (string, error) { return "", ErrEnvironmentFilePickerCanceled }), terminalUI{interactive: true, width: 140})
 	if err != nil || !strings.Contains(output.String(), requestFailureCredentialsMissing) || strings.Contains(output.String(), missingError) {
 		t.Fatalf("missing credentials interactive error = %v, output %q", err, output.String())
 	}
@@ -1360,7 +1360,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 		t.Fatal(err)
 	}
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	malformedError := "OpenAI subscription authentication required: parse credential file: unexpected end of JSON input; use paired private Telegram /login or run goaster-agent login"
+	malformedError := "OpenAI subscription authentication required: parse credential file: unexpected end of JSON input; use paired private Telegram /openailogin or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || errors.Is(err, errCredentialsMissing) || err.Error() != malformedError {
 		t.Fatalf("malformed credentials error = %v", err)
 	}
@@ -1376,7 +1376,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 		t.Fatal(err)
 	}
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	expiredError := "OpenAI subscription authentication required: saved access token is expired and has no refresh token; use paired private Telegram /login or run goaster-agent login"
+	expiredError := "OpenAI subscription authentication required: saved access token is expired and has no refresh token; use paired private Telegram /openailogin or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || err.Error() != expiredError || !strings.Contains(requestFailureDiagnostic(err), expiredError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("expired credentials error = %v", err)
 	}
@@ -1386,7 +1386,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	}
 	refreshStatus.Store(http.StatusUnauthorized)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	rejectedRefreshError := "OpenAI session expired; use paired private Telegram /login or run goaster-agent login:"
+	rejectedRefreshError := "OpenAI session expired; use paired private Telegram /openailogin or run goaster-agent login:"
 	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refresh error = %v", err)
 	}
@@ -1406,7 +1406,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	checkLineError(refreshFailureError, "Codex backend request failed with status 401 Unauthorized", "token refresh failed with status 500 Internal Server Error")
 	refreshStatus.Store(http.StatusOK)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	unauthorizedError := "OpenAI subscription authentication required; use paired private Telegram /login or run goaster-agent login:"
+	unauthorizedError := "OpenAI subscription authentication required; use paired private Telegram /openailogin or run goaster-agent login:"
 	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refreshed credentials error = %v", err)
 	}
