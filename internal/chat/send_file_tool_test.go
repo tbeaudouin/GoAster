@@ -160,7 +160,14 @@ func TestSendFileToolRejectsMissingContextAndUnsafeFiles(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "directory"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "large.bin"), bytes.Repeat([]byte{0x7f}, int(sendFileMaxBytes+1)), 0600); err != nil {
+	large, err := os.Create(filepath.Join(root, "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := large.Truncate(sendFileMaxBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := large.Close(); err != nil {
 		t.Fatal(err)
 	}
 	symlinkPath := filepath.Join(root, "linked.bin")
@@ -240,4 +247,54 @@ func TestSendFileToolDoesNotReplayUncertainDelivery(t *testing.T) {
 	if strings.Contains(result, "private transport detail") {
 		t.Fatalf("tool feedback exposed sender detail: %q", result)
 	}
+}
+
+func TestSendFileToolSizeBoundaries(t *testing.T) {
+	root := setupFileToolWorkspace(t)
+	var calls int
+	var received int
+	handler := sendFileToolHandler(t, func(_ context.Context, _, _ int64, _ string, data []byte) error {
+		calls++
+		received = len(data)
+		return nil
+	})
+	for _, size := range []int64{(8 << 20) + 1, 50_000_000, 50_000_001} {
+		path := filepath.Join(root, "boundary.bin")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before := calls
+		var result string
+		log := captureSendFileDiagnostics(func() { result, err = handler(sendFileTelegramContext("private", 42, 0), `{"path":"boundary.bin"}`) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size <= 50_000_000 {
+			if calls != before+1 || received != int(size) || !strings.Contains(result, "confirmed") {
+				t.Fatalf("size %d: result %q calls %d received %d", size, result, calls, received)
+			}
+		} else {
+			if calls != before || !strings.Contains(result, "another file-transfer service") || !strings.Contains(result, "creating a skill") || !strings.Contains(result, "chosen by the user") {
+				t.Fatalf("size %d: result %q calls %d", size, result, calls)
+			}
+			if !strings.Contains(log, "ERROR operation=chat.send_file") || !strings.Contains(log, "size limit") || strings.Contains(log, path) {
+				t.Fatalf("unsafe or missing diagnostic: %q", log)
+			}
+		}
+	}
+}
+
+func captureSendFileDiagnostics(fn func()) string {
+	var log bytes.Buffer
+	restore := diagnostics.SetOutput(&log)
+	defer restore()
+	fn()
+	return log.String()
 }

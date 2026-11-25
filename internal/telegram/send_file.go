@@ -9,7 +9,7 @@ import (
 	"goaster/internal/diagnostics"
 )
 
-const telegramSendFileMaxBytes int64 = 8 << 20
+const telegramSendFileMaxBytes int64 = 50_000_000
 
 // telegramSendFileError keeps the underlying cause available to the runtime
 // while exposing only a fixed, secret-free message to callers.
@@ -29,7 +29,10 @@ func SendFile(ctx context.Context, chatID, threadID int64, filename string, data
 }
 
 func sendFileWith(ctx context.Context, paths Paths, client httpDoer, apiBase string, chatID, threadID int64, filename string, data []byte) error {
-	if ctx == nil || chatID == 0 || threadID < 0 || strings.TrimSpace(filename) == "" || int64(len(data)) > telegramSendFileMaxBytes {
+	if !telegramSendFileSizeAllowed(int64(len(data))) {
+		return telegramSendFileConfigurationFailure(errors.New("Telegram send_file exceeds the size limit"))
+	}
+	if ctx == nil || chatID == 0 || threadID < 0 || strings.TrimSpace(filename) == "" {
 		return telegramSendFileConfigurationFailure(errors.New("invalid Telegram file delivery request"))
 	}
 	token, err := readPrivate(paths.Token)
@@ -44,6 +47,10 @@ func sendFileWith(ctx context.Context, paths Paths, client httpDoer, apiBase str
 		return telegramSendFileError{cause: err}
 	}
 	return nil
+}
+
+func telegramSendFileSizeAllowed(size int64) bool {
+	return size >= 0 && size <= telegramSendFileMaxBytes
 }
 
 func telegramSendFileConfigurationFailure(err error) error {

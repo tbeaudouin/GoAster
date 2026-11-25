@@ -745,6 +745,7 @@ func knownDescription(message string) string {
 		"Codex requested a tool in a tool-free request", "request contains multiple JSON values",
 		"Telegram client is unavailable", "Telegram response body is missing", "Telegram response contained no update list", "Telegram response body exceeds the limit",
 		"remote agent client is unavailable", "agent response body is missing", "agent response contained no final reply",
+		"file exceeds the send_file size limit", "Telegram send_file exceeds the size limit",
 		"attachment has no Telegram file ID", "attachment exceeds the size limit", "Telegram file metadata is invalid or exceeds the size limit",
 		"Telegram file response is missing", "Telegram file response body is missing", "Telegram file download returned an unacceptable response", "Telegram file exceeds the size limit", "HCLOUD_TOKEN is not configured":
 		return message

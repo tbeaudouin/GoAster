@@ -17,14 +17,14 @@ import (
 
 const (
 	sendFileToolName               = "send_file"
-	sendFileMaxBytes         int64 = fileToolMaxContentBytes
+	sendFileMaxBytes         int64 = 50_000_000
 	sendFileMaxFilenameBytes       = 180
 )
 
 var sendFileCodexTool = codexTool{
 	Type:        "function",
 	Name:        sendFileToolName,
-	Description: "Send a regular file from GoAster's private artefact workspace to the current authenticated Telegram conversation. The destination and exact forum topic come from the current transport-bound conversation, never from tool arguments. Binary files such as ZIP archives are supported; symbolic links, paths outside the workspace, directories, FIFOs, other non-regular files, and files larger than 8 MiB are rejected. An optional filename must be a safe basename.",
+	Description: "Send a regular file from GoAster's private artefact workspace to the current authenticated Telegram conversation. The destination and exact forum topic come from the current transport-bound conversation, never from tool arguments. Binary files such as ZIP archives are supported; symbolic links, paths outside the workspace, directories, FIFOs, other non-regular files, and files larger than 50,000,000 bytes (50 MB) are rejected. An optional filename must be a safe basename.",
 	Parameters: map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -218,7 +218,7 @@ func sendFileLocalFailure(err error) string {
 	case strings.Contains(err.Error(), "not a regular"):
 		return "send_file failed: the path is not a regular file."
 	case strings.Contains(err.Error(), "size limit"):
-		return "send_file failed: the file exceeds the 8 MiB limit."
+		return "send_file failed: the file exceeds the 50,000,000-byte (50 MB) limit. Suggest another file-transfer service to the user; if no suitable service or skill exists, suggest creating a skill for a service chosen by the user."
 	}
 	return "send_file failed: the file is unavailable or is not a bounded regular file."
 }

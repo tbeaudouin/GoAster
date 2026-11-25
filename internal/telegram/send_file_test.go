@@ -167,16 +167,19 @@ func TestSendFileWithMissingTokenIsSecretSafe(t *testing.T) {
 }
 
 func TestSendFileWithRejectsOversizeBeforeTransport(t *testing.T) {
-	paths := Paths{Token: filepath.Join(t.TempDir(), "token")}
-	if err := writePrivate(paths.Token, []byte(testToken)); err != nil {
-		t.Fatal(err)
-	}
+	paths := Paths{Token: filepath.Join(t.TempDir(), "missing-token")}
 	calls := 0
-	data := bytes.Repeat([]byte{0x7f}, int(telegramSendFileMaxBytes+1))
-	err := sendFileWith(context.Background(), paths, doerFunc(func(*http.Request) (*http.Response, error) {
-		calls++
-		return response(http.StatusOK, `{"ok":true}`), nil
-	}), "https://telegram.synthetic", 42, 0, "file.zip", data)
+	data := make([]byte, int(telegramSendFileMaxBytes+1))
+	var err error
+	log := captureTelegramDiagnostics(t, func() {
+		err = sendFileWith(context.Background(), paths, doerFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return response(http.StatusOK, `{"ok":true}`), nil
+		}), "https://telegram.synthetic", 42, 0, "file.zip", data)
+	})
+	if !strings.Contains(log, "Telegram send_file exceeds the size limit") || strings.Contains(log, paths.Token) {
+		t.Fatalf("diagnostic = %q", log)
+	}
 	if err == nil || calls != 0 {
 		t.Fatalf("oversize result = %v, transport calls = %d", err, calls)
 	}
@@ -186,5 +189,16 @@ func TestSendFileToolFeedbackWithholdsArguments(t *testing.T) {
 	feedback := toolFeedbackText("send_file", `{"path":"/private/artefacts/archive.zip","filename":"archive.zip","token":"secret"}`)
 	if !strings.Contains(feedback, "send_file") || strings.Contains(feedback, "/private/artefacts") || strings.Contains(feedback, "archive.zip") || strings.Contains(feedback, "secret") {
 		t.Fatalf("send_file feedback exposed arguments: %q", feedback)
+	}
+}
+
+func TestTelegramSendFileSizeBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		size    int64
+		allowed bool
+	}{{(8 << 20) + 1, true}, {50_000_000, true}, {50_000_001, false}, {-1, false}} {
+		if got := telegramSendFileSizeAllowed(test.size); got != test.allowed {
+			t.Errorf("size %d allowed = %v", test.size, got)
+		}
 	}
 }
