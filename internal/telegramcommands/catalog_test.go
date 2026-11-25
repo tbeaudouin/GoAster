@@ -50,7 +50,7 @@ func TestHelpContainsOnlyOneConciseLinePerCommand(t *testing.T) {
 }
 
 func TestMenuIncludesSupportedCommands(t *testing.T) {
-	want := []string{"help", "stop", "restart", "start", "pair", "clear", "m", "env", "getenv"}
+	want := []string{"help", "stop", "restart", "login", "start", "pair", "clear", "m", "env", "getenv"}
 	menu := Menu()
 	if len(menu) != len(want) {
 		t.Fatalf("menu count = %d, want %d: %#v", len(menu), len(want), menu)
@@ -71,6 +71,8 @@ func TestMenuIncludesSupportedCommands(t *testing.T) {
 func TestReferenceContainsCanonicalCommandsAndAccessRequirements(t *testing.T) {
 	reference := Reference()
 	for _, want := range []string{
+		"## /login",
+		"Access requirements: Paired account only, private chat only.",
 		"## /getenv",
 		"Primary command: `/getenv`",
 		"Aliases: none",

@@ -60,6 +60,8 @@ const (
 
 var ErrLoginRequired = errors.New("OpenAI subscription authentication required")
 
+const openAILoginGuidance = "use paired private Telegram /login or run goaster-agent login"
+
 var (
 	errCodexResponseMissing     = errors.New("Codex response is missing")
 	errCodexResponseBodyMissing = errors.New("Codex response body is missing")
@@ -369,6 +371,11 @@ func (a *OpenAIAuthenticator) RequestDeviceCode(ctx context.Context) (DeviceCode
 }
 
 func (a *OpenAIAuthenticator) Login(ctx context.Context, output io.Writer) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if output == nil {
+		output = io.Discard
+	}
 	deviceCode, err := a.RequestDeviceCode(ctx)
 	if err != nil {
 		return err
@@ -1474,6 +1481,16 @@ func (p *CodexProvider) EnsureAuth(ctx context.Context, outputs ...io.Writer) er
 	return nil
 }
 
+// Login starts a fresh device login without consulting or deleting the saved
+// credential first. CredentialStore.Save replaces it atomically only after a
+// complete login, so an invalid old credential does not block re-login.
+func (p *CodexProvider) Login(ctx context.Context, output io.Writer) error {
+	if output == nil {
+		output = io.Discard
+	}
+	return p.auth.Login(ctx, output)
+}
+
 func (p *CodexProvider) Reply(ctx context.Context, model, message string) (string, error) {
 	return p.ReplyWithHistory(ctx, model, []ChatMessage{{Role: "user", Content: message}})
 }
@@ -1558,7 +1575,7 @@ func (p *CodexProvider) modelReply(ctx context.Context, model string, history []
 	credential, err := p.auth.Credential(ctx)
 	if err != nil {
 		if errors.Is(err, ErrLoginRequired) {
-			return "", fmt.Errorf("%w; restart GoAster to authenticate", err)
+			return "", fmt.Errorf("%w; %s", err, openAILoginGuidance)
 		}
 		return "", fmt.Errorf("OpenAI subscription credential lookup failed: %w", err)
 	}
@@ -1581,7 +1598,7 @@ func (p *CodexProvider) modelReply(ctx context.Context, model string, history []
 		if refreshErr != nil {
 			combinedErr := errors.Join(firstUnauthorizedErr, refreshErr)
 			if errors.Is(refreshErr, ErrLoginRequired) {
-				return "", authenticationRequestError{cause: fmt.Errorf("OpenAI session expired; restart GoAster to authenticate: %w", combinedErr)}
+				return "", authenticationRequestError{cause: fmt.Errorf("OpenAI session expired; %s: %w", openAILoginGuidance, combinedErr)}
 			}
 			return "", fmt.Errorf("OpenAI credential refresh failed: %w", combinedErr)
 		}
@@ -1613,7 +1630,7 @@ func (p *CodexProvider) modelReply(ctx context.Context, model string, history []
 			if PostToolAuthenticationMessage(err) != "" {
 				return "", err
 			}
-			return "", authenticationRequestError{cause: fmt.Errorf("%w; restart GoAster to authenticate: %w", ErrLoginRequired, err)}
+			return "", authenticationRequestError{cause: fmt.Errorf("%w; %s: %w", ErrLoginRequired, openAILoginGuidance, err)}
 		}
 		if status == http.StatusNotFound {
 			return "", fmt.Errorf("%w: Codex model %s was not found: %w", ErrModelUnavailable, model, err)

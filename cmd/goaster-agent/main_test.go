@@ -26,6 +26,7 @@ import (
 	"goaster/internal/chat"
 	"goaster/internal/command"
 	"goaster/internal/controlsecret"
+	"goaster/internal/controltransport"
 	"goaster/internal/diagnostics"
 	"goaster/internal/localenv"
 )
@@ -1484,6 +1485,140 @@ func TestRemoteLoginIsIndependentAndGatesReadiness(t *testing.T) {
 		if err != nil || info.Mode().Perm() != want {
 			t.Fatalf("permissions for %s: %v, want %04o", path, err, want)
 		}
+	}
+}
+
+func TestLoginControlEndpointBypassesInvalidReadinessAndUsesControlAuth(t *testing.T) {
+	called := false
+	login := func(_ context.Context, output io.Writer) error {
+		called = true
+		_, err := io.WriteString(output, "Open https://auth.example/device\nEnter this one-time code: PRIVATE-CODE\n")
+		return err
+	}
+	checkAuth := func(context.Context) error {
+		t.Fatal("login endpoint checked the old credential")
+		return chat.ErrLoginRequired
+	}
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth, chat.ModelRegistry{}, testControlSecret, login, nil, cronDeliveryQueue{})
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765"+controltransport.LoginPath, nil)
+	request.Header.Set(controlAuthorizationHeader, testControlSecret)
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !called {
+		t.Fatalf("login response = %d %v, called=%v", recorder.Code, recorder.Body.String(), called)
+	}
+	var events []agentLoginEvent
+	decoder := json.NewDecoder(strings.NewReader(recorder.Body.String()))
+	for {
+		var event agentLoginEvent
+		err := decoder.Decode(&event)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if len(events) != 2 || events[0].Type != controltransport.LoginOutputEvent || !strings.Contains(events[0].Text, "PRIVATE-CODE") || events[1].Type != controltransport.LoginCompleteEvent {
+		t.Fatalf("login events = %#v", events)
+	}
+	unauthorized := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765"+controltransport.LoginPath, nil)
+	h.ServeHTTP(unauthorized, request)
+	if unauthorized.Code != http.StatusUnauthorized || called != true {
+		t.Fatalf("unauthorized login response = %d, called=%v", unauthorized.Code, called)
+	}
+}
+
+func TestLoginControlEndpointSerializesAndCancels(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	login := func(ctx context.Context, _ io.Writer) error {
+		close(entered)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(readyAuth, chat.ModelRegistry{}, testControlSecret, login, nil, cronDeliveryQueue{})
+	firstDone := make(chan struct{})
+	firstRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765"+controltransport.LoginPath, nil)
+	firstRequest.Header.Set(controlAuthorizationHeader, testControlSecret)
+	firstRecorder := httptest.NewRecorder()
+	go func() {
+		h.ServeHTTP(firstRecorder, firstRequest)
+		close(firstDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("login did not start")
+	}
+	second := httptest.NewRecorder()
+	secondRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765"+controltransport.LoginPath, nil)
+	secondRequest.Header.Set(controlAuthorizationHeader, testControlSecret)
+	h.ServeHTTP(second, secondRequest)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("concurrent login status = %d, want conflict", second.Code)
+	}
+	close(release)
+	select {
+	case <-firstDone:
+		if firstRecorder.Code != http.StatusOK {
+			t.Fatalf("first login status = %d", firstRecorder.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("login did not finish")
+	}
+
+	canceled := make(chan struct{})
+	login = func(ctx context.Context, _ io.Writer) error {
+		<-ctx.Done()
+		close(canceled)
+		return ctx.Err()
+	}
+	h = handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(readyAuth, chat.ModelRegistry{}, testControlSecret, login, nil, cronDeliveryQueue{})
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765"+controltransport.LoginPath, nil).WithContext(ctx)
+	request.Header.Set(controlAuthorizationHeader, testControlSecret)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(), request)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("login did not receive cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("canceled login handler did not finish")
+	}
+}
+
+func TestLoginControlEndpointRedactsFailureDetails(t *testing.T) {
+	var logs bytes.Buffer
+	restore := diagnostics.SetOutput(&logs)
+	defer restore()
+	login := func(context.Context, io.Writer) error {
+		return errors.New("login exchange failed token=LOGIN_TOKEN\nprivate device detail")
+	}
+	h := handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(readyAuth, chat.ModelRegistry{}, testControlSecret, login, nil, cronDeliveryQueue{})
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765"+controltransport.LoginPath, nil)
+	request.Header.Set(controlAuthorizationHeader, testControlSecret)
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "LOGIN_TOKEN") || strings.Contains(recorder.Body.String(), "private device detail") {
+		t.Fatalf("login failure response = %d %q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(logs.String(), "ERROR operation=agent.login") || strings.Contains(logs.String(), "LOGIN_TOKEN") || strings.Contains(logs.String(), "private device detail") {
+		t.Fatalf("login failure diagnostic = %q", logs.String())
 	}
 }
 

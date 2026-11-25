@@ -255,6 +255,49 @@ func TestOpenAIAuthenticatorDeviceLogin(t *testing.T) {
 	}
 }
 
+func TestOpenAIAuthenticatorLoginReplacesInvalidCredentialWithoutBackup(t *testing.T) {
+	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
+	if err := os.WriteFile(store.Path, []byte("not valid JSON"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			fmt.Fprint(w, `{"device_auth_id":"device","user_code":"NEW-CODE","interval":1}`)
+		case "/api/accounts/deviceauth/token":
+			fmt.Fprint(w, `{"authorization_code":"authorization-code","code_verifier":"verifier"}`)
+		case "/oauth/token":
+			fmt.Fprint(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	authenticator := NewOpenAIAuthenticator(store)
+	authenticator.AuthBaseURL = server.URL
+	authenticator.HTTPClient = server.Client()
+	authenticator.Sleep = func(context.Context, time.Duration) error { return nil }
+	if err := authenticator.Login(context.Background(), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.AccessToken != "new-access" || credential.RefreshToken != "new-refresh" {
+		t.Fatalf("replaced credential = %+v", credential)
+	}
+	entries, err := os.ReadDir(filepath.Dir(store.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".bak") || strings.HasPrefix(entry.Name(), ".auth-") {
+			t.Fatalf("login left a credential backup or temporary file: %q", entry.Name())
+		}
+	}
+}
+
 func TestCodexProviderEnsureAuthStartsDeviceLoginBeforeChat(t *testing.T) {
 	store := CredentialStore{Path: filepath.Join(t.TempDir(), "auth.json")}
 	var pollCount atomic.Int32
@@ -1261,7 +1304,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	provider.auth.AuthBaseURL = server.URL
 	provider.auth.HTTPClient = server.Client()
 	_, err := provider.Reply(context.Background(), "gpt-test", "hello")
-	missingError := "OpenAI subscription authentication required: credentials were not found; restart GoAster to authenticate"
+	missingError := "OpenAI subscription authentication required: credentials were not found; use paired private Telegram /login or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || !errors.Is(err, errCredentialsMissing) || err.Error() != missingError {
 		t.Fatalf("authentication error = %v", err)
 	}
@@ -1298,7 +1341,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 		t.Fatal(err)
 	}
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	malformedError := "OpenAI subscription authentication required: parse credential file: unexpected end of JSON input; restart GoAster to authenticate"
+	malformedError := "OpenAI subscription authentication required: parse credential file: unexpected end of JSON input; use paired private Telegram /login or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || errors.Is(err, errCredentialsMissing) || err.Error() != malformedError {
 		t.Fatalf("malformed credentials error = %v", err)
 	}
@@ -1314,7 +1357,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 		t.Fatal(err)
 	}
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	expiredError := "OpenAI subscription authentication required: saved access token is expired and has no refresh token; restart GoAster to authenticate"
+	expiredError := "OpenAI subscription authentication required: saved access token is expired and has no refresh token; use paired private Telegram /login or run goaster-agent login"
 	if !errors.Is(err, ErrLoginRequired) || err.Error() != expiredError || !strings.Contains(requestFailureDiagnostic(err), expiredError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("expired credentials error = %v", err)
 	}
@@ -1324,7 +1367,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	}
 	refreshStatus.Store(http.StatusUnauthorized)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	rejectedRefreshError := "OpenAI session expired; restart GoAster to authenticate:"
+	rejectedRefreshError := "OpenAI session expired; use paired private Telegram /login or run goaster-agent login:"
 	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), rejectedRefreshError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refresh error = %v", err)
 	}
@@ -1344,7 +1387,7 @@ func TestCodexProviderRequiresStartupAuthenticationBeforeBackendRequest(t *testi
 	checkLineError(refreshFailureError, "Codex backend request failed with status 401 Unauthorized", "token refresh failed with status 500 Internal Server Error")
 	refreshStatus.Store(http.StatusOK)
 	_, err = provider.Reply(context.Background(), "gpt-test", "hello")
-	unauthorizedError := "OpenAI subscription authentication required; restart GoAster to authenticate:"
+	unauthorizedError := "OpenAI subscription authentication required; use paired private Telegram /login or run goaster-agent login:"
 	if !errors.Is(err, ErrLoginRequired) || !strings.HasPrefix(err.Error(), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), unauthorizedError) || !strings.Contains(requestFailureDiagnostic(err), requestFailureAuthentication) {
 		t.Fatalf("rejected refreshed credentials error = %v", err)
 	}

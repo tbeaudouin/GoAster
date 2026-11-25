@@ -98,6 +98,14 @@ requests in that chat run in order; `/m` remains available during a turn.
 
 The paired account can send bare `/restart` to restart the idle `goaster-agent.service` on systemd installations. The adapter refuses while Telegram requests or agent work are active; use `/stop` for an active turn and try again when idle. It acknowledges before restarting and reports readiness only after the service restart completes and the health check succeeds. If the restart outcome is uncertain, further work remains blocked and the service status must be verified manually. Scheduled work refused by the restart guard is retained for a later attempt. Conversation histories and credentials are retained.
 
+If OpenAI authentication is unavailable, the paired account can send bare
+`/login` in a private Telegram chat. GoAster sends the one-time device
+instructions only to that chat and replaces the remote agent credential only
+after login completes; use `/stop` to cancel. If the login transport outcome is
+uncertain, check the agent status before trying again. The terminal equivalent
+is `goaster-agent login`; neither flow backs up or copies an existing
+credential file.
+
 The adapter handles ordinary text, one image or document attachment, and
 `/clear`. Media is validated and bounded before the current turn; temporary
 files are private and removed after the request. Telegram bot tokens and

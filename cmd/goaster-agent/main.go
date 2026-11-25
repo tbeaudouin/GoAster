@@ -500,7 +500,7 @@ func serve(store chat.CredentialStore) (serveErr error) {
 			serveErr = errors.Join(serveErr, err)
 		}
 	}()
-	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntime(provider.CheckAuth, setup.registry, controlSecret, sessionFor, deliveryQueue, backgroundManager.List), ReadHeaderTimeout: 10 * time.Second}
+	server := http.Server{Handler: handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(provider.CheckAuth, setup.registry, controlSecret, provider.Login, sessionFor, deliveryQueue, backgroundManager.List), ReadHeaderTimeout: 10 * time.Second}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -547,6 +547,10 @@ func handlerWithMemoryAndRegistryWithSecret(provider chat.Provider, memory *chat
 }
 
 func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue, listBackground ...func(context.Context) ([]command.BackgroundSession, error)) http.Handler {
+	return handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth, registry, controlSecret, nil, sessionFor, deliveryQueue, listBackground...)
+}
+
+func handlerWithMemoryAndRegistryWithSecretAndRuntimeAndLogin(checkAuth func(context.Context) error, registry chat.ModelRegistry, controlSecret string, login func(context.Context, io.Writer) error, sessionFor func(int64, int64) agentSession, deliveryQueue cronDeliveryQueue, listBackground ...func(context.Context) ([]command.BackgroundSession, error)) http.Handler {
 	if sessionFor == nil {
 		sessionFor = func(int64, int64) agentSession { return nil }
 	}
@@ -651,6 +655,9 @@ func handlerWithMemoryAndRegistryWithSecretAndRuntime(checkAuth func(context.Con
 		}{Acknowledged: true}); err != nil {
 			diagnostics.Error("agent.cron.outbox.ack_encode", err)
 		}
+	})
+	mux.HandleFunc(controltransport.LoginPath, func(w http.ResponseWriter, r *http.Request) {
+		handleAgentLogin(w, r, controlSecret, login)
 	})
 	mux.HandleFunc("/internal/restart-guard", func(w http.ResponseWriter, r *http.Request) {
 		if !validControlRequest(r, controlSecret) {

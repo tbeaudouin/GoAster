@@ -41,6 +41,8 @@ type adapter struct {
 	queuedWork               int
 	restarting               bool
 	restartService           func(context.Context) error
+	loginActive              bool
+	loginBlocked             bool
 	environmentMu            sync.Mutex
 	environmentBlocked       map[environmentProposalKey]bool
 	client                   httpDoer
@@ -194,6 +196,7 @@ const (
 	telegramStartCommand                   = telegramcommands.StartCommand
 	telegramHelpCommand                    = telegramcommands.HelpCommand
 	telegramStopCommand                    = telegramcommands.StopCommand
+	telegramLoginCommand                   = telegramcommands.LoginCommand
 	telegramEnvironmentCommand             = telegramcommands.EnvironmentCommand
 	telegramGetEnvironmentCommand          = telegramcommands.GetEnvironmentCommand
 	telegramEnvironmentAcceptKeyword       = "ACCEPT"
@@ -375,7 +378,8 @@ func (a *adapter) run(ctx context.Context, ready func() error) error {
 						}
 					}
 				}
-				isControl := isRestart || isStop || !isClear && (chat.IsClearCommand(text) || chat.IsModelCommand(text))
+				isLogin := isLoginCommand(text)
+				isControl := isRestart || isLogin || isStop || !isClear && (chat.IsClearCommand(text) || chat.IsModelCommand(text))
 				if !isControl && !isClear {
 					if epochs[m.Chat.ID] == nil {
 						epochs[m.Chat.ID], epochCancels[m.Chat.ID] = context.WithCancel(ctx)
@@ -747,6 +751,19 @@ func (a *adapter) handle(ctx context.Context, m *message) {
 			return
 		}
 		a.restart(ctx, m.Chat.ID)
+		return
+	}
+	if isLoginCommand(text) {
+		signalStarted()
+		if text != telegramLoginCommand || hasAttachment {
+			a.send(ctx, m.Chat.ID, "Use /login in a private chat without arguments or attachments.")
+			return
+		}
+		if m.Chat.Type != "private" {
+			a.send(ctx, m.Chat.ID, "OpenAI login is available only in a private chat.")
+			return
+		}
+		a.runLogin(ctx, *m)
 		return
 	}
 	if chat.ValidClearCommand(text) && !hasAttachment && ctx.Value(telegramOrderedClearKey{}) == nil {

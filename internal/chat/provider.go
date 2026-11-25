@@ -32,7 +32,7 @@ const (
 	unknownActionWarning           = "Scheduled run was interrupted and its action status is unknown. Actions may already have completed and tool results may be unavailable. Check and reconcile external state before retrying."
 
 	requestFailureAuthentication     = "Authentication is required to continue. Check your OpenAI sign-in and account status."
-	requestFailureCredentialsMissing = "OpenAI credentials were not found. Restart GoAster to initiate sign-in."
+	requestFailureCredentialsMissing = "OpenAI credentials were not found. Use paired private Telegram /login or goaster-agent login."
 	requestFailureTimeout            = "The request timed out."
 	requestFailureModelUnavailable   = "The selected model is unavailable."
 	requestFailureInterrupted        = "The request was interrupted."

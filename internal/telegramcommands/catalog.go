@@ -11,6 +11,7 @@ const (
 	HelpCommand              = "/help"
 	StopCommand              = "/stop"
 	RestartCommand           = "/restart"
+	LoginCommand             = "/login"
 	StartCommand             = "/start"
 	PairCommand              = "/pair"
 	ClearCommand             = "/clear"
@@ -58,6 +59,13 @@ var catalog = []Command{
 		Name: "restart", Usage: "/restart", HelpDescription: "Restart the idle agent.", MenuDescription: "Restart the idle agent", Access: "Paired account only. Use /restart without attachments; active work must finish first.",
 	},
 	{
+		Name:            "login",
+		Usage:           "/login",
+		HelpDescription: "Re-authenticate OpenAI.",
+		MenuDescription: "Re-authenticate OpenAI",
+		Access:          "Paired account only, private chat only. Use /login without arguments or attachments; device instructions are sent only to this private chat. Use /stop to cancel.",
+	},
+	{
 		Name:            "start",
 		Usage:           "/start",
 		HelpDescription: "Show pairing or readiness guidance.",
@@ -102,7 +110,7 @@ var catalog = []Command{
 }
 
 const referenceSharedBehavior = "Before pairing, /help and bare /start provide guidance in private chats; pairing requires a private chat. After pairing, only the paired account can use the bot, and bare /start or /pair provide readiness guidance in private chats, groups, and supergroups. " +
-	"Telegram topics in the same chat share conversation history and model settings. /env, ACCEPT, and /getenv require a private chat. All commands accept an @username suffix matching this bot; commands addressed to another bot are ignored."
+	"Telegram topics in the same chat share conversation history and model settings. /login, /env, ACCEPT, and /getenv require a private chat. All commands accept an @username suffix matching this bot; commands addressed to another bot are ignored."
 
 // Catalog returns the supported commands in their stable display order.
 func Catalog() []Command {
