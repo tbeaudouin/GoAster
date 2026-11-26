@@ -6,7 +6,7 @@
 
 ## ✨ Meet GoAster
 
-GoAster is a minimal alternative to OpenClaw and PicoClaw. Set up in minutes, then let your agent help you build your own version.
+Inspired by OpenClaw and PicoClaw. Like a minimal, open-source Codex or Claude Code, running on your own server and yours to extend.
 
 The shared core stays minimal. Your fork becomes whatever you need.
 
