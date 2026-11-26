@@ -6,7 +6,9 @@
 
 ## ✨ Meet GoAster
 
-GoAster is an AI agent for small startup teams doing software, analytics, product, and business work. It is a practical companion with a bit of stardust:
+GoAster is a minimal alternative to OpenClaw and PicoClaw. Set up in minutes, then let your agent help you build your own version.
+
+The shared core stays minimal. Your fork becomes whatever you need.
 
 ## Why GoAster?
 
