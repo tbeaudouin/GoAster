@@ -19,6 +19,7 @@ import (
 
 	"goaster/internal/attachment"
 	"goaster/internal/command"
+	"goaster/internal/testfixture"
 )
 
 // The root test process stands in for the adapter. The child runs the actual
@@ -27,7 +28,16 @@ func TestRootAdapterCanSendBytesToUnprivilegedAgent(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to start an unprivileged child")
 	}
-	root, err := os.MkdirTemp("", "goaster-privilege-test-")
+	// The child needs its own fixture outside the root-only task directory.
+	tmpInfo, err := os.Lstat("/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := tmpInfo.Sys().(*syscall.Stat_t)
+	if !ok || !tmpInfo.IsDir() || tmpInfo.Mode()&os.ModeSticky == 0 || stat.Uid != 0 {
+		t.Fatal("/tmp is not a trusted system directory")
+	}
+	root, err := os.MkdirTemp("/tmp", "goaster-privilege-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,9 +67,9 @@ func TestRootAdapterCanSendBytesToUnprivilegedAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := exec.Command("/proc/self/exe", "-test.run=^TestUnprivilegedAgentHelper$")
+	child := exec.Command(testfixture.Executable(t, agentUID, agentGID), "-test.run=^TestUnprivilegedAgentHelper$")
 	child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: agentUID, Gid: agentGID}}
-	child.Env = append(os.Environ(), "TMPDIR="+agentTemp, "HOME="+agentHome, "GOASTER_PRIVILEGE_TEST=1")
+	child.Env = append(os.Environ(), "TMPDIR="+agentTemp, "TMP="+agentTemp, "TEMP="+agentTemp, "HOME="+agentHome, "GOASTER_PRIVILEGE_TEST=1")
 	child.Stdin = bytes.NewReader(body)
 	if output, err := child.CombinedOutput(); err != nil {
 		t.Fatalf("unprivileged agent failed: %v\n%s", err, output)

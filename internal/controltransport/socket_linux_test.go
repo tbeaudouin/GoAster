@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"goaster/internal/testfixture"
 )
 
 // Use a short temporary path: Linux Unix socket names have a small length
@@ -247,7 +249,7 @@ func TestSocketRejectsUnprivilegedPeerBeforeSendingSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer directory.Close()
-	child := exec.Command("/proc/self/exe", "-test.run=^TestUnprivilegedSocketPeerHelper$")
+	child := exec.Command(testfixture.Executable(t, 65534, 65534), "-test.run=^TestUnprivilegedSocketPeerHelper$")
 	child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
 	child.ExtraFiles = []*os.File{directory}
 	child.Env = append(os.Environ(), "GOASTER_SOCKET_PEER_HELPER=1")
@@ -360,7 +362,7 @@ func TestPrivateSocketDirectoryRejectsUnprivilegedAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer parent.Close()
-	child := exec.Command("/proc/self/exe", "-test.run=^TestUnprivilegedSocketAccessHelper$")
+	child := exec.Command(testfixture.Executable(t, 65534, 65534), "-test.run=^TestUnprivilegedSocketAccessHelper$")
 	child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
 	child.ExtraFiles = []*os.File{parent}
 	child.Env = append(os.Environ(), "GOASTER_SOCKET_ACCESS_HELPER="+filepath.Base(filepath.Dir(path)))
