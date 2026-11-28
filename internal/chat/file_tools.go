@@ -152,6 +152,7 @@ var listDirCodexTool = codexTool{
 
 var fileToolArgumentNames = map[string]map[string]bool{
 	loadRetainedImageCodexTool.Name: {"id": true},
+	readRetainedTextCodexTool.Name:  {"id": true, "offset": true, "length": true},
 	readFileCodexTool.Name:          {"path": true, "offset": true, "length": true},
 	writeFileCodexTool.Name:         {"path": true, "content": true, "overwrite": true},
 	editFileCodexTool.Name:          {"path": true, "old_text": true, "new_text": true},

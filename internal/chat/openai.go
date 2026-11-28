@@ -1512,6 +1512,7 @@ func (p *CodexProvider) registerBuiltInTools() {
 	p.mustRegisterBuiltInTool(shellExecuteCodexTool, executeShell)
 	p.mustRegisterBuiltInTool(loadSkillCodexTool, executeLoadSkill)
 	p.mustRegisterBuiltInTool(loadRetainedImageCodexTool, executeLoadRetainedImage)
+	p.mustRegisterBuiltInTool(readRetainedTextCodexTool, executeReadRetainedText)
 	p.mustRegisterBuiltInTool(telegramCommandReferenceCodexTool, executeTelegramCommandReference)
 	p.mustRegisterBuiltInTool(readFileCodexTool, executeReadFile)
 	p.mustRegisterBuiltInTool(writeFileCodexTool, executeWriteFile)

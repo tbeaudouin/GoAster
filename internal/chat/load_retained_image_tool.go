@@ -59,39 +59,8 @@ func executeLoadRetainedImage(ctx context.Context, arguments string) (string, er
 }
 
 func retainedImageDataURL(f attachment.RetainedFile) (string, bool) {
-	m := f.Metadata
-	if m.ValidateMetadata() != nil || filepath.Base(m.Path) != "content" {
-		return "", false
-	}
-	dir := filepath.Dir(m.Path)
-	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
-		return "", false
-	}
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil || resolved != dir {
-		return "", false
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return "", false
-	}
-	defer root.Close()
-	info, err = root.Lstat("content")
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() != m.Size {
-		return "", false
-	}
-	file, err := root.Open("content")
-	if err != nil {
-		return "", false
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, attachment.MaxBytes+1))
-	if err != nil || int64(len(data)) != m.Size {
-		return "", false
-	}
-	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != f.SHA256 {
+	data, ok := retainedUploadBytes(f)
+	if !ok {
 		return "", false
 	}
 	inspection, err := attachment.InspectBytes(data)
@@ -99,4 +68,43 @@ func retainedImageDataURL(f attachment.RetainedFile) (string, bool) {
 		return "", false
 	}
 	return "data:" + inspection.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(data), true
+}
+
+func retainedUploadBytes(f attachment.RetainedFile) ([]byte, bool) {
+	m := f.Metadata
+	if m.ValidateMetadata() != nil || filepath.Base(m.Path) != "content" {
+		return nil, false
+	}
+	dir := filepath.Dir(m.Path)
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+		return nil, false
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil || resolved != dir {
+		return nil, false
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, false
+	}
+	defer root.Close()
+	info, err = root.Lstat("content")
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() != m.Size {
+		return nil, false
+	}
+	file, err := root.Open("content")
+	if err != nil {
+		return nil, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, attachment.MaxBytes+1))
+	if err != nil || int64(len(data)) != m.Size {
+		return nil, false
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != f.SHA256 {
+		return nil, false
+	}
+	return data, true
 }
