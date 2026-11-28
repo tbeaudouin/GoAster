@@ -1511,6 +1511,7 @@ func (p *CodexProvider) registerBuiltInTools() {
 	p.mustRegisterBuiltInTool(webFetchCodexTool, p.executeWebFetchTool)
 	p.mustRegisterBuiltInTool(shellExecuteCodexTool, executeShell)
 	p.mustRegisterBuiltInTool(loadSkillCodexTool, executeLoadSkill)
+	p.mustRegisterBuiltInTool(loadRetainedImageCodexTool, executeLoadRetainedImage)
 	p.mustRegisterBuiltInTool(telegramCommandReferenceCodexTool, executeTelegramCommandReference)
 	p.mustRegisterBuiltInTool(readFileCodexTool, executeReadFile)
 	p.mustRegisterBuiltInTool(writeFileCodexTool, executeWriteFile)
@@ -2121,6 +2122,9 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 	if allowTools {
 		input = append(dailyMemoryItems(ctx), input...)
 	}
+	imageSink := make(chan string, 1)
+	ctx = context.WithValue(ctx, retainedImageSinkKey{}, imageSink)
+	imageIndex := -1
 	requestedCalls := 0
 	finishing := false
 	handlerFinishing := false
@@ -2155,6 +2159,11 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 		requestContext = withCodexToolProgress(requestContext, ToolProgress{Started: toolStartedCount, Completed: toolCompletedCount})
 		phase = "pre-stream"
 		response, status, err := p.requestCodex(requestContext, credential, model, input, allowTools && !finishing)
+		// Keep selected image bytes only for the immediate continuation request.
+		if imageIndex >= 0 {
+			input[imageIndex].Content = input[imageIndex].Content[:1]
+			imageIndex = -1
+		}
 		if err != nil {
 			if status == http.StatusUnauthorized && toolStarted {
 				if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2317,6 +2326,12 @@ func (p *CodexProvider) requestReply(ctx context.Context, credential Credential,
 
 		input = append(input, callItems...)
 		input = append(input, outputItems...)
+		select {
+		case imageURL := <-imageSink:
+			imageIndex = len(input)
+			input = append(input, codexInputItem{Type: "message", Role: "user", Content: []codexInputContent{{Type: "input_text", Text: retainedImageNotice}, {Type: "input_image", ImageURL: imageURL}}})
+		default:
+		}
 		finishing = requestedCalls == toolLimit || failedHandler
 		handlerFinishing = failedHandler
 	}
