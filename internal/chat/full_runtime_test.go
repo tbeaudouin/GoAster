@@ -44,6 +44,8 @@ func TestFullRuntimeSessionRequestIncludesToolsSkillsAndMemory(t *testing.T) {
 			"web_fetch":                  false,
 			"shell_execute":              false,
 			"load_skill":                 false,
+			"load_retained_image":        false,
+			"read_retained_text":         false,
 			"telegram_command_reference": false,
 			"read_file":                  false,
 			"write_file":                 false,
